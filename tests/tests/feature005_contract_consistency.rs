@@ -104,6 +104,33 @@ fn sql_fences(markdown: &str) -> String {
     out
 }
 
+/// The contents of only the *first* ```sql fenced block in a Markdown text.
+///
+/// `data-model.md` §5b documents the v10 migration's DDL in one fence and then
+/// shows an illustrative (non-executable) `WHERE` snippet in a second one —
+/// `sql_fences` would concatenate both, which is right for a section that
+/// documents one table's DDL in one fence but wrong here, where only the first
+/// fence is the migration text being held to word-for-word agreement.
+fn first_sql_fence(markdown: &str) -> String {
+    let mut out = String::new();
+    let mut in_fence = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if !in_fence && trimmed == "```sql" {
+            in_fence = true;
+            continue;
+        }
+        if in_fence && trimmed == "```" {
+            break;
+        }
+        if in_fence {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// The text of `data-model.md` between one `##`-level heading and the next,
 /// exclusive of both boundaries' following content — i.e. exactly one
 /// section. Hard-coded heading text is deliberate: the task names §5 as the
@@ -310,6 +337,33 @@ fn local_migration_tables(root: &Path) -> BTreeMap<String, String> {
     create_tables(&sql)
 }
 
+/// Local schema v9 — `crates/cairn-store/migrations/0009_pattern_cache.sql`,
+/// the owner's pulled-pattern cache (`cached_patterns`).
+fn local_migration_tables_v9(root: &Path) -> BTreeMap<String, String> {
+    let sql = strip_line_comments(&read(
+        root,
+        "crates/cairn-store/migrations/0009_pattern_cache.sql",
+    ));
+    create_tables(&sql)
+}
+
+/// Feature 002's local pattern table, `reusable_patterns`
+/// (`crates/cairn-store/migrations/0005_project_intelligence.sql`), read here
+/// only as the *other* table `cached_patterns` (v9) must never be confused
+/// with. This migration declares it `CREATE TABLE IF NOT EXISTS`, which
+/// `create_tables` does not parse (it would read the table name as `IF`) —
+/// rather than teach the parser a general `IF NOT EXISTS` grammar rule it
+/// needs nowhere else in this corpus, the one migration that writes it is
+/// normalized to plain `CREATE TABLE` before parsing.
+fn legacy_reusable_patterns_table(root: &Path) -> BTreeMap<String, String> {
+    let sql = strip_line_comments(&read(
+        root,
+        "crates/cairn-store/migrations/0005_project_intelligence.sql",
+    ));
+    let sql = sql.replace("CREATE TABLE IF NOT EXISTS", "CREATE TABLE");
+    create_tables(&sql)
+}
+
 fn data_model(root: &Path) -> String {
     read(
         root,
@@ -325,6 +379,19 @@ fn doc_server_tables(doc: &str) -> BTreeMap<String, String> {
 fn doc_local_tables(doc: &str) -> BTreeMap<String, String> {
     let section = section(doc, "## 5. Local schema v8", "## 5a.");
     create_tables(&strip_line_comments(&sql_fences(section)))
+}
+
+/// `data-model.md` §5a — the v9 `cached_patterns` cache table.
+fn doc_local_v9_tables(doc: &str) -> BTreeMap<String, String> {
+    let section = section(doc, "## 5a. Local schema v9", "## 5b.");
+    create_tables(&strip_line_comments(&sql_fences(section)))
+}
+
+/// `data-model.md` §5b's own text, unmodified — used both for the DDL
+/// comparison (its first fence) and for the prose phrase comparison (the
+/// section's own words), so callers slice it however either check needs.
+fn doc_local_v10_section(doc: &str) -> &str {
+    section(doc, "## 5b. Local schema v10", "## 6. Server schema v4")
 }
 
 /// Every `CREATE TABLE` the server migration defines has the same column set
@@ -400,6 +467,177 @@ fn every_local_table_matches_data_model_section_5_column_for_column() {
         assert!(
             migration.contains_key(name),
             "data-model.md §5 documents `{name}` but 0008_safe_events.sql does not create it"
+        );
+    }
+}
+
+/// The same comparison, extended to local schema v9:
+/// `0009_pattern_cache.sql`'s `cached_patterns` has the same columns *and* the
+/// same per-column definitions — which is what carries the embedded
+/// `CHECK (trust = 'sanitized')`, since that CHECK is written inline on the
+/// `trust` column rather than as a standalone table-level constraint, so it
+/// never appears in `ParsedTable::checks` and has to be caught in
+/// `column_defs` instead — as `data-model.md` §5a's copy of the same table.
+///
+/// **Falsified by** a column added, removed, retyped, or a `NOT NULL` /
+/// `DEFAULT` / `CHECK` changed on one side and not the other.
+#[test]
+fn cached_patterns_matches_data_model_section_5a_columns_and_checks() {
+    let root = workspace_root();
+    let migration = local_migration_tables_v9(&root);
+    let doc = doc_local_v9_tables(&data_model(&root));
+
+    let migration_body = migration
+        .get("cached_patterns")
+        .expect("0009_pattern_cache.sql creates `cached_patterns`");
+    let doc_body = doc
+        .get("cached_patterns")
+        .unwrap_or_else(|| panic!("data-model.md §5a documents no `cached_patterns` table"));
+
+    let m = parse_table(migration_body);
+    let d = parse_table(doc_body);
+
+    assert_eq!(
+        m.columns, d.columns,
+        "`cached_patterns`'s column set (name -> declared type) disagrees between \
+         0009_pattern_cache.sql and data-model.md §5a"
+    );
+    assert_eq!(
+        m.column_defs, d.column_defs,
+        "`cached_patterns`'s full column definitions disagree between \
+         0009_pattern_cache.sql and data-model.md §5a — this is what would miss a changed \
+         NOT NULL, DEFAULT, or the embedded `CHECK (trust = 'sanitized')` on `trust`, none of \
+         which a bare column-type comparison would notice"
+    );
+}
+
+/// `cached_patterns` (v9) is a genuinely separate table from `reusable_patterns`
+/// (Feature 002, v5) — not a second name for the same rows.
+///
+/// `data-model.md` §5a ("Why this is not `reusable_patterns`") states the
+/// design reason: `reusable_patterns` declares `signals`, `signal_digest`,
+/// `origin_ref` and `sanitization_report` NOT NULL, and those (with
+/// `source_memory_id` and `origin_deleted`) are exactly the six field names
+/// the privacy boundary refuses at the sync boundary (FR-708b,
+/// `contracts/knowledge-commands.md` §3.3) — so a server-pulled row can never
+/// be stored as a `reusable_patterns` row without fabricating content for a
+/// NOT NULL column the server never sent. This test checks that claim against
+/// the two migrations directly: the column sets differ, `cached_patterns`
+/// carries the server's canonical identity columns
+/// (`owner_user_id` + `content_key` + `pattern_id`), and none of the four
+/// refused local-only names leak into it.
+///
+/// **Falsified by** `cached_patterns` gaining any of `signals`,
+/// `signal_digest`, `origin_ref` or `sanitization_report`, or by the two
+/// tables' column sets becoming equal.
+#[test]
+fn cached_patterns_is_a_separate_table_from_reusable_patterns() {
+    let root = workspace_root();
+    let cache_migration = local_migration_tables_v9(&root);
+    let promoted_migration = legacy_reusable_patterns_table(&root);
+
+    let cached = parse_table(
+        cache_migration
+            .get("cached_patterns")
+            .expect("0009_pattern_cache.sql creates `cached_patterns`"),
+    );
+    let promoted = parse_table(
+        promoted_migration
+            .get("reusable_patterns")
+            .expect("0005_project_intelligence.sql creates `reusable_patterns`"),
+    );
+
+    let cached_names: BTreeSet<&String> = cached.columns.keys().collect();
+    let promoted_names: BTreeSet<&String> = promoted.columns.keys().collect();
+    assert_ne!(
+        cached_names, promoted_names,
+        "`cached_patterns` and `reusable_patterns` have identical column sets — they are \
+         supposed to be two different kinds of record, a local promoted row and a pulled \
+         canonical row, and this equality would mean the split collapsed"
+    );
+
+    for col in ["owner_user_id", "content_key", "pattern_id"] {
+        assert!(
+            cached.columns.contains_key(col),
+            "`cached_patterns` is missing `{col}`, the server's canonical identity column"
+        );
+    }
+
+    for col in [
+        "signals",
+        "signal_digest",
+        "origin_ref",
+        "sanitization_report",
+    ] {
+        assert!(
+            promoted.columns.contains_key(col),
+            "`reusable_patterns` is missing `{col}` — this test's premise (it carries the \
+             local-only names the privacy boundary refuses) no longer holds against \
+             0005_project_intelligence.sql"
+        );
+        assert!(
+            !cached.columns.contains_key(col),
+            "`cached_patterns` carries `{col}`, one of the field names the privacy boundary \
+             refuses (FR-708b) — a server-pulled row must never carry this local-only, \
+             pre-sanitization evidence"
+        );
+    }
+}
+
+/// Local schema v10: `event_spool` and `command_spool` gain
+/// `server_instance_id`, and the claim index is rebuilt to match both
+/// identities. The migration's DDL and `data-model.md` §5b's first fenced
+/// block are compared as normalized text rather than table-by-table, because
+/// the change here is two `ALTER TABLE ADD COLUMN`s and two rebuilt indexes on
+/// existing tables, not new `CREATE TABLE`s — `create_tables` has nothing to
+/// find in either.
+///
+/// The second half checks that the *documented isolation semantics* — not
+/// just the column and index text — are the same claim in both places, by
+/// requiring the migration's own explanatory phrases to also appear in
+/// `data-model.md` §5b's prose. A migration and a doc can agree on DDL while
+/// disagreeing on what the DDL means; this is what would catch that.
+///
+/// **Falsified by** the migration and the doc's DDL diverging in any column,
+/// index definition, or claim predicate column order, or by either side
+/// dropping the stated exact-deployment-isolation rule.
+#[test]
+fn v10_server_instance_columns_and_isolation_semantics_match_data_model_section_5b() {
+    let root = workspace_root();
+    let migration_raw = read(
+        &root,
+        "crates/cairn-store/migrations/0010_spool_server_instance.sql",
+    );
+    let migration_ddl = strip_line_comments(&migration_raw);
+
+    let doc_text = data_model(&root);
+    let section_5b = doc_local_v10_section(&doc_text);
+    let doc_ddl = strip_line_comments(&first_sql_fence(section_5b));
+
+    assert_eq!(
+        normalize_ws(&migration_ddl),
+        normalize_ws(&doc_ddl),
+        "0010_spool_server_instance.sql's DDL (the two `server_instance_id` columns and the \
+         two rebuilt claim indexes) disagrees, word for word, with data-model.md §5b's first \
+         fenced SQL block"
+    );
+
+    for phrase in [
+        "An endpoint is not an identity",
+        "safe first-binding rule",
+        "provisional id",
+    ] {
+        assert!(
+            migration_raw.contains(phrase),
+            "0010_spool_server_instance.sql no longer states {phrase:?} — this test's list of \
+             shared terms is stale"
+        );
+        assert!(
+            section_5b.contains(phrase),
+            "data-model.md §5b does not state {phrase:?} in those words, though \
+             0010_spool_server_instance.sql's own comments do — the documented \
+             exact-deployment-isolation semantics have drifted from the migration's stated \
+             reasoning"
         );
     }
 }

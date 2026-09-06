@@ -6,7 +6,8 @@
 **Spec**: [spec.md](./spec.md) — 272 functional requirements, 63 success criteria
 **Constitution**: v1.2.1
 **Created**: 2026-08-30
-**Status**: Draft — plan only. No tasks, no implementation.
+**Status**: Implemented. Every task in `tasks.md` is closed; the implementation is on this
+branch (`feature-005-spec`).
 
 ## Summary
 
@@ -25,7 +26,8 @@ centrally.
 **Language**: Rust (workspace: `cairn`, `cairnd`, `cairn-server`, `cairn-core`, `cairn-store`,
 `cairn-integrate`, `cairn-git`, `cairn-sys`), TypeScript/Next.js 15 + React 19 for `web/`.
 **Storage**: PostgreSQL (server, canonical), SQLite (edge spool, cache, machine state).
-**Local schema**: v7 → v8. **Server schema**: v3 → v4.
+**Local schema**: v7 → v8 (Foundation) → v9 (`cached_patterns`) → v10 (exact
+server-instance spool binding). **Server schema**: v3 → v4.
 **Transport**: HTTPS to the server; Unix socket / named pipe between hook and daemon.
 **Testing**: the existing `tests/` harness, which spawns prebuilt binaries against real repos.
 

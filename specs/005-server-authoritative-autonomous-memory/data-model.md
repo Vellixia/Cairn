@@ -1,6 +1,6 @@
 # Data Model — Feature 005
 
-**Local schema**: v7 → **v8**  |  **Server schema**: v3 → **v4**
+**Local schema**: v7 → v8 → v9 → **v10**  |  **Server schema**: v3 → **v4**
 
 Naming rule, binding everywhere below: **no field name may collide with a name the existing
 synchronization boundary refuses** (`crates/cairn-server/src/sync.rs:27-61`, refused
