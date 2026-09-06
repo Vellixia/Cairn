@@ -892,3 +892,112 @@ fn the_changes_feed_resumes_from_its_own_cursor() {
     );
     assert!(after["patterns"][0]["forgotten_at"].is_string(), "{after}");
 }
+
+/// The owner's pattern list is bounded **and** paginated, and the daemon's
+/// refill still gets everything (FR-895).
+///
+/// # The two callers this route serves, and why they are different
+///
+/// A screen must be able to page: FR-895 says list views are bounded *and*
+/// paginated, and "bounded" alone is what this route used to offer — the web
+/// panel asked for twenty-five and then told the reader the rest were in the
+/// CLI. That is a truthful bound and not a paginated view, and patterns were
+/// the only domain on that page with no paginated view anywhere.
+///
+/// The daemon is the other caller, and it must not be paged at all: it refills
+/// its local pattern cache from this route, so a page would silently truncate a
+/// durability guarantee to "your first twenty-five patterns". It asks for no
+/// bound and gets the lot.
+///
+/// **Paging is over `pattern_id`, not `updated_at`.** A cursor needs a stable
+/// order to resume from, and a promotion moves `updated_at` — a resumed page
+/// could then skip or repeat a row. `pattern_id` is `UUIDv5(owner ‖
+/// content_key)` and never moves. The reply says which order it applied so the
+/// two cannot be confused.
+///
+/// **Falsified by** a page that loses or repeats a pattern across the cursor,
+/// by an unbounded read that stops short, or by a reply that pages in one order
+/// while claiming another.
+#[test]
+fn the_pattern_list_pages_over_a_stable_order_and_still_answers_in_full() {
+    let pg = pg!();
+    let mut seeded: Vec<String> = Vec::new();
+    for i in 0..7 {
+        let id = Uuid::now_v7();
+        assert!(
+            pg.seed_pattern_with_id(&pg.owner, id, &format!("pattern number {i}")),
+            "the pattern fixture needs `shared_patterns`"
+        );
+        seeded.push(id.to_string());
+    }
+    seeded.sort();
+
+    // The daemon's read: no bound, everything, newest first.
+    let (all, status) = get_json_status_bearer(&pg.server.base, "/api/patterns", &pg.owner.token);
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(
+        all["returned"].as_u64(),
+        Some(7),
+        "an unbounded read must return every pattern the owner holds, or a \
+         cache that refills from it is silently truncated: {all}"
+    );
+    assert_eq!(
+        all["order"], "updated_at desc",
+        "the unbounded read changed order under the daemon: {all}"
+    );
+    assert!(
+        all["cursor"].is_null(),
+        "an unbounded read has nothing to resume from: {all}"
+    );
+
+    // A screen's read: bounded, ordered stably, and resumable.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for page in 0..6 {
+        let path = match &cursor {
+            Some(c) => format!("/api/patterns?limit=3&cursor={c}"),
+            None => "/api/patterns?limit=3".to_string(),
+        };
+        let (body, status) = get_json_status_bearer(&pg.server.base, &path, &pg.owner.token);
+        assert_eq!(status, 200, "page {page}: {body}");
+        assert_eq!(
+            body["order"], "pattern_id",
+            "a bounded read must say it paged over the stable order: {body}"
+        );
+        assert_eq!(
+            body["total"].as_u64(),
+            Some(7),
+            "every page states what the owner holds, which is how a reader \
+             knows there is more: {body}"
+        );
+        for p in body["patterns"].as_array().expect("patterns") {
+            seen.push(p["pattern_id"].as_str().expect("id").to_string());
+        }
+        match body["cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => break,
+        }
+    }
+
+    assert_eq!(
+        seen.len(),
+        7,
+        "paging lost or repeated a pattern: saw {seen:?}"
+    );
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted, seeded,
+        "the pages did not add up to exactly the owner's patterns"
+    );
+    assert_eq!(
+        seen,
+        {
+            let mut s = seen.clone();
+            s.sort();
+            s
+        },
+        "the pages did not arrive in the stable order the reply claimed"
+    );
+}

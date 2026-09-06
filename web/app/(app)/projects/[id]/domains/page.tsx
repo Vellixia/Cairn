@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Building2, FolderGit2, Lightbulb, User } from "lucide-react";
 import { api } from "@/lib/api";
 import {
@@ -46,10 +46,27 @@ export default function DomainsPage({
   // A bound is asked for explicitly here. The route serves every pattern when
   // none is given, because the daemon's cache refills from it — but a panel is
   // not a cache, and an unbounded list on a screen is the thing FR-895 forbids.
-  const patterns = useQuery({
+  /**
+   * Bounded **and** paginated (FR-895).
+   *
+   * This panel used to ask for one page of twenty-five and then say the rest
+   * were reachable through the CLI. Bounded, truthfully labelled, and still not
+   * a paginated view — and patterns were the only domain here with no paginated
+   * view anywhere in the web at all. `/api/patterns` now pages over
+   * `pattern_id`, which is stable where `updated_at` is not, so this reads it
+   * the same way the team page reads its own feed.
+   *
+   * The daemon's cache refill is untouched: it asks for no bound and still gets
+   * every pattern, newest first.
+   */
+  const patterns = useInfiniteQuery({
     queryKey: ["domain-patterns"],
-    queryFn: () => api.patterns(PAGE),
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam }) => api.patterns({ limit: PAGE, cursor: pageParam }),
+    getNextPageParam: (last) => last.cursor ?? undefined,
   });
+  const patternPages = patterns.data?.pages ?? [];
+  const patternRows = patternPages.flatMap((page) => page.patterns);
   const team = useQuery({
     queryKey: ["domain-team"],
     queryFn: () => api.teamKnowledge({ limit: PAGE }),
@@ -161,7 +178,7 @@ export default function DomainsPage({
           {patterns.data && (
             <>
               <ul className="space-y-2" data-testid="domain-patterns-list">
-                {patterns.data.patterns.map((p) => (
+                {patternRows.map((p) => (
                   <li
                     key={p.pattern_id}
                     className="rounded-md border p-2"
@@ -190,17 +207,25 @@ export default function DomainsPage({
                   </li>
                 ))}
               </ul>
-              <Nothing when={patterns.data.patterns.length === 0}>
+              <Nothing when={patternRows.length === 0}>
                 You have promoted no patterns.
               </Nothing>
-              {patterns.data.returned < patterns.data.total && (
-                <p
-                  className="text-muted-foreground mt-3 text-xs"
-                  data-testid="domain-patterns-truncated"
-                >
-                  Showing {patterns.data.returned} of {patterns.data.total}. The
-                  rest are reachable through the CLI.
-                </p>
+              {patterns.hasNextPage && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground text-xs underline"
+                    data-testid="domain-patterns-more"
+                    disabled={patterns.isFetchingNextPage}
+                    onClick={() => patterns.fetchNextPage()}
+                  >
+                    {patterns.isFetchingNextPage
+                      ? "Loading…"
+                      : `Show more (${patternRows.length} of ${
+                          patternPages[0]?.total ?? patternRows.length
+                        })`}
+                  </button>
+                </div>
               )}
             </>
           )}

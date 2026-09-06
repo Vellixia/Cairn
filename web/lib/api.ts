@@ -215,8 +215,8 @@ export const api = {
    * asks for a page and compares `returned` against `total` to know whether it
    * saw everything; omitting `limit` still returns the lot.
    */
-  patterns: (limit?: number) =>
-    request<PatternList>(`/api/patterns${queryString({ limit })}`),
+  patterns: (params: PageQuery = {}) =>
+    request<PatternList>(`/api/patterns${queryString({ ...params })}`),
   teamKnowledge: (params: PageQuery = {}) =>
     request<TeamKnowledgePage>(`/api/team/knowledge${queryString({ ...params })}`),
 
@@ -763,6 +763,14 @@ export interface PatternList {
   returned: number;
   /** The bound applied, or null when none was asked for. */
   limit: number | null;
+  /**
+   * Which order this reply is in. A bounded read pages over `pattern_id`,
+   * which is stable; an unbounded one is newest-first. Said rather than
+   * assumed, so a paging caller cannot read one as the other.
+   */
+  order: "pattern_id" | "updated_at desc";
+  /** Where to resume, or null when this page is the last. */
+  cursor: string | null;
   patterns: Pattern[];
 }
 

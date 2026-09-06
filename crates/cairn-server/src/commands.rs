@@ -1165,19 +1165,47 @@ pub async fn list_patterns(
     // which bound was applied and whether anything was left out, which is what
     // lets a UI page without the server having to guess on its behalf.
     let limit = q.limit.map(|n| n.clamp(1, PATTERN_PAGE_MAX));
-    let rows = sqlx::query(&format!(
-        "SELECT {PATTERN_WIRE_COLUMNS}
-           FROM shared_patterns
-          WHERE owner_user_id = $1 AND forgotten_at IS NULL
-          ORDER BY updated_at DESC, pattern_id
-          LIMIT $2"
-    ))
-    // `NULL` is "no limit" to PostgreSQL's `LIMIT`, which is exactly the
-    // absent-means-all rule without a second statement to keep in step.
-    .bind(user.id())
-    .bind(limit)
-    .fetch_all(&state.pool)
-    .await?;
+
+    // **Two modes, and the caller's own request picks one** (FR-895).
+    //
+    // A caller that asks for a bound is paging, and paging needs a *stable*
+    // order to resume from: `updated_at` is not one, because a promotion moves
+    // a row and a resumed page would then skip or repeat. So a bounded read is
+    // ordered by `pattern_id`, which is `UUIDv5(owner ‖ content_key)` and never
+    // moves, and the reply carries the cursor to resume from and says which
+    // order it applied.
+    //
+    // A caller that asks for no bound is the daemon refilling its pattern
+    // cache, and it gets the lot, newest first, exactly as before. That is why
+    // the page size cannot simply be defaulted: a default would silently
+    // truncate a durability guarantee to its first page.
+    let paging = limit.is_some() || q.cursor.is_some();
+    let after = q.cursor.clone().unwrap_or_default();
+    let rows = if paging {
+        sqlx::query(&format!(
+            "SELECT {PATTERN_WIRE_COLUMNS}
+               FROM shared_patterns
+              WHERE owner_user_id = $1 AND forgotten_at IS NULL
+                AND ($3 = '' OR pattern_id > $3::uuid)
+              ORDER BY pattern_id
+              LIMIT $2"
+        ))
+        .bind(user.id())
+        .bind(limit.unwrap_or(PATTERN_PAGE_MAX))
+        .bind(&after)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query(&format!(
+            "SELECT {PATTERN_WIRE_COLUMNS}
+               FROM shared_patterns
+              WHERE owner_user_id = $1 AND forgotten_at IS NULL
+              ORDER BY updated_at DESC, pattern_id"
+        ))
+        .bind(user.id())
+        .fetch_all(&state.pool)
+        .await?
+    };
     let held: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM shared_patterns
           WHERE owner_user_id = $1 AND forgotten_at IS NULL",
@@ -1186,6 +1214,14 @@ pub async fn list_patterns(
     .fetch_one(&state.pool)
     .await?;
     let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, false)).collect();
+    // The cursor to resume from, and only when there is somewhere to resume to:
+    // a full page means there may be more, a short page means there is not.
+    let next_cursor = match (paging, rows.last()) {
+        (true, Some(last)) if rows.len() as i64 >= limit.unwrap_or(PATTERN_PAGE_MAX) => {
+            Some(sqlx::Row::get::<Uuid, _>(last, "pattern_id").to_string())
+        }
+        _ => None,
+    };
     Ok(Json(json!({
         // What this page holds, and what the owner has. Equal unless a bound was
         // asked for and reached — which is how a caller knows to ask for more
@@ -1193,6 +1229,10 @@ pub async fn list_patterns(
         "total": held,
         "returned": patterns.len(),
         "limit": limit,
+        // Which order this reply is in, said rather than assumed: a paging
+        // caller must not read an id-ordered page as a recency-ordered one.
+        "order": if paging { "pattern_id" } else { "updated_at desc" },
+        "cursor": next_cursor,
         "patterns": patterns,
     })))
 }
@@ -1200,15 +1240,20 @@ pub async fn list_patterns(
 /// The largest page `GET /api/patterns` will serve when a bound is asked for.
 const PATTERN_PAGE_MAX: i64 = 200;
 
-/// The one optional parameter the pattern list takes.
+/// The two optional parameters the pattern list takes.
 ///
-/// Deliberately not a cursor. A cursor implies a stable order to resume from,
-/// and this list is ordered by `updated_at` — which a promotion moves, so a
-/// resumed page could skip or repeat. A caller that needs to follow changes has
-/// the changes feed, which is cursored precisely because its ordering is stable.
+/// The cursor is over `pattern_id`, not over `updated_at`. A cursor implies a
+/// stable order to resume from, and `updated_at` is not stable — a promotion
+/// moves a row, so a resumed page could skip or repeat. `pattern_id` is
+/// `UUIDv5(owner ‖ content_key)` and never moves, so it is the order a bounded
+/// read pages over; the reply says which order it applied so a caller cannot
+/// mistake one for the other. A caller that needs to follow *changes* still has
+/// the changes feed, which is cursored over `(changed_at, id)` for its own
+/// reasons.
 #[derive(serde::Deserialize)]
 pub struct PatternListQuery {
     limit: Option<i64>,
+    cursor: Option<String>,
 }
 
 /// `GET /api/sync/changes/patterns` — the feed a local pattern cache refills
