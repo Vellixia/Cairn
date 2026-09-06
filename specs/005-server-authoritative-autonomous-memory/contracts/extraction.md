@@ -560,9 +560,18 @@ Rules that follow from the evidence:
   text, so its `failure`, `convention` and `procedure` learning works exactly as the other two
   agents'.
 
-**Consequence for SC-701a.** Its scenario set is drawn from the agents that emit semantic
+**Consequence for SC-701a.** Its corpus is drawn from the agents that emit semantic
 signals — Claude Code and Codex CLI. OpenCode remains in SC-701 and SC-706, which test capture,
 and its exclusion here is recorded in the capture matrix rather than left implicit.
+
+That corpus is a **frozen holdout**, committed in a change that alters no production behaviour
+before the run that grades it and before any production change made in response to it
+(`spec.md` SC-701a). It lives in `tests/feature005/corpora/sc701a-holdout.json`, and the
+criterion is measured on durable `memories` rows — R7's decisions and R8's conventions — not on
+the signals this section produces. R8's shape is what the corpus is built around rather than
+the other way about: three `(kind, subject, object)` pairs repeated across two sessions each,
+because a standing convention rests on repetition and weakening that to fit a corpus would be
+changing the product to pass its own test.
 
 The material from these fields is read in memory during the hook invocation that already parses
 and redacts it, and is discarded when §13.7 completes. No vendor field named here is ever

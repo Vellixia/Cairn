@@ -9,9 +9,23 @@
 //! justified against), and the transient text a `UserPromptSubmit` or `Stop`
 //! payload would actually carry. No PostgreSQL, no daemon.
 //!
-//! The scenario set is fixed in [`SCENARIOS`] below, *before* any assertion
-//! reads it, so the population SC-701a and SC-701b are measured against
-//! cannot be narrowed after the fact.
+//! # This file is the capture-layer contract, and not SC-701a's population
+//!
+//! [`SCENARIOS`] proves the vendor field map, the token justification and the
+//! three decline reasons — including four deliberately adversarial rows, which
+//! is precisely why it is not the population SC-701a counts against: a scenario
+//! expected to produce nothing cannot be evidence that something is produced.
+//!
+//! An earlier version of this header called these rows "pre-registered", and
+//! git history does not support it: extraction landed in `ec43064`, capture in
+//! `00e7881`, and this table first appeared in `ce38e2f`, after both. The claim
+//! is withdrawn rather than reworded. SC-701a's frozen holdout corpus now lives
+//! in `tests/feature005/corpora/sc701a-holdout.json` and is proved on durable
+//! `memories` by `tests/tests/feature005_semantic_durable.rs`, under the freeze
+//! rule SC-701a states.
+//!
+//! What this table still is: twenty capture-layer cases, fixed above the
+//! assertions that read them, so no assertion here can narrow its own input.
 
 use cairn_core::event::{
     ChangeKind, DecisionKind, DeclineReason, EventContent, EventKind, FileIdentity, InstructionKind,
@@ -63,9 +77,9 @@ struct Scenario {
     expect: Expect,
 }
 
-/// Twenty pre-registered sessions: sixteen in which a decision or a standing
-/// instruction is expressed and then acted on (the population SC-701a counts
-/// against), and four adversarial ones exercising the three decline reasons
+/// Twenty capture-layer cases: sixteen in which a decision or a standing
+/// instruction is expressed, and four adversarial ones exercising the three
+/// decline reasons
 /// `contracts/extraction.md` §13.7 step 6 distinguishes. Claude Code and
 /// Codex CLI only — OpenCode emits no semantic signals at all (FR-727e) and
 /// is covered instead in `feature005_capture_matrix.rs`.
@@ -394,8 +408,9 @@ fn declined(out: &cairn_core::event::CaptureOutput, role: SourceRole) -> Option<
 #[test]
 fn the_pre_registered_scenario_set_has_at_least_twenty_sessions_drawn_only_from_claude_code_and_codex(
 ) {
-    // SC-701a's population, and FR-727e's exclusion: OpenCode emits no
-    // semantic signals, so it has no place in this table.
+    // FR-727e's exclusion: OpenCode emits no semantic signals, so it has no
+    // place in this table. (SC-701a's own population is the frozen holdout
+    // corpus, not this one.)
     assert!(
         SCENARIOS.len() >= 20,
         "the pre-registered set must have at least twenty sessions"
@@ -410,14 +425,21 @@ fn the_pre_registered_scenario_set_has_at_least_twenty_sessions_drawn_only_from_
 }
 
 // ---------------------------------------------------------------------------
-// SC-701a
+// The capture-layer yield
 // ---------------------------------------------------------------------------
 
+/// Most of this table produces the signal it declared.
+///
+/// **Not SC-701a.** That criterion is about durable records and is proved in
+/// `feature005_semantic_durable.rs` against the frozen holdout corpus. This is
+/// the weaker, still useful statement it used to be mistaken for: the mapping
+/// yields what these cases say it should, at the capture layer, before anything
+/// is persisted anywhere.
 #[test]
-fn at_least_fourteen_of_the_twenty_scenarios_produce_a_record_matching_its_declared_expectation() {
-    // SC-701a. Counted independently of whether a scenario's *own* row
-    // expected a match or a decline: the criterion is about the population as
-    // a whole, not about this table grading its own homework.
+fn most_of_the_capture_cases_produce_the_signal_they_declared() {
+    // Counted independently of whether a scenario's *own* row expected a match
+    // or a decline: the point is the table as a whole, not each row grading its
+    // own homework.
     let mut matched = 0usize;
     let mut shortfalls: Vec<&'static str> = Vec::new();
 
@@ -467,11 +489,13 @@ fn at_least_fourteen_of_the_twenty_scenarios_produce_a_record_matching_its_decla
         }
     }
 
+    // Sixteen of the twenty rows are positives and four are deliberate
+    // declines, so sixteen is the ceiling and the floor is stated against that
+    // rather than against the table's length.
     assert!(
         matched >= 14,
-        "only {matched}/{} scenarios produced a matching decision or instruction; \
-         scenarios that fell short: {shortfalls:?}",
-        SCENARIOS.len()
+        "only {matched}/16 positive capture cases produced a matching decision or \
+         instruction; cases that fell short: {shortfalls:?}"
     );
 }
 

@@ -148,11 +148,17 @@
       "location": "tests/tests/feature005_semantic_signals.rs::SCENARIOS",
       "status": "present",
       "notes": [
-        "The ingest half is present. What is owed is the extraction half: that",
-        "an accepted signal actually produces the decision it names.",
-        "Completed by T041. The twenty pre-registered sessions live in SCENARIOS,",
-        "drawn only from the agents that emit semantic signals (FR-727e), with",
-        "the ingest-side cases in feature005_ingest.rs unchanged beside them."
+        "The capture-layer half. These scenarios prove the vendor field map, the",
+        "token justification and the three decline reasons, and they include",
+        "adversarial cases deliberately \u2014 which is exactly why they are not SC-701a's",
+        "population: a scenario expected to produce nothing cannot be evidence that",
+        "something is produced.",
+        "",
+        "Corrected: an earlier note called these twenty rows 'pre-registered'. Git",
+        "history does not support it \u2014 extraction and capture were implemented in",
+        "ec43064 and 00e7881, and this table first appeared in ce38e2f, after both.",
+        "SC-701a's population now lives in `sc701a_holdout` below, frozen under the",
+        "rule SC-701a states."
       ]
     },
     "paraphrase_pairs": {
@@ -206,9 +212,42 @@
         "author_mismatch",
         "capability_blocked"
       ],
-      "location": "tests/tests/feature005_migration.rs",
-      "status": "owed",
-      "owed_by": "T138-T155 (US7)"
+      "location": "tests/src/feature005.rs::LegacyV7 (a real v7 store, built by the shipped migrations and populated), driven by tests/tests/feature005_migration.rs, feature005_pattern_migration.rs and feature005_migration_restart.rs",
+      "status": "present",
+      "notes": [
+        "Completed by T138-T155. The fixture runs the shipped migrations to v7,",
+        "populates the store, and swaps it under a stopped daemon so the current",
+        "build migrates it in place -- a real prior schema rather than a hand-written",
+        "approximation of one."
+      ]
+    },
+    "sc701a_holdout": {
+      "criterion": "SC-701a, SC-701b",
+      "requires": "exactly twenty qualifying sessions, no adversarial cases, both signal-emitting vendors, and at least fourteen producing a matching durable record",
+      "qualifying_sessions": 20,
+      "minimum_durable_matches": 14,
+      "must_cover": [
+        "decision expressed in the settled assistant field",
+        "standing instruction expressed in the user-prompt field",
+        "vocabulary established by an earlier event",
+        "an action after the signal",
+        "claude_code",
+        "codex",
+        "repeated require/forbid pairs reaching R8's two-session threshold"
+      ],
+      "location": "tests/feature005/corpora/sc701a-holdout.json",
+      "status": "present",
+      "notes": [
+        "Frozen rather than pre-registered, and the difference is stated in SC-701a:",
+        "the corpus is committed in a change that alters no production behaviour,",
+        "before the run that grades it and before any production change made in",
+        "response to it. 'Fixed before implementation' is the stronger claim and is",
+        "not available retroactively to a corpus being repaired after the fact.",
+        "",
+        "Adversarial decline cases are deliberately absent. They stay in",
+        "decision_signals above, where they belong, and never occupy a slot in this",
+        "denominator."
+      ]
     }
   }
 }

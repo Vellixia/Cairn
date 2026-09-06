@@ -1378,24 +1378,63 @@ secrets persisted, zero duplicates — is measured over the whole corpus exercis
 feature's tests, and a single counterexample fails it.
 
 - **SC-701**: On a fresh project, a single coding session that invokes no Cairn tool produces at
-  least one durable knowledge record whose claim is judged accurate by a reviewer against a
-  pre-registered rubric, for every agent FR-838a commits to automatic capture — Claude Code,
-  Codex CLI and OpenCode. Accuracy is a reviewed judgement recorded as such; the automated
-  portion asserts existence, provenance resolution and rubric completion, and fails if any is
-  missing.
-- **SC-701a**: Over a pre-registered scenario set of at least twenty sessions in which a
-  decision or a standing instruction is expressed and then acted on, at least **fourteen**
-  produce a durable `decision` or `convention` record whose subject and object tokens match the
-  scenario's declared expectation. The population is the agents that emit semantic signals —
+  least one durable knowledge record whose claim is judged accurate by an **independent
+  reviewer** against a rubric fixed before the run, for every agent FR-838a commits to
+  automatic capture — Claude Code, Codex CLI and OpenCode. Accuracy is a reviewed judgement
+  recorded as such; the automated portion asserts existence, provenance resolution and rubric
+  completion, and fails if any is missing.
+
+  **Independent means not the process being graded.** The requirement was written as "a human
+  reviewer", and humanity was never the property that made it work — independence was. A
+  reviewer may be a person or an external agent; what it may not be is the implementation or
+  test process whose output is under review, because that is self-grading whatever species
+  performs it. The invariants are therefore stated directly: the test never scores semantic
+  accuracy mechanically; the reviewer sees only the durable claim and the safe events it
+  cites; and the reviewer's *type* and the date are recorded with the verdict, so a reader can
+  weigh it. This is the same rule Principle IX already applies to knowledge — verification is
+  never claimed by the process that proposed it.
+- **SC-701a**: Over a **frozen holdout corpus** of at least twenty *qualifying* sessions in
+  which a decision or a standing instruction is expressed and then acted on, at least
+  **fourteen** produce a durable `decision` or `convention` record whose subject and object
+  tokens match the scenario's declared expectation.
+
+  **Frozen means committed before it is graded.** The corpus must be committed in a change that
+  alters no production behaviour, and that commit must precede both the acceptance run that
+  grades it and any production change made in response to it. After that, a scenario's inputs
+  or expectations may be edited only as a defect *in the corpus*, called out as such — never
+  because production fails them. "Fixed before implementation" is the stronger form and is what
+  SC-736's paraphrase corpus has; it is not available retroactively to a criterion whose corpus
+  is being repaired after the fact, and claiming it would be the false statement this rule
+  exists to prevent.
+
+  **Qualifying** excludes adversarial cases. A scenario that is expected to produce nothing
+  cannot be evidence that something is produced, so declines belong in their own population and
+  never in this denominator. Each qualifying session carries, in order: earlier safe structural
+  evidence sufficient to establish the session's vocabulary, the real vendor field carrying the
+  semantic material, the signal itself, and at least one post-signal action showing the
+  decision or instruction was then acted on. The vocabulary seed and the action are different
+  roles and one cannot serve as the other.
+
+  **Durable means the record, not the signal.** The criterion is met by a row in `memories`
+  with `origin_kind = 'consolidated'`, the expected type, the expected normalized keys, and
+  provenance resolving to the session's own accepted events. Counting captured signals, or
+  candidates, or anything short of the persisted record, measures a different claim. The population is the agents that emit semantic signals —
   Claude Code and Codex CLI (FR-727e); OpenCode is excluded here and remains in SC-701 and
   SC-706, which test capture. This criterion exists because SC-701 can be satisfied by a
   structural record alone — a test-failure `failure` memory — which would leave the feature's
   actual purpose untested. A run in which every produced record is structural **fails**
   SC-701a even if it passes SC-701.
-- **SC-701b**: Across the same scenario set, zero durable records contain any word from the
+- **SC-701b**: Across the same frozen corpus, zero durable records contain any word from the
   originating prompt or assistant turn that is not independently present in that session's
   derived vocabulary. This is the falsifiable form of the claim that reasoning does not cross
-  the boundary.
+  the boundary, and it is measured on the durable record rather than on the captured signal.
+
+  A rule's own sentence is not source material. R7 and R8 write fixed templates with two token
+  slots, and a preposition the template shares with the prompt did not cross anything. The
+  check is therefore exact — the durable content must equal the rule's rendered template for
+  the declared identity, so any word beyond the template and its two tokens is a leak by
+  construction — and the two tokens must each be established by that session's own accepted
+  events.
 - **SC-702**: 100% of durable records produced by consolidation resolve to the session and the
   events they were derived from; zero have unresolvable provenance.
 - **SC-703**: Re-running consolidation over an unchanged set of accepted events produces zero

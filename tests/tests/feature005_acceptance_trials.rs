@@ -1,5 +1,5 @@
 //! T157: at least ten real-repository trials per supported agent, and the
-//! material a human reviewer needs to apply the pre-registered accuracy
+//! material an independent reviewer needs to apply the accuracy
 //! rubric (SC-701; SC-708 and SC-715 are covered by their own dedicated
 //! tests — `feature005_us2_automatic_recall.rs` and `feature005_delivery.rs`
 //! for delivery, `feature005_outage.rs`, `feature005_us4_fail_soft.rs` and
@@ -23,8 +23,11 @@
 //! (`tests/feature005/us1-accuracy-rubric.json`) marks `mechanically` are
 //! evaluated and asserted here, per record, across all ten trials. The two
 //! it marks `by_review` — whether the claim is actually true of the project,
-//! and whether it says no more than the events establish — are a human
-//! judgement. This test does not evaluate them; it exports, for every
+//! and whether it says no more than the events establish — belong to an
+//! **independent reviewer**: one that is not this implementation or this test.
+//! Independence, not humanity, is the property the rule rests on (SC-701), and
+//! a reviewer may be a person or an external agent so long as it is not the
+//! process being graded. This test does not evaluate them; it exports, for every
 //! trial that produced a record, the record's kind and claim and its cited
 //! safe events, so a reviewer can perform that judgement afterward. Writing a
 //! number next to `by_review` here would be exactly the manufactured
@@ -616,9 +619,9 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
 ///
 /// Run with `--nocapture` to read it: this is the source `acceptance-
 /// results.md` is transcribed from by hand, not a file this test writes
-/// itself, because SC-701's rubric completion means a human states what was
-/// found — a test that wrote its own results file would be reviewing itself
-/// exactly as the `by_review` criteria warn against.
+/// itself, because SC-701's rubric completion means an independent reviewer
+/// states what was found — a test that wrote its own results file would be
+/// reviewing itself exactly as the `by_review` criteria warn against.
 fn report(r: &AgentReport) {
     println!("=== T157 acceptance trials: {} ===", r.agent);
     println!(
