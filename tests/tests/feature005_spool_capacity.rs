@@ -46,7 +46,7 @@ use cairn_store::spool::{
     SpoolCapacity,
 };
 use cairn_store::Store;
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use uuid::Uuid;
 
 /// The server instance every fixture in this file queues for and drains as.
@@ -229,6 +229,83 @@ impl Fixture {
 ///
 /// `marker` travels inside the payload, so a test can ask afterwards whether
 /// any trace of a shed event survived anywhere.
+/// The fixture's constant-width guarantee, asserted rather than assumed.
+///
+/// The five-event byte arithmetic in
+/// `overflow_sheds_the_oldest_rows_first_and_counts_every_one_of_them` is only
+/// valid while every capture event serializes to the same length, and the one
+/// field that can vary is the timestamp: chrono writes a `DateTime<Utc>` with
+/// `AutoSi`, which uses however many of 0, 3, 6 or 9 fractional digits are
+/// needed. An instant whose nanoseconds end in three zeros therefore prints
+/// three bytes shorter than one that does not — about one event in a thousand,
+/// which is exactly how the precondition failed with `[399, 396]`.
+///
+/// Proving it this way rather than by re-running the suite is deliberate: at
+/// one in a thousand, a green run says nothing, and only a test that picks the
+/// unlucky instant on purpose can hold the fix in place.
+///
+/// **Falsified by** removing the `with_nanosecond` pin from
+/// [`fixed_width_now`]: the first assertion (that the raw instants *do* differ
+/// in width) is what makes the second one meaningful, and the second then
+/// fails.
+#[test]
+fn a_capture_events_serialized_timestamp_is_always_the_same_width() {
+    // Two instants in the same second: one with three trailing zero nanos, one
+    // without. These are the two cases `AutoSi` renders differently.
+    let unlucky = chrono::DateTime::from_timestamp(1_788_000_000, 123_456_000).expect("an instant");
+    let ordinary =
+        chrono::DateTime::from_timestamp(1_788_000_000, 123_456_789).expect("an instant");
+
+    let width = |at: chrono::DateTime<Utc>| {
+        serde_json::to_string(&at)
+            .expect("a timestamp serializes")
+            .len()
+    };
+
+    assert_ne!(
+        width(unlucky),
+        width(ordinary),
+        "chrono no longer varies the fractional width, so the pin in \
+         `fixed_width_now` may be unnecessary — but check before removing it"
+    );
+    assert_eq!(
+        width(fixed_width(unlucky)),
+        width(fixed_width(ordinary)),
+        "the pin `fixed_width_now` applies does not make the serialized \
+         timestamp constant-width, so the five-event byte arithmetic can still \
+         lose its precondition"
+    );
+}
+
+/// `Utc::now()`, with a sub-second component chosen so its serialized form is
+/// always nine fractional digits wide.
+///
+/// See [`capture_event`] for why the width has to be constant.
+fn fixed_width_now() -> chrono::DateTime<Utc> {
+    fixed_width(Utc::now())
+}
+
+/// The pin itself, separated from the clock so a test can hand it the unlucky
+/// instant on purpose rather than wait a thousand runs for one.
+fn fixed_width(at: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    at.with_nanosecond(123_456_789).unwrap_or(at)
+}
+
+/// A capture-class event of a **fixed serialized size**.
+///
+/// The size has to be fixed because one test admits five of these and does
+/// byte arithmetic over `payload_bytes` (`overflow_sheds_the_oldest_rows_first`
+/// asserts the precondition before relying on it). Everything here is already
+/// constant-width — `Uuid::simple` is always 32 hex characters — except the
+/// timestamp, and chrono serializes a `DateTime<Utc>` with `AutoSi`: 0, 3, 6 or
+/// 9 fractional digits, whichever is enough. A `Utc::now()` whose nanoseconds
+/// happen to end in three zeros therefore prints three bytes shorter than its
+/// siblings, roughly once in a thousand events, and the precondition failed
+/// with `[399, 396]` — a real nondeterminism in the fixture, not in the spool.
+///
+/// Pinning the sub-second component to a value with no trailing zeros forces
+/// `AutoSi` to nine digits every time. The instant stays "now" so nothing that
+/// reasons about event age changes; only its printed width becomes constant.
 fn capture_event(session: Uuid, marker: &str) -> SafeCanonicalEvent {
     SafeCanonicalEvent {
         // Both placeholders: the store assigns identity and ordinal, and a
@@ -240,7 +317,7 @@ fn capture_event(session: Uuid, marker: &str) -> SafeCanonicalEvent {
         agent: EventAgent::ClaudeCode,
         vendor_event: None,
         session_id: session,
-        occurred_at: Utc::now(),
+        occurred_at: fixed_width_now(),
         content: Some(EventContent::File {
             repo_file: Some(format!("src/{marker}.rs")),
             repo_file_from: None,

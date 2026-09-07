@@ -397,7 +397,7 @@ impl Daemon {
         Ok(())
     }
 
-    /// The account this machine is authenticated as, or `None`.    /// The account this machine is authenticated as, or `None`.
+    /// The account this machine is authenticated as, or `None`.
     ///
     /// No fallback, by design: a caller that needs an account and has none must
     /// refuse, not substitute. See [`owner_identity`](Self::owner_identity).

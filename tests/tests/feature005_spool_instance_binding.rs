@@ -198,21 +198,54 @@ fn work_queued_for_one_server_instance_is_never_delivered_to_another() {
         !bound_events.is_empty() && !bound_commands.is_empty(),
         "nothing was queued, so every assertion below would pass vacuously"
     );
+    // **Asked as "nothing is bound to anything else", not as a count.**
+    //
+    // These used to compare an all-states `server_instance_id = s1` count
+    // against `bound_events`, which selects only `pending`/`in_flight`/
+    // `failed`. Those two are equal only while nothing has been delivered yet
+    // — and this test guarantees the opposite a few lines above, where
+    // `settle_syncing` waits for the session to actually reach S1 before the
+    // outage. A row that was bound to S1 *and* delivered is the arrangement
+    // working, but it counts on the left and not on the right, so the
+    // assertion failed as `left: 3, right: 2` whenever the drain won the race
+    // — never in isolation, only under a loaded full-workspace run.
+    //
+    // The form below is strictly stronger than the count it replaces: it holds
+    // every row in every state to the binding, so a row bound to the wrong
+    // instance or left unbound fails it, in states the old comparison could
+    // not see at all. What it no longer does is mistake delivery for a missing
+    // binding.
     assert_eq!(
         d.count(&format!(
             "SELECT CAST(COUNT(*) AS TEXT) FROM event_spool
-              WHERE server_instance_id = '{s1}'"
-        )) as usize,
-        bound_events.len(),
-        "an event was queued without being bound to the instance it was queued for"
+              WHERE server_instance_id IS DISTINCT FROM '{s1}'"
+        )),
+        0,
+        "an event was queued without being bound to the instance it was queued \
+         for; bindings={:?} states={:?}",
+        d.column(
+            "SELECT COALESCE(server_instance_id, '<unbound>') || ' x'
+                    || CAST(COUNT(*) AS TEXT)
+               FROM event_spool GROUP BY server_instance_id"
+        ),
+        d.column("SELECT state || ' x' || CAST(COUNT(*) AS TEXT) FROM event_spool GROUP BY state"),
     );
     assert_eq!(
         d.count(&format!(
             "SELECT CAST(COUNT(*) AS TEXT) FROM command_spool
-              WHERE server_instance_id = '{s1}'"
-        )) as usize,
-        bound_commands.len(),
-        "a command was queued without being bound to the instance it was queued for"
+              WHERE server_instance_id IS DISTINCT FROM '{s1}'"
+        )),
+        0,
+        "a command was queued without being bound to the instance it was queued \
+         for; bindings={:?} states={:?}",
+        d.column(
+            "SELECT COALESCE(server_instance_id, '<unbound>') || ' x'
+                    || CAST(COUNT(*) AS TEXT)
+               FROM command_spool GROUP BY server_instance_id"
+        ),
+        d.column(
+            "SELECT state || ' x' || CAST(COUNT(*) AS TEXT) FROM command_spool GROUP BY state"
+        ),
     );
 
     // -----------------------------------------------------------------------
@@ -499,7 +532,15 @@ fn work_queued_before_any_instance_binds_once_and_is_not_rebound() {
     assert_eq!(
         d.count("SELECT CAST(COUNT(*) AS TEXT) FROM event_spool WHERE server_instance_id IS NULL"),
         0,
-        "a row stayed unbound after a drain against an established instance"
+        "a row stayed unbound after a drain against an established instance. \
+         bindings={:?} states={:?} row_accounts={:?}",
+        d.column(
+            "SELECT COALESCE(server_instance_id, '<unbound>') || ' x'
+                    || CAST(COUNT(*) AS TEXT)
+               FROM event_spool GROUP BY server_instance_id"
+        ),
+        d.column("SELECT state || ' x' || CAST(COUNT(*) AS TEXT) FROM event_spool GROUP BY state"),
+        d.column("SELECT DISTINCT account_id FROM event_spool"),
     );
     assert_eq!(
         d.count(&format!(

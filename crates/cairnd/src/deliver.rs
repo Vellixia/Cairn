@@ -411,10 +411,28 @@ pub async fn report_outcome(d: &Daemon, trace_id: Uuid, transmitted: bool, reaso
     }
 }
 
-/// `POST /api/retrieve`, or `None` on anything short of a successful answer —
-/// no credential, a transport failure, or a non-2xx status. The caller cannot
-/// tell those apart and does not need to: every one of them means the same
-/// thing here, fall back to the cache.
+/// `POST /api/retrieve`, resolved into the three outcomes the outage cache
+/// turns on ([`Answer`]).
+///
+/// **The caller must tell these apart, and folding them together was a
+/// defect.** Only [`Answer::Unreachable`] permits the cache to answer, so the
+/// mapping is the whole authorization story of an outage:
+///
+/// - **no credential**, a client that will not build, a transport failure, or
+///   a 2xx whose body will not parse → [`Answer::Unreachable`]. Nothing
+///   answered, or nothing intelligible did, so a previously authorized entry
+///   for this account and session may still stand in (§12.3).
+/// - **any non-2xx status** → [`Answer::Refused`]. Something was there and
+///   declined, and a cache hit would claim an authorization this very call was
+///   denied. The cache is not consulted; the briefing says durable memory is
+///   unavailable this turn.
+///
+/// That second rule is deliberately status-blind: `401`, `403` and `404` are
+/// the refusals it exists for, and `5xx` is currently treated the same way
+/// rather than as silence. The stricter direction is the safe one — it can
+/// only *withhold* an entry the account was entitled to, never serve one it
+/// was not — but it is a real behavioural choice and not an oversight, so it
+/// is written down here rather than inferred from `is_success()`.
 async fn retrieve_remote(
     d: &Daemon,
     session_id: Uuid,

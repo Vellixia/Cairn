@@ -69,12 +69,19 @@ struct Device {
 }
 
 fn device(server: &Server, label: &str) -> Device {
+    let token = server.new_user_token(label);
+    device_with_token(server, label, token)
+}
+
+/// The same device, for a caller that minted the token itself — the tests
+/// that need *two* tokens belonging to **one** account cannot let `device`
+/// create a fresh account of its own.
+fn device_with_token(server: &Server, label: &str, token: String) -> Device {
     let sandbox = Sandbox::new();
     let remote = format!("git@localhost:cairnfixture/{label}.git");
     sandbox.git(&["remote", "add", "origin", &remote]);
     sandbox.must(&["init"]);
 
-    let token = server.new_user_token(label);
     let (created, status) = post_json_status_bearer(
         &server.base,
         "/api/projects",
@@ -91,6 +98,38 @@ fn device(server: &Server, label: &str) -> Device {
         project,
         token,
     }
+}
+
+/// Two API tokens for **one** account.
+///
+/// `Server::new_user_token` mints an account per call, which is the right
+/// default and exactly wrong for the property below: a credential change that
+/// keeps the account is the case the outage cache's account key cannot see,
+/// so the account has to be held fixed while the credential moves.
+fn two_tokens_for_one_account(server: &Server, label: &str) -> (String, String) {
+    let email = format!("{label}-{}@example.test", Uuid::now_v7().simple());
+    let password = "hunter2hunter2";
+    server.create_user(&email, label, password);
+    let mint = || {
+        let login = server.post_json_raw(
+            "/api/auth/login",
+            &json!({ "email": email, "display_name": label, "password": password }),
+            None,
+        );
+        let cookie = login
+            .1
+            .into_iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
+            .expect("a session cookie");
+        let created = server.post_json(
+            "/api/tokens",
+            &json!({ "name": format!("{label}-{}", Uuid::now_v7().simple()) }),
+            Some(&cookie),
+        );
+        created["token"].as_str().expect("token").to_string()
+    };
+    (mint(), mint())
 }
 
 /// Promote a pattern through the real route, as `device` does — so it is the
@@ -366,6 +405,72 @@ fn an_outage_cache_hit_reuses_only_the_accounts_own_authorized_pattern() {
          response never selected — the local matcher ran during a cache hit, \
          which is exactly the fallback the repair's item 3 exists to close: \
          {cached}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6b — a credential change discards the cache, account unchanged
+// ---------------------------------------------------------------------------
+
+/// Rotating this machine's credential empties the outage cache even though
+/// the account behind it did not change (FR-790a,
+/// `contracts/retrieval-delivery.md` §12.3).
+///
+/// The cache's own key is `(session_id, account_id)`, and that key cannot see
+/// this: same session, same account, different credential. Only
+/// `Daemon::mutate_credentials` clearing the cache can, and without it the
+/// daemon would answer a *new* credential's outage with content the *old* one
+/// was authorized for — a briefing whose authorization was never rechecked
+/// against the deployment now answering at that address.
+///
+/// **Falsified by** removing the invalidation from `mutate_credentials`: the
+/// canonical pattern then survives the rotation and is served, labelled
+/// cached, to a credential no server ever accepted it for.
+#[test]
+fn a_credential_change_discards_the_previously_authorized_pattern_cache() {
+    let Some(mut server) = server() else { return };
+    let (first, second) = two_tokens_for_one_account(&server, "rotate-device");
+    let d = device_with_token(&server, "rotate-device", first);
+
+    let marker = format!("badger-{}", Uuid::now_v7().simple());
+    let title = format!("{marker} pattern title");
+    let approach = format!("{marker} approach text");
+    let _pattern = promote_pattern(
+        &server,
+        &d.token,
+        &title,
+        &format!("{marker} problem statement"),
+        &approach,
+    );
+
+    let key = format!("rotate-{}", Uuid::now_v7());
+    let warm = open_session_text(&d, &key);
+    assert!(
+        warm.contains(&title) && warm.contains(&approach),
+        "the first, reachable-server answer never carried the canonical \
+         pattern, so the rotation below would prove nothing: {warm}"
+    );
+
+    // A second credential for the **same** account, so nothing about the
+    // account key changes and only the credential does.
+    let switched = d
+        .sandbox
+        .cairn(&["auth", "token", "set", &second, "--server", &server.base]);
+    assert!(switched.ok(), "auth token set: {}", switched.stderr);
+
+    server.go_offline();
+    let after = open_session_text(&d, &key);
+    assert!(
+        !after.contains(&title) && !after.contains(&approach),
+        "a rotated credential's outage was answered from the cache the \
+         previous credential filled — the invalidation in \
+         `Daemon::mutate_credentials` is what stops that, and this briefing \
+         shows it did not run: {after}"
+    );
+    assert!(
+        after.contains("has no cached briefing"),
+        "an outage with no entry for this credential did not say fresh \
+         knowledge is unavailable: {after}"
     );
 }
 

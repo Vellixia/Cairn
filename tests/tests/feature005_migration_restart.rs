@@ -146,7 +146,7 @@ fn phase_states(s: &Sandbox) -> Vec<Value> {
 fn interrupting_any_phase_resumes_exactly_there_and_creates_no_duplicate() {
     let r = resumable!();
 
-    let run1 = r.s.json(&["migrate", "--run"]);
+    let run1 = migrate_run(&r.s);
     assert_eq!(
         run1["run"]["mode"],
         json!("server_authoritative"),
@@ -163,7 +163,7 @@ fn interrupting_any_phase_resumes_exactly_there_and_creates_no_duplicate() {
 
     for phase in PHASES {
         rewind_from(&r.s, phase);
-        let run2 = r.s.json(&["migrate", "--run"]);
+        let run2 = migrate_run(&r.s);
         assert_eq!(
             run2["run"]["resumed_at"],
             json!(phase),
@@ -205,7 +205,7 @@ fn interrupting_any_phase_resumes_exactly_there_and_creates_no_duplicate() {
 fn a_killed_daemon_mid_migration_resumes_rather_than_restarts() {
     let r = resumable!();
 
-    let run1 = r.s.json(&["migrate", "--run"]);
+    let run1 = migrate_run(&r.s);
     assert_eq!(run1["run"]["mode"], json!("server_authoritative"));
 
     let before = phase_states(&r.s);
@@ -226,7 +226,7 @@ fn a_killed_daemon_mid_migration_resumes_rather_than_restarts() {
     r.s.stop_daemon();
     r.s.restart_daemon();
 
-    let run2 = r.s.json(&["migrate", "--run"]);
+    let run2 = migrate_run(&r.s);
     assert_eq!(
         run2["run"]["resumed_at"],
         Value::Null,
@@ -263,6 +263,25 @@ fn legacy() -> Option<Legacy> {
     let s = Sandbox::new();
     let (account, token) = server.new_user("migrating");
     let ids = install_legacy_v7(&s, account);
+    // **Phase 1 runs before a server exists to deliver to.**
+    //
+    // `install_legacy_v7` writes a v7 corpus straight into SQLite and restarts
+    // the daemon over it, so those rows are queued and the store is still
+    // `feature_004` — under which the *ordinary* sync worker is entitled to
+    // deliver them the moment a server is attached. `--inspect`'s
+    // postcondition is `migrating`, which closes that path, and it needs
+    // neither a server nor an account (`handlers::migrate_inspect` resolves
+    // the repo and reads the store, nothing more).
+    //
+    // Running it here rather than inside each test is what makes the race
+    // impossible instead of merely unlikely: until `attach_server` below there
+    // is nowhere for the worker to deliver, so the window between seeding and
+    // `migrating` is not a window at all. Driving it from inside a test left
+    // that window open for as long as daemon startup took, and under parallel
+    // load it lost — the fixture's own rows appeared on the server before the
+    // migration had touched them, and a row delivered by the pre-005 path came
+    // back carrying the legacy key the migration had just corrected.
+    s.json(&["migrate", "--inspect"]);
     attach_server(&s, &server, &token);
     s.must(&["link", "--create"]);
     Some(Legacy { s, server, ids })
@@ -281,6 +300,78 @@ macro_rules! legacy {
 }
 
 // ---------------------------------------------------------------------------
+// `migrate --run`, with its outcome asserted rather than discarded
+// ---------------------------------------------------------------------------
+
+/// Run the migration and return its report, failing loudly if the command
+/// itself did not succeed.
+///
+/// **Every invocation in this file goes through here.** Several call sites
+/// used to be `let _ = s.json(&["migrate", "--run"])`, and while `json`
+/// already asserts the envelope's `ok`, discarding the report threw away the
+/// only evidence that distinguishes the two failures a later assertion can
+/// produce: a run that *reported* success without re-keying anything, and a
+/// run that never reached the re-keying phase at all. `Sandbox::json` also
+/// ignores the process exit status, so a command that printed a good envelope
+/// and then died would pass unnoticed. Both are checked here.
+fn migrate_run(s: &Sandbox) -> Value {
+    let result = s.cairn(&["--json", "migrate", "--run"]);
+    let envelope: Value = serde_json::from_str(&result.stdout).unwrap_or_else(|e| {
+        panic!(
+            "`cairn migrate --run` emitted no parsable envelope: {e}\n\
+             exit: {}\nstdout: {}\nstderr: {}",
+            result.code,
+            result.stdout.trim(),
+            result.stderr.trim()
+        )
+    });
+    assert!(
+        result.ok(),
+        "`cairn migrate --run` exited {}\nenvelope: {}\nstderr: {}",
+        result.code,
+        envelope,
+        result.stderr.trim()
+    );
+    assert_eq!(
+        envelope["ok"],
+        json!(true),
+        "`cairn migrate --run` failed\nexit: {}\nerror: {}\nstderr: {}",
+        result.code,
+        serde_json::to_string(&envelope["error"]).unwrap_or_default(),
+        result.stderr.trim()
+    );
+    envelope["data"].clone()
+}
+
+/// Everything about the migration's state that a re-keying failure needs in
+/// order to be classifiable from the panic message alone: which phases ran,
+/// what state each ended in, and what the run itself said it re-keyed.
+///
+/// `normalize_keys` runs at the head of the Drain phase
+/// (`cairnd/src/migrate005.rs`), and the phase loop skips any phase already
+/// `done` — so "the key was not re-keyed" has two very different causes, and
+/// `keys.renormalized` together with Drain's state tells them apart.
+fn migration_diagnostics(s: &Sandbox, run: &Value) -> String {
+    let phases: Vec<String> = phase_states(s)
+        .iter()
+        .map(|p| {
+            format!(
+                "{}={}",
+                p["phase"].as_str().unwrap_or("?"),
+                p["state"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    format!(
+        "\n  run.resumed_at: {}\n  run.keys: {}\n  run.mode: {}\n  phases: [{}]",
+        run["run"]["resumed_at"],
+        run["run"]["keys"],
+        run["run"]["mode"],
+        phases.join(", ")
+    )
+}
+
+// ---------------------------------------------------------------------------
 // 3. Legacy keys are normalized through the shared normalizer
 // ---------------------------------------------------------------------------
 
@@ -294,7 +385,20 @@ macro_rules! legacy {
 #[test]
 fn legacy_keys_are_renormalized_through_the_shared_normalizer() {
     let l = legacy!();
-    let _ = l.s.json(&["migrate", "--run"]);
+    let run = migrate_run(&l.s);
+    let why = migration_diagnostics(&l.s, &run);
+
+    // **The run must actually have re-keyed, and say so.** `normalize_keys`
+    // runs at the head of Drain and the phase loop skips a phase already
+    // `done`, so a run that reports success having skipped Drain would leave
+    // every key below legacy while looking, from the envelope alone, exactly
+    // like a run that did the work. The fixture's four legacy keys mean this
+    // number can never legitimately be zero on a first run.
+    assert!(
+        run["run"]["keys"]["renormalized"].as_i64().unwrap_or(0) >= 2,
+        "the run reported success without re-keying the legacy corpus it was \
+         handed, so nothing below is a statement about the normalizer:{why}"
+    );
 
     let topic = l.s.query_column(&format!(
         "SELECT topic_key FROM memories WHERE id = '{}'",
@@ -310,13 +414,13 @@ fn legacy_keys_are_renormalized_through_the_shared_normalizer() {
             cairn_core::knowledge::normalize_topic_key("Release.Signing ")
                 .expect("the seeded topic is normalizable")
         ],
-        "memory_queued's topic_key was not re-keyed through the shipped normalizer"
+        "memory_queued's topic_key was not re-keyed through the shipped normalizer:{why}"
     );
     assert_eq!(
         value,
         vec![cairn_core::knowledge::normalize_value_key("Cosign")
             .expect("the seeded value is normalizable")],
-        "memory_queued's value_key was not re-keyed through the shipped normalizer"
+        "memory_queued's value_key was not re-keyed through the shipped normalizer:{why}"
     );
 
     let p_topic = l.s.query_column(&format!(
@@ -331,13 +435,13 @@ fn legacy_keys_are_renormalized_through_the_shared_normalizer() {
         p_topic,
         vec![cairn_core::knowledge::normalize_topic_key("Notes.Layout  ")
             .expect("the seeded topic is normalizable")],
-        "personal_unnormalized's topic_key was not re-keyed through the shipped normalizer"
+        "personal_unnormalized's topic_key was not re-keyed through the shipped normalizer:{why}"
     );
     assert_eq!(
         p_value,
         vec![cairn_core::knowledge::normalize_value_key("Day File")
             .expect("the seeded value is normalizable")],
-        "personal_unnormalized's value_key was not re-keyed through the shipped normalizer"
+        "personal_unnormalized's value_key was not re-keyed through the shipped normalizer:{why}"
     );
 }
 
@@ -365,14 +469,19 @@ fn a_dot_in_a_topic_key_is_a_segment_separator_and_survives_renormalization() {
         l.ids.project, l.ids.project, l.ids.session
     ));
 
-    let _ = l.s.json(&["migrate", "--run"]);
+    let run = migrate_run(&l.s);
+    let why = migration_diagnostics(&l.s, &run);
 
     let topic = l.s.query_column(&format!(
         "SELECT topic_key FROM memories WHERE id = '{extra}'"
     ));
     let expected =
         cairn_core::knowledge::normalize_topic_key("test.command").expect("normalizable");
-    assert_eq!(topic, vec![expected.clone()]);
+    assert_eq!(
+        topic,
+        vec![expected.clone()],
+        "the dotted topic was not re-keyed:{why}"
+    );
     assert!(
         expected.contains('.'),
         "folding the dot would rewrite `test.command` to `test_command` across every \
@@ -393,7 +502,8 @@ fn a_dot_in_a_topic_key_is_a_segment_separator_and_survives_renormalization() {
 #[test]
 fn a_collision_on_the_normalized_key_becomes_a_conflict_not_a_deletion() {
     let l = legacy!();
-    let _ = l.s.json(&["migrate", "--run"]);
+    let run = migrate_run(&l.s);
+    let why = migration_diagnostics(&l.s, &run);
 
     for id in [l.ids.memory_queued, l.ids.memory_collides] {
         let n = l.s.query_column(&format!(
@@ -402,7 +512,8 @@ fn a_collision_on_the_normalized_key_becomes_a_conflict_not_a_deletion() {
         assert_eq!(
             n,
             vec!["1".to_string()],
-            "migration discarded one side of a key collision instead of surfacing a conflict: {id}"
+            "migration discarded one side of a key collision instead of surfacing a \
+             conflict: {id}{why}"
         );
     }
 
@@ -455,7 +566,7 @@ fn a_duplicate_on_the_normalized_key_is_not_a_conflict() {
         ));
     }
 
-    let run = l.s.json(&["migrate", "--run"]);
+    let run = migrate_run(&l.s);
     assert_eq!(
         run["run"]["keys"]["duplicates"],
         json!(1),
@@ -554,21 +665,24 @@ fn running_the_migration_three_times_leaves_row_counts_unchanged_after_the_first
          is migrating: {zero:?}"
     );
 
-    let _ = l.s.json(&["migrate", "--run"]);
+    let run = migrate_run(&l.s);
+    let why = migration_diagnostics(&l.s, &run);
     let after_one = counts(&l, &pattern_id);
     assert_eq!(
         after_one,
         (4, 1, 2, 1, 1),
         "the first run did not deliver everything it should have (memories, relation, \
-         personal rows, the authoritative team row, the claimed pattern): {after_one:?}"
+         personal rows, the authoritative team row, the claimed pattern): {after_one:?}{why}"
     );
 
     for attempt in 2..=3 {
-        let _ = l.s.json(&["migrate", "--run"]);
+        let run = migrate_run(&l.s);
+        let why = migration_diagnostics(&l.s, &run);
         let again = counts(&l, &pattern_id);
         assert_eq!(
             again, after_one,
-            "run #{attempt} changed the server's row counts: {again:?} vs. the first run's {after_one:?}"
+            "run #{attempt} changed the server's row counts: {again:?} vs. the first run's \
+             {after_one:?}{why}"
         );
     }
 }

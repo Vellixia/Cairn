@@ -68,6 +68,7 @@
 use cairn_e2e::feature005::{Account, Pg};
 use cairn_e2e::{post_json_status_bearer, Sandbox, Server};
 use serde_json::{json, Value};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -81,6 +82,35 @@ macro_rules! pg {
             }
         }
     };
+}
+
+/// **One latency measurement at a time, in this binary.**
+///
+/// Every test here times wall-clock work against a budget, and `cargo test`
+/// runs a binary's tests on as many threads as the host has cores. That put
+/// `ingest_latency_holds_within_20_percent_under_a_ten_thousand_event_backlog`
+/// — which seeds ten thousand rows into PostgreSQL — alongside
+/// `prompt_time_retrieval_meets_its_tighter_100ms_soft_target`, measuring a
+/// 100 ms budget against that same PostgreSQL. They were not measuring the
+/// server; they were measuring each other.
+///
+/// The evidence that this is contention and not a regression: run alone, each
+/// test passes; run single-threaded, the whole file passed five times out of
+/// five; run in parallel it failed five out of five, and the *empty-backlog
+/// baseline* itself moved between runs (35.8 ms, 48.5 ms, 61.2 ms) — a number
+/// no code path in the measurement can change.
+///
+/// A lock, not a longer budget. Every threshold below is exactly what it was;
+/// this only stops two stopwatches from being started at once. A panicking
+/// test poisons the mutex, so the guard is recovered rather than propagated —
+/// otherwise one real failure would cascade into "failures" in every sibling
+/// and hide which measurement actually broke.
+static STOPWATCH: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    STOPWATCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn median(mut samples: Vec<Duration>) -> Duration {
@@ -143,6 +173,7 @@ fn point_at_unreachable(s: &Sandbox) {
 /// dead-server outage cannot slow or block the agent — would be false.
 #[test]
 fn capture_class_hooks_return_within_the_production_capture_deadline_with_the_server_unreachable() {
+    let _stopwatch = one_at_a_time();
     let s = Sandbox::new();
     // A real account first, so the fixture models a machine that *was*
     // talking to a server and lost it — not one that was never configured.
@@ -279,6 +310,7 @@ fn retrieval_latencies(pg: &Pg, trigger: &str) -> Vec<Duration> {
 
 #[test]
 fn session_open_retrieval_meets_its_250ms_soft_target() {
+    let _stopwatch = one_at_a_time();
     let pg = pg!();
     let samples = retrieval_latencies(&pg, "session_open");
     report(
@@ -308,6 +340,7 @@ fn session_open_retrieval_meets_its_250ms_soft_target() {
 /// than widening it.
 #[test]
 fn prompt_time_retrieval_meets_its_tighter_100ms_soft_target() {
+    let _stopwatch = one_at_a_time();
     let pg = pg!();
     let samples = retrieval_latencies(&pg, "prompt_submit");
     report(
@@ -414,6 +447,7 @@ fn seed_backlog(pg: &Pg, who: &Account, session: Uuid, count: i64) {
 /// stopped" holds for the whole test without a second process.
 #[test]
 fn ingest_latency_holds_within_20_percent_under_a_ten_thousand_event_backlog() {
+    let _stopwatch = one_at_a_time();
     let pg = pg!();
 
     let mut empty = Vec::with_capacity(BACKLOG_TRIALS);
