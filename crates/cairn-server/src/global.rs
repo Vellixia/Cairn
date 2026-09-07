@@ -59,7 +59,7 @@ pub async fn identities_for(pool: &PgPool, user_id: Uuid) -> ApiResult<Vec<Proje
         // `widgets` rather than only the whole string, which nothing would ever
         // contain verbatim.
         if let Some(remote) = row.get::<Option<String>, _>("repository_remote") {
-            identities.extend(remote_tokens(&remote));
+            identities.extend(remote_identities(&remote));
         }
     }
     // Blank tokens would make the validator refuse everything as
@@ -71,27 +71,117 @@ pub async fn identities_for(pool: &PgPool, user_id: Uuid) -> ApiResult<Vec<Proje
     Ok(identities)
 }
 
-/// The host, organisation and repository parts of a git remote.
+/// The host, organisation and repository of a git remote — **the one parser**,
+/// shared by every entry point that screens on project identity (FR-546).
 ///
-/// Structural parts of a URL are dropped rather than screened on. `git`, `ssh`
-/// and `www` appear in most remotes and identify nothing — a project whose
-/// identity set contained `git` would refuse any content mentioning version
-/// control, which is over-refusal on a scale that makes the whole screen
-/// useless rather than merely strict. What is kept is the host, the
-/// organisation and the repository name, which is what "names the project"
-/// actually means (FR-546).
-fn remote_tokens(remote: &str) -> Vec<ProjectIdentity> {
-    const STRUCTURAL: &[&str] = &["git", "ssh", "www", "http", "https", "com", "org", "net"];
-    remote
-        .trim_end_matches(".git")
-        .split(['/', ':', '@'])
-        .filter(|part| {
-            !part.is_empty()
-                && part.len() >= 3
-                && !STRUCTURAL.contains(&part.to_ascii_lowercase().as_str())
-        })
-        .map(|part| ProjectIdentity(part.to_string()))
-        .collect()
+/// # What a remote contributes, and what it does not
+///
+/// Three things name a project: the host it lives on, the organisation (or
+/// nested groups) it lives under, and the repository itself. A remote also
+/// carries syntax — a scheme, an SSH username, a port, a `.git` suffix — and
+/// syntax names nothing. `git@github.com:acme/widgets.git` therefore yields
+/// `github.com`, `acme` and `widgets`, and neither `git` nor `https`.
+///
+/// # Position, not vocabulary
+///
+/// The screen asks whether candidate text *contains* an identity, so a token
+/// that identifies nothing refuses everything containing it. Two ways to get
+/// that wrong, and this parser is written against both:
+///
+/// - **Splitting the host apart.** Splitting on `.` turns `github.com` into
+///   `github` and `com`, and `com` then refuses `compare`, `command`,
+///   `compile` and `component` for every project on GitHub. The host is one
+///   identity, kept whole.
+/// - **Filtering by word.** Dropping `com`, `git` or `ssh` wherever they
+///   appear cures that by creating a hole: `https://github.com/com/net.git`
+///   has an organisation literally named `com` and a repository literally
+///   named `net`, and content naming them names the project. Structure is
+///   decided by **where** a token sits, never by what it spells — so a path
+///   component is always an identity, and a scheme never is.
+///
+/// # Shapes
+///
+/// - `scheme://[user[:pass]@]host[:port]/path` — HTTPS, SSH URL, `git://`.
+/// - `[user@]host:path` — SCP-style, which is the default `git clone` writes.
+///   Recognised by there being no `/` before the `:`; a port is *not* stripped
+///   here, because `host:1234/repo.git` is a path beginning `1234`, not a port.
+/// - Anything else is treated as a bare path (a local or filesystem remote):
+///   it has no host, and every segment is an identity.
+///
+/// The terminal `.git` is removed from the last segment **once**, so a
+/// repository actually named `git` survives as `git` rather than vanishing.
+pub(crate) fn remote_identities(remote: &str) -> Vec<ProjectIdentity> {
+    let remote = remote.trim();
+    let (authority, path) = split_remote(remote);
+
+    let mut out = Vec::new();
+    if let Some(authority) = authority {
+        // `user@` and `user:password@` are credentials, not identity. Split at
+        // the *last* `@` so a password containing one cannot hide the host.
+        let host = match authority.rsplit_once('@') {
+            Some((_, host)) => host,
+            None => authority,
+        };
+        // A port only where a port is meaningful — see the SCP note above.
+        let host = match host.rsplit_once(':') {
+            Some((before, port))
+                if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                before
+            }
+            _ => host,
+        };
+        if !host.is_empty() {
+            out.push(ProjectIdentity(host.to_string()));
+        }
+    }
+
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let last = segments.len().saturating_sub(1);
+    for (i, segment) in segments.iter().enumerate() {
+        // `strip_suffix`, not `trim_end_matches`: the latter strips repeatedly,
+        // so a repository named `git` (`.../git.git`) came out empty.
+        let segment = if i == last {
+            segment.strip_suffix(".git").unwrap_or(segment)
+        } else {
+            segment
+        };
+        if !segment.is_empty() {
+            out.push(ProjectIdentity(segment.to_string()));
+        }
+    }
+    out
+}
+
+/// Split a remote into its authority (host part, if it has one) and its path.
+fn split_remote(remote: &str) -> (Option<&str>, &str) {
+    // A scheme is `letter *( letter / digit / "+" / "-" / "." ) "://"`.
+    if let Some(after_scheme) = remote.find("://").and_then(|i| {
+        let scheme = &remote[..i];
+        let valid = !scheme.is_empty()
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        valid.then(|| &remote[i + 3..])
+    }) {
+        return match after_scheme.split_once('/') {
+            Some((authority, path)) => (Some(authority), path),
+            // `scheme://host` with no path at all.
+            None => (Some(after_scheme), ""),
+        };
+    }
+
+    // SCP-style: a `:` with no `/` before it. `/srv/git/repo.git:8080` is a
+    // path, not a host, which is why the order of these two tests matters.
+    if let Some((authority, path)) = remote.split_once(':') {
+        if !authority.contains('/') && !authority.is_empty() {
+            return (Some(authority), path);
+        }
+    }
+
+    // A bare path: no host to name, every segment an identity.
+    (None, remote)
 }
 
 /// Why an ingested item was refused.
@@ -1574,6 +1664,109 @@ mod tests {
             .collect()
     }
 
+    fn parsed(remote: &str) -> Vec<String> {
+        remote_identities(remote).into_iter().map(|i| i.0).collect()
+    }
+
+    /// The three supported shapes agree about the same repository, and none of
+    /// them contributes its own syntax.
+    ///
+    /// **Falsified by** splitting the host on `.`, keeping the scheme, or
+    /// keeping the SSH username.
+    #[test]
+    fn every_remote_shape_yields_the_host_the_organisation_and_the_repository() {
+        for remote in [
+            "git@github.com:acme/widgets.git",
+            "https://github.com/acme/widgets.git",
+            "ssh://git@github.com/acme/widgets.git",
+            "https://github.com/acme/widgets",
+        ] {
+            assert_eq!(
+                parsed(remote),
+                vec!["github.com", "acme", "widgets"],
+                "{remote} did not reduce to host, organisation and repository"
+            );
+        }
+    }
+
+    /// Nested groups are each an identity, so a subgroup cannot be named freely.
+    #[test]
+    fn a_nested_path_contributes_every_group() {
+        assert_eq!(
+            parsed("ssh://git@gitlab.com/group/subgroup/repo.git"),
+            vec!["gitlab.com", "group", "subgroup", "repo"]
+        );
+    }
+
+    /// **Position decides, not spelling.** Here `com` is the organisation and
+    /// `net` the repository, and both name the project.
+    ///
+    /// **Falsified by** filtering path components against a list of structural
+    /// words, which is how the ingest side used to avoid the TLD — and which
+    /// would leave this project's own organisation unscreened.
+    #[test]
+    fn a_path_component_spelled_like_syntax_is_kept() {
+        assert_eq!(
+            parsed("https://github.com/com/net.git"),
+            vec!["github.com", "com", "net"]
+        );
+        assert_eq!(
+            parsed("git@github.com:git/ssh.git"),
+            vec!["github.com", "git", "ssh"]
+        );
+    }
+
+    /// The `.git` suffix comes off once, so a repository named `git` survives.
+    ///
+    /// **Falsified by** `trim_end_matches`, which strips repeatedly and left
+    /// this repository with no identity at all.
+    #[test]
+    fn the_git_suffix_is_removed_once_and_only_from_the_last_segment() {
+        assert_eq!(
+            parsed("git@github.com:acme/git.git"),
+            vec!["github.com", "acme", "git"]
+        );
+        assert_eq!(
+            parsed("https://github.com/my.git/widgets.git"),
+            vec!["github.com", "my.git", "widgets"]
+        );
+    }
+
+    /// A port is structure in a URL and a path in SCP form.
+    ///
+    /// `host:1234/repo.git` is the SCP spelling of a repository under a
+    /// directory named `1234`; reading it as a port would drop an identity.
+    #[test]
+    fn a_port_is_stripped_only_where_a_port_is_meaningful() {
+        assert_eq!(
+            parsed("ssh://git@gitlab.com:2222/group/repo.git"),
+            vec!["gitlab.com", "group", "repo"]
+        );
+        assert_eq!(
+            parsed("git@gitlab.com:1234/repo.git"),
+            vec!["gitlab.com", "1234", "repo"]
+        );
+    }
+
+    /// Credentials are not identity, and a password containing `@` cannot hide
+    /// the host behind it.
+    #[test]
+    fn credentials_are_not_identity() {
+        assert_eq!(
+            parsed("https://user:p@ss@github.com/acme/widgets.git"),
+            vec!["github.com", "acme", "widgets"]
+        );
+    }
+
+    /// A remote with no host still contributes its path, and names no host.
+    #[test]
+    fn a_local_path_remote_has_no_host_and_keeps_its_segments() {
+        assert_eq!(
+            parsed("/srv/git/widgets.git"),
+            vec!["srv", "git", "widgets"]
+        );
+    }
+
     /// The ingest screen refuses what the client should have refused, using the
     /// same nine classes — never a second implementation (FR-579).
     #[test]
@@ -1964,15 +2157,13 @@ mod tests {
     /// content naming any one of them names the project.
     #[test]
     fn a_remote_contributes_each_of_its_parts() {
-        let tokens: Vec<String> = remote_tokens("git@github.com:acme/widgets.git")
-            .into_iter()
-            .map(|i| i.0)
-            .collect();
+        let tokens = parsed("git@github.com:acme/widgets.git");
         assert!(tokens.contains(&"github.com".to_string()), "{tokens:?}");
         assert!(tokens.contains(&"acme".to_string()), "{tokens:?}");
         assert!(tokens.contains(&"widgets".to_string()), "{tokens:?}");
-        // `git` is two characters short of usable as a screen and would match
-        // most prose about version control.
+        // Absent because it is the SSH username here — structure, not identity.
+        // A repository *named* `git` is a different matter and is kept; see
+        // `the_git_suffix_is_removed_once_and_only_from_the_last_segment`.
         assert!(!tokens.contains(&"git".to_string()), "{tokens:?}");
     }
 }

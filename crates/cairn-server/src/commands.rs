@@ -222,11 +222,15 @@ async fn all_identities_for(
     for (name, remote) in rows {
         out.push(ProjectIdentity(name));
         if let Some(remote) = remote {
-            for token in remote.split(['/', ':', '@', '.']) {
-                if token.len() > 2 {
-                    out.push(ProjectIdentity(token.to_string()));
-                }
-            }
+            // **The shared parser, not a second splitting rule.** This loop
+            // used to split on `.` as well and filter nothing, so every
+            // project on `github.com` contributed the bare token `com` — and
+            // the screen matches on containment, so `compare`, `command`,
+            // `compile` and `component` were all refused as though they named
+            // the project. `global::remote_identities` is the one place that
+            // decides what a remote says; only the membership query above is
+            // this route's own.
+            out.extend(crate::global::remote_identities(&remote));
         }
     }
     Ok(out)
