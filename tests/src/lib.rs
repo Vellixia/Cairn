@@ -672,6 +672,39 @@ pub fn binary(name: &str) -> PathBuf {
     candidate
 }
 
+/// The `cairn-server` executable the end-to-end suite spawns.
+///
+/// **`CAIRN_SERVER_BIN` wins, and CI sets it to the release build.**
+///
+/// Everything else here is resolved next to the test executable, which under
+/// `cargo test` means `target/debug/` — so the suite drove an *unoptimized*
+/// server. That matters for one reason above all others: a sign-in is an
+/// argon2 verify, and creating an account is an argon2 hash. The workflow
+/// already records the cost (`~0.7s` unoptimized against `~0.03s` released)
+/// and already builds a release server for the web end-to-end job for exactly
+/// this reason; the Rust suite signs in far more often and was not given the
+/// same treatment.
+///
+/// Only this binary is overridable, deliberately. `cairn` and `cairnd` are
+/// resolved as before: their cost is not argon2, and `CAIRND_BIN` already
+/// means something else here — it is how the CLI is *told* where the daemon
+/// is, so reading it back as an override would conflate two directions.
+///
+/// The fallback is the previous behaviour exactly, so a developer running
+/// `cargo test` with nothing set gets the debug server they always got.
+pub fn server_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("CAIRN_SERVER_BIN") {
+        let path = PathBuf::from(path);
+        assert!(
+            path.exists(),
+            "CAIRN_SERVER_BIN points at {}, which does not exist; build it first",
+            path.display()
+        );
+        return path;
+    }
+    binary("cairn-server")
+}
+
 fn binary_file_name(name: &str) -> String {
     if cfg!(windows) {
         format!("{name}.exe")
@@ -1096,8 +1129,8 @@ impl Server {
     /// Sign in and return the session cookie, panicking if the credential is
     /// refused.
     pub fn cookie_for_password(&self, email: &str, password: &str) -> String {
-        self.try_cookie_for_password(email, password)
-            .unwrap_or_else(|| panic!("{email} could not sign in"))
+        self.sign_in(email, password)
+            .unwrap_or_else(|why| panic!("{email} could not sign in: {why}"))
     }
 
     /// Sign in, or `None` if the credential is refused.
@@ -1106,16 +1139,74 @@ impl Server {
     /// password that *stops* working — after a disable, after a reset, after a
     /// change — and a helper that panicked on refusal could not express them.
     pub fn try_cookie_for_password(&self, email: &str, password: &str) -> Option<String> {
-        let (_, headers) = self.post_json_raw(
+        self.sign_in(email, password).ok()
+    }
+
+    /// Sign in, or say **why** not.
+    ///
+    /// `try_cookie_for_password` deliberately answers `Option`, because several
+    /// requirements are about a credential that stops working and "refused" is
+    /// the expected outcome there. But a refusal and a server that answered
+    /// `500` — or did not answer at all — are the same `None`, and that cost a
+    /// CI investigation: `could not sign in` with nothing after it cannot be
+    /// told apart from a password the test meant to be rejected.
+    ///
+    /// So the reason is carried here and discarded by the `Option` wrapper
+    /// above, leaving that function's meaning exactly as it was while the
+    /// panicking caller gets the status line and the body.
+    fn sign_in(&self, email: &str, password: &str) -> Result<String, String> {
+        let (body, headers, status) = self.post_json_diagnosed(
             "/api/auth/login",
             &serde_json::json!({ "email": email, "password": password }),
-            None,
         );
         headers
             .into_iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
             .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
             .filter(|c| c.contains('=') && !c.ends_with('='))
+            .ok_or_else(|| {
+                format!(
+                    "no usable session cookie; status={status:?} body={}",
+                    serde_json::to_string(&body).unwrap_or_default()
+                )
+            })
+    }
+
+    /// `post_json_raw`, keeping the status line it throws away.
+    ///
+    /// `split_response` only collects `key: value` lines, and a status line has
+    /// no colon before the version — so `HTTP/1.1 500 …` was parsed as neither
+    /// a header nor the body and simply vanished. An empty `status` here means
+    /// curl produced no response at all, which is a transport failure rather
+    /// than a refusal, and the two need telling apart.
+    fn post_json_diagnosed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (serde_json::Value, Vec<(String, String)>, Option<String>) {
+        let out = Command::new("curl")
+            .args([
+                "-s",
+                "-D",
+                "-",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "-d",
+                &body.to_string(),
+                &format!("{}{path}", self.base),
+            ])
+            .output()
+            .expect("curl runs");
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let status = raw
+            .lines()
+            .next()
+            .filter(|l| l.starts_with("HTTP/"))
+            .map(|l| l.trim().to_string());
+        let (parsed, headers) = split_response(&raw);
+        (parsed, headers, status)
     }
 
     /// POST with a session cookie, returning the body and the status.
@@ -1423,7 +1514,7 @@ impl Server {
             args.push("--admin-password".into());
             args.push(password.into());
         }
-        let mut child = Command::new(binary("cairn-server"))
+        let mut child = Command::new(server_binary())
             .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1528,18 +1619,14 @@ impl Server {
     /// so the seam moved to the same place an operator uses.
     pub fn new_user_token(&self, label: &str) -> String {
         let email = format!("{label}-{}@example.test", unique());
-        let body = serde_json::json!({
-            "email": email, "display_name": label, "password": "hunter2hunter2"
-        });
         self.create_user(&email, label, "hunter2hunter2");
 
-        let login = self.post_json_raw("/api/auth/login", &body, None);
-        let cookie = login
-            .1
-            .into_iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-            .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
-            .expect("session cookie");
+        // Through the diagnosed path: `.expect("session cookie")` here is the
+        // other half of the failure `sign_in` exists to explain, and it said
+        // even less than the first.
+        let cookie = self
+            .sign_in(&email, "hunter2hunter2")
+            .unwrap_or_else(|why| panic!("{email} could not sign in after users add: {why}"));
 
         let created = self.post_json(
             "/api/tokens",
@@ -1556,7 +1643,7 @@ impl Server {
     /// failure: a test that silently continued without its user would fail
     /// later, somewhere less informative.
     pub fn create_user(&self, email: &str, display_name: &str, password: &str) {
-        let out = Command::new(binary("cairn-server"))
+        let out = Command::new(server_binary())
             .args([
                 "--database-url",
                 &self.database_url,

@@ -56,9 +56,35 @@ jobs:
       # build another package's binaries. Without these builds there is nothing
       # for it to drive.
       - run: cargo build --workspace
-      - run: cargo test --workspace --all-targets
 
+      # **Built before the tests, not after, so the tests can use it.**
+      #
+      # This job already built a release workspace; it simply did so afterwards,
+      # for the capture-hook latency claim below. Moving it up costs no extra
+      # wall clock and buys the server the suite actually needs.
       - run: cargo build --workspace --release
+
+      # `CAIRN_SERVER_BIN` is the only binary this job overrides, and the
+      # reason is argon2. Every account the suite creates is a hash and every
+      # sign-in is a verify; the comment on the web end-to-end job below puts
+      # the unoptimized cost at ~0.7s against ~0.03s released, which is why
+      # *that* job has always run a release server. The Rust suite signs in far
+      # more often and was still spawning `target/debug/cairn-server`, because
+      # the harness resolves binaries next to the test executable.
+      #
+      # Only this job sets it. macOS and Windows have no PostgreSQL service, so
+      # they skip the server suites and have no server to spawn.
+      #
+      # `harness_server_binary.rs` is the proof that setting this changes which
+      # executable is spawned, rather than merely building one.
+      - name: Test
+        env:
+          CAIRN_SERVER_BIN: ${{ github.workspace }}/target/release/cairn-server
+        run: |
+          test -x "$CAIRN_SERVER_BIN" || { echo "no release server at $CAIRN_SERVER_BIN"; exit 1; }
+          echo "end-to-end server: $CAIRN_SERVER_BIN"
+          cargo test --workspace --all-targets
+
       - name: Capture-hook latency (SC-007 is a release-build claim)
         run: cargo test --release -p cairn-e2e --test polish_performance -- --nocapture
 
