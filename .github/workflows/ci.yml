@@ -107,7 +107,11 @@ jobs:
     runs-on: windows-latest
     # The named-pipe transport is new; a hang here should fail loudly rather
     # than run until someone notices and cancels it by hand.
-    timeout-minutes: 25
+    #
+    # Sized above the `Test` step's own cap plus the build ahead of it, so the
+    # step's timeout is what reports a hang. A job budget that bound first
+    # would kill the run before the diagnostics step below could look at it.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -146,11 +150,20 @@ jobs:
       # test that reached execution passing, and the next finished. Run-to-run
       # variance was deciding the colour of the build.
       #
-      # Twelve is a little over twice the observed time, so ordinary variance
-      # cannot reach it, and it stays a small enough fraction of the job
-      # budget that a real hang is still reported with time to spare.
+      # It happened again, the same way, for the same reason. Feature 005 adds
+      # roughly thirty test targets, and run 34135116572 was killed at exactly
+      # 12m01s with every test that reached execution passing — the last line
+      # before the kill is a passing test, not a hang. The whole Windows job
+      # has gone from ~12m on `main` and the 004 branch to ~16m here, so twelve
+      # minutes is no longer "a little over twice the observed time"; it is
+      # under it.
+      #
+      # Raised to twenty-five on the same rule. The true full-suite time on
+      # this runner is not known yet — the run that would have measured it was
+      # the one that got killed — so this is deliberately generous, and the
+      # next green run is what turns it back into a measurement.
       - name: Test
-        timeout-minutes: 12
+        timeout-minutes: 25
         env:
           CAIRN_LOG: debug
         run: cargo test --workspace --all-targets
