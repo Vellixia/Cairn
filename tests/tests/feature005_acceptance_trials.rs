@@ -398,6 +398,23 @@ struct AgentReport {
     criteria: Vec<(&'static str, usize, usize)>,
     nothing_asked_for_it_held: bool,
     review_records: Vec<ReviewRecord>,
+    /// Which trials produced no durable record, and what the server held for
+    /// every trial when the sessions were closed. Only read by the SC-701
+    /// assertions, and only when one fails.
+    trials_without_record: Vec<usize>,
+    evidence_at_close: Vec<String>,
+}
+
+impl AgentReport {
+    /// The two facts "only N/10" cannot carry: which trials, and what evidence
+    /// consolidation was started on.
+    fn shortfall(&self) -> String {
+        format!(
+            "\n  trials without a record: {:?}\n  evidence held when the sessions were closed:\n    {}",
+            self.trials_without_record,
+            self.evidence_at_close.join("\n    ")
+        )
+    }
 }
 
 /// Run `TRIALS` real sessions for one agent and report what happened.
@@ -432,6 +449,42 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         .collect::<Vec<_>>()
         .join(",");
 
+    // **What the server actually held, per trial, at the instant the sessions
+    // were closed.**
+    //
+    // SC-701 has failed on CI as "only 9/10", and the one thing the assertion
+    // cannot say is *which* trial produced nothing and what evidence
+    // consolidation had for it. `drive` waits for the session *row* to reach
+    // the server — not for that session's safe events — and capture is
+    // fire-and-forget, so a trial whose later events are still spooled would be
+    // closed and consolidated on partial evidence. Whether that is what happens
+    // is unproven: it has not reproduced locally in 25 runs. This records the
+    // evidence so the next occurrence answers it instead of restating the
+    // count.
+    //
+    // Taken before the close, because afterwards it is no longer the state
+    // consolidation was started on.
+    let evidence_at_close: Vec<String> = sessions
+        .iter()
+        .enumerate()
+        .map(|(trial, session)| {
+            let kinds = server
+                .query_column(&format!(
+                    "SELECT kind || 'x' || COUNT(*)::text FROM safe_events
+                      WHERE session_id = '{session}' GROUP BY kind ORDER BY kind"
+                ))
+                .join(",");
+            let span = server
+                .query_column(&format!(
+                    "SELECT COALESCE(MIN(session_seq), -1)::text || '..'
+                            || COALESCE(MAX(session_seq), -1)::text
+                       FROM safe_events WHERE session_id = '{session}'"
+                ))
+                .join("");
+            format!("trial {trial}: seq {span} [{kinds}]")
+        })
+        .collect();
+
     // Close every trial's session the way the server would see it closed
     // (contracts/consolidation.md §3) — one statement for all ten, matching
     // the "wait once" shape this file exists to prove out.
@@ -452,6 +505,7 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         },
     );
 
+    let mut trials_without_record: Vec<usize> = Vec::new();
     let mut trials_with_record = 0usize;
     let mut criterion_counts: [(usize, usize); 4] = [(0, 0); 4];
     // Index: 0 kind_is_one_of_five, 1 claim_is_non_empty, 2 keys_are_canonical,
@@ -466,6 +520,9 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
                JOIN consolidation_runs cr ON cr.run_id = kc.run_id
               WHERE cr.session_id = '{session}' AND kc.result_knowledge_id IS NOT NULL"
         ));
+        if records.is_empty() {
+            trials_without_record.push(trial);
+        }
         if !records.is_empty() {
             trials_with_record += 1;
         }
@@ -612,6 +669,8 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         ],
         nothing_asked_for_it_held: explicit == 0 && superseded == 0,
         review_records,
+        trials_without_record,
+        evidence_at_close,
     })
 }
 
@@ -703,10 +762,12 @@ fn ten_claude_code_trials_produce_durable_knowledge_and_rubric_material() {
         return;
     };
     assert_eq!(
-        r.trials_with_record, TRIALS,
+        r.trials_with_record,
+        TRIALS,
         "SC-701 requires every session that invokes no Cairn tool to produce at least \
-         one durable record; only {}/{TRIALS} of claude_code's trials did",
-        r.trials_with_record
+         one durable record; only {}/{TRIALS} of claude_code's trials did{}",
+        r.trials_with_record,
+        r.shortfall()
     );
     report(&r);
 }
@@ -717,10 +778,12 @@ fn ten_codex_trials_produce_durable_knowledge_and_rubric_material() {
         return;
     };
     assert_eq!(
-        r.trials_with_record, TRIALS,
+        r.trials_with_record,
+        TRIALS,
         "SC-701 requires every session that invokes no Cairn tool to produce at least \
-         one durable record; only {}/{TRIALS} of codex's trials did",
-        r.trials_with_record
+         one durable record; only {}/{TRIALS} of codex's trials did{}",
+        r.trials_with_record,
+        r.shortfall()
     );
     report(&r);
 }
@@ -731,10 +794,12 @@ fn ten_opencode_trials_produce_durable_knowledge_from_structure_alone() {
         return;
     };
     assert_eq!(
-        r.trials_with_record, TRIALS,
+        r.trials_with_record,
+        TRIALS,
         "SC-701 requires every session that invokes no Cairn tool to produce at least \
-         one durable record; only {}/{TRIALS} of opencode's trials did",
-        r.trials_with_record
+         one durable record; only {}/{TRIALS} of opencode's trials did{}",
+        r.trials_with_record,
+        r.shortfall()
     );
     report(&r);
 }
