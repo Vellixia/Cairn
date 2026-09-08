@@ -2750,11 +2750,43 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         .server_project_id
         .ok_or_else(|| WireError::new(codes::NOT_LINKED, "linked project has no server id"))?;
 
+    // **A credential that no longer belongs to this project is a state, not a
+    // failed command** (FR-595).
+    //
+    // The project lane is one of three this command drains, and it is the only
+    // one whose failure used to end the whole call: the global loop below
+    // deliberately ignores a lane's error, while this `?` returned before the
+    // loop was reached. A store linked as A and then authenticated as B is
+    // exactly that case — B is not a member of A's project, the batch route
+    // refuses it, and B's own personal and team knowledge then never moved
+    // either, because the command stopped one line above where they are sent.
+    //
+    // Only a refusal. Any other error still ends the call, because a store that
+    // cannot reach its own server has nothing useful to say about the rest.
+    let mut project_refused = false;
     let (mut applied, mut duplicate, mut rejected) =
-        drain(d, r.project.id, server_project_id).await?;
-    let mut pulled = pull(d, r.project.id, server_project_id).await.unwrap_or(0);
+        match drain(d, r.project.id, server_project_id).await {
+            Ok(counts) => counts,
+            Err(e) if e.code == codes::FORBIDDEN => {
+                tracing::info!(
+                    project = %r.project.id,
+                    "this account may not push this project's work; \
+                     draining the account's own lanes instead (FR-595)"
+                );
+                project_refused = true;
+                (0, 0, 0)
+            }
+            Err(e) => return Err(e),
+        };
+    let mut pulled = if project_refused {
+        0
+    } else {
+        pull(d, r.project.id, server_project_id).await.unwrap_or(0)
+    };
 
-    if rejected == 0 {
+    // Not a success for a lane that was refused: recording one would mark this
+    // project synchronized as of now, and nothing of it was sent.
+    if rejected == 0 && !project_refused {
         cursor::record_success(&d.store, &SyncNamespace::Project(r.project.id))
             .await
             .map_err(storage_err)?;
@@ -2783,6 +2815,10 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         "duplicate": duplicate,
         "rejected": rejected,
         "pulled": pulled,
+        // Said rather than inferred from a zero: "this project's work stayed
+        // put because this credential may not push it" and "there was nothing
+        // to push" are different answers.
+        "project_forbidden": project_refused,
     }))
 }
 
