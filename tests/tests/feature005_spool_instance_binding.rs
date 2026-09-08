@@ -274,6 +274,21 @@ fn work_queued_for_one_server_instance_is_never_delivered_to_another() {
     // -----------------------------------------------------------------------
     let attempts_before: Vec<String> =
         d.column("SELECT event_id || '=' || attempts FROM event_spool ORDER BY event_id");
+    // **Measured against what S1 legitimately already had, not against zero.**
+    //
+    // FR-791 forbids work reaching a server instance it was not queued for, so
+    // the violation is an *increase* during the window. Watching for a non-zero
+    // count instead made the test fail on its first sample whenever the
+    // session-open event had already been delivered — which step 1 permits,
+    // because it waits for the *session* to reach S1, not for that event. The
+    // event reached S1 while S1 was still the right instance, which is the
+    // arrangement working; reported as an FR-791 violation it looked like the
+    // opposite. Reproduced locally at roughly one run in twenty-five before
+    // this baseline existed.
+    let delivered_before = server.count(&format!(
+        "SELECT count(*) FROM safe_events WHERE project_id = '{}'",
+        d.project
+    ));
     never_during(
         &d,
         Duration::from_secs(12),
@@ -282,28 +297,66 @@ fn work_queued_for_one_server_instance_is_never_delivered_to_another() {
             server.count(&format!(
                 "SELECT count(*) FROM safe_events WHERE project_id = '{}'",
                 d.project
-            )) > 0
+            )) > delivered_before
         },
     );
 
-    assert_eq!(
-        d.column(
-            "SELECT event_id FROM event_spool
-              WHERE state IN ('pending','in_flight','failed') ORDER BY event_id"
-        ),
-        bound_events,
-        "the mismatched events did not survive intact: work queued for another \
-         deployment must be held, not discarded, because pointing the store back \
-         at its own server is the remedy and there would be nothing left to send"
+    // **Every row queued for S1 is still queued — extra rows are not a
+    // violation.**
+    //
+    // Asked as containment rather than as set equality, and the difference is
+    // the requirement. FR-791 is about work *reaching a server it was not
+    // queued for*; it says nothing about the spool being frozen. A live daemon
+    // is attached to this sandbox for the whole twelve-second window, and
+    // ordinary capture may legitimately arrive during it — which is exactly
+    // what CI saw when a snapshot of two rows was compared against three and
+    // the equality failed over an arrival that broke nothing.
+    //
+    // The loss direction stays strict: nothing that was queued may leave the
+    // undelivered set, because being held is the whole claim. Bounded-spool
+    // shedding (FR-785) cannot account for a loss here — the bound is fifty
+    // thousand events and this spool holds single digits — so a missing row is
+    // unexplained and must fail loudly, with the whole spool in the message so
+    // the next occurrence says what happened to it rather than only that it is
+    // gone.
+    let held_events = d.column(
+        "SELECT event_id FROM event_spool
+          WHERE state IN ('pending','in_flight','failed') ORDER BY event_id",
     );
-    assert_eq!(
-        d.column(
-            "SELECT command_id FROM command_spool
-              WHERE state IN ('pending','in_flight','failed') ORDER BY command_id"
-        ),
-        bound_commands,
-        "the mismatched commands did not survive intact"
+    for id in &bound_events {
+        assert!(
+            held_events.contains(id),
+            "event {id} was queued for another deployment and did not survive: \
+             work queued for another deployment must be held, not discarded, \
+             because pointing the store back at its own server is the remedy \
+             and there would be nothing left to send. Spool now: {:?}",
+            d.column(
+                "SELECT event_id || ' kind=' || kind
+                        || ' class=' || CAST(boundary_class AS TEXT)
+                        || ' state=' || state
+                        || ' attempts=' || CAST(attempts AS TEXT)
+                        || ' instance=' || COALESCE(server_instance_id, '<none>')
+                   FROM event_spool ORDER BY created_at, event_id"
+            )
+        );
+    }
+    let held_commands = d.column(
+        "SELECT command_id FROM command_spool
+          WHERE state IN ('pending','in_flight','failed') ORDER BY command_id",
     );
+    for id in &bound_commands {
+        assert!(
+            held_commands.contains(id),
+            "command {id} was queued for another deployment and did not survive. \
+             Spool now: {:?}",
+            d.column(
+                "SELECT command_id || ' state=' || state
+                        || ' attempts=' || CAST(attempts AS TEXT)
+                        || ' instance=' || COALESCE(server_instance_id, '<none>')
+                   FROM command_spool ORDER BY command_id"
+            )
+        );
+    }
     assert_eq!(
         d.count("SELECT CAST(COUNT(*) AS TEXT) FROM event_spool WHERE state = 'refused'"),
         0,
@@ -314,13 +367,20 @@ fn work_queued_for_one_server_instance_is_never_delivered_to_another() {
         0,
         "a mismatch refused a command it was never entitled to judge"
     );
-    assert_eq!(
-        d.column("SELECT event_id || '=' || attempts FROM event_spool ORDER BY event_id"),
-        attempts_before,
-        "a mismatch spent delivery attempts: an arbitrarily long period pointed at \
-         the wrong server would drive every row to retry_exhausted, which is a \
-         terminal verdict about work the right server never saw"
-    );
+    // Per row rather than as a whole-set comparison, for the same reason: a row
+    // that arrived during the window has no "before" to be compared against,
+    // and its arrival is not what this asserts.
+    let attempts_now =
+        d.column("SELECT event_id || '=' || attempts FROM event_spool ORDER BY event_id");
+    for before in &attempts_before {
+        assert!(
+            attempts_now.contains(before),
+            "a mismatch spent delivery attempts on {before}: an arbitrarily long \
+             period pointed at the wrong server would drive every row to \
+             retry_exhausted, which is a terminal verdict about work the right \
+             server never saw. Attempts now: {attempts_now:?}"
+        );
+    }
 
     // And it is visible rather than silently stuck.
     let events = d.spool("events");
