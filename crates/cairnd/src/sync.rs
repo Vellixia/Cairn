@@ -1026,7 +1026,18 @@ impl AuthenticatedContext {
         // needs the instance *answering*, and this is the only place the daemon
         // learns it. Recording it adopts nothing — the binding is the `team:*`
         // lane and a mismatching peer is still refused (FR-791).
-        *d.last_observed_instance.write().await = Some(peer_instance);
+        {
+            let mut observed = d.last_observed_instance.write().await;
+            let previous = *observed;
+            *observed = Some(peer_instance);
+            if previous != Some(peer_instance) {
+                tracing::info!(
+                    target: "cairn::observation",
+                    previous = ?previous, observed = %peer_instance, endpoint = %base,
+                    "the endpoint reported a different server instance"
+                );
+            }
+        }
 
         Ok(AuthenticatedContext {
             generation,

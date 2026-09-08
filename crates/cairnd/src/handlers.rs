@@ -1374,6 +1374,16 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
             .ok()
             .flatten(),
     };
+    let bound_for_log = cairn_store::cursor::bound_server_instance(&d.store)
+        .await
+        .ok()
+        .flatten();
+    let observed_for_log = *d.last_observed_instance.read().await;
+    tracing::info!(
+        target: "cairn::observation",
+        compared_against = ?instance, bound = ?bound_for_log, observed = ?observed_for_log,
+        "spool status is measuring against this instance"
+    );
     let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity, instance)
         .await
         .ok()?;

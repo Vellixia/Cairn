@@ -139,6 +139,29 @@ fn settle_syncing(d: &Device, what: &str, mut predicate: impl FnMut() -> bool) {
     );
 }
 
+/// What the daemon logged about which instance it saw and compared against.
+///
+/// `cairn::observation` is the target the two trace points use: one where an
+/// `AuthenticatedContext` learns the endpoint's instance, one where the spool
+/// report chooses what to measure rows against. Read from the daemon's own log
+/// because the value lives in that process, not in the store.
+fn observation_trace(d: &Device) -> String {
+    let path = d.sandbox.home.path().join("cairnd.log");
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let lines: Vec<&str> = body
+        .lines()
+        .filter(|l| l.contains("cairn::observation") || l.contains("server instance"))
+        .rev()
+        .take(12)
+        .collect();
+    lines
+        .into_iter()
+        .rev()
+        .map(|l| format!("    {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Wait for a condition to hold for a whole window, not merely to occur.
 ///
 /// The mismatch assertions are about something *not happening*, and a single
@@ -410,7 +433,13 @@ fn work_queued_for_one_server_instance_is_never_delivered_to_another() {
     assert!(
         events["other_instance"].as_i64().unwrap_or(0) > 0,
         "the backlog belongs to another deployment and the report does not say \
-         so: {events}"
+         so: {events}\n  s1={s1} s2={s2}\n  rows: {:?}\n  daemon observation trace:\n{}",
+        d.column(
+            "SELECT event_id || ' state=' || state || ' instance='
+                    || COALESCE(server_instance_id, '<none>')
+               FROM event_spool ORDER BY created_at, event_id"
+        ),
+        observation_trace(&d),
     );
     assert_eq!(
         events["blocked_reason"].as_str(),
