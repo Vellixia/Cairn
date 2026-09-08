@@ -549,7 +549,7 @@ pub async fn spool_safe_events(
     // `None` when this store has never established a lane — the honest answer,
     // and the one the spool's first-binding rule is written for. Guessing an
     // instance here would be the endpoint-as-identity mistake in a new place.
-    let server_instance_id = cairn_store::cursor::established_instance(store).await?;
+    let server_instance_id = cairn_store::cursor::bound_server_instance(store).await?;
 
     let declined_events: Vec<SafeEventDraft> = output
         .declines

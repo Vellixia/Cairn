@@ -113,6 +113,7 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
         outage_cache: Arc::new(tokio::sync::Mutex::new(deliver::OutageCache::default())),
         server_unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        last_observed_instance: Arc::new(RwLock::new(None)),
     });
 
     let reconciled = recover::reconcile_previous_runs(&daemon).await;

@@ -90,6 +90,27 @@ pub struct Daemon {
     /// describes what this daemon just experienced, not a fact about the world
     /// worth persisting. A restart correctly starts out not knowing.
     pub server_unreachable: Arc<std::sync::atomic::AtomicBool>,
+    /// The instance the endpoint last reported, if this process has asked.
+    ///
+    /// **Observation, never authority.** The store's binding is the singular
+    /// `team:*` lane (`cursor::bound_server_instance`, D438/FR-495/FR-496) and
+    /// a mismatching server never becomes it — FR-791 refuses that server, and
+    /// nothing here changes what a queued row is bound to.
+    ///
+    /// It exists because FR-792 asks a question the binding cannot answer.
+    /// "Which rows belong to a different deployment than the one answering?"
+    /// is measured against the server *answering*, and comparing rows to the
+    /// store's own binding always says none — the backlog then reads as a
+    /// queue that mysteriously stopped, which is the outcome FR-792 exists to
+    /// prevent. Before this, the spool report was handed whichever instance
+    /// sorted first among every lane, so it happened to be right about as
+    /// often as the ids fell the right way.
+    ///
+    /// In memory and per process, exactly like `server_unreachable` beside it:
+    /// it describes what this daemon just saw, not a fact worth persisting. A
+    /// restart correctly starts out not knowing, and status falls back to the
+    /// binding until the first probe.
+    pub last_observed_instance: Arc<RwLock<Option<Uuid>>>,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever

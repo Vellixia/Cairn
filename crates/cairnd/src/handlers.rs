@@ -1355,13 +1355,25 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
     let counts = cairn_store::spool::disposition_counts(&d.store, project_id)
         .await
         .ok()?;
-    // Reported against the instance this store is bound to, so a backlog that
-    // belongs to a different deployment is counted as exactly that rather than
-    // as a queue that mysteriously stopped.
-    let instance = cairn_store::cursor::established_instance(&d.store)
-        .await
-        .ok()
-        .flatten();
+    // **Measured against the server answering, not against the binding.**
+    //
+    // "Which rows belong to a different deployment?" is a question about the
+    // peer: rows carry the instance they were queued for, and the mismatch is
+    // between that and whoever is answering now. Comparing them to the store's
+    // own binding answers "none" precisely when a replacement deployment has
+    // arrived, which is the one case FR-792 exists to make visible — a backlog
+    // that reads as a queue that mysteriously stopped.
+    //
+    // The binding is the fallback, for a daemon that has not reached the
+    // server since it started: it has observed nothing, and the store's own
+    // instance is the honest answer until it has.
+    let instance = match *d.last_observed_instance.read().await {
+        Some(observed) => Some(observed),
+        None => cairn_store::cursor::bound_server_instance(&d.store)
+            .await
+            .ok()
+            .flatten(),
+    };
     let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity, instance)
         .await
         .ok()?;
@@ -3037,7 +3049,7 @@ pub(crate) async fn queue_knowledge_command(
         cairn_store::spool::NewCommand {
             // Bound to the server this store has established a lane with, at the
             // moment the command is written (FR-791). Never re-decided later.
-            server_instance_id: cairn_store::cursor::established_instance(&d.store)
+            server_instance_id: cairn_store::cursor::bound_server_instance(&d.store)
                 .await
                 .map_err(storage_err)?,
             scope,

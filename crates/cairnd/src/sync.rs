@@ -1022,6 +1022,11 @@ impl AuthenticatedContext {
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .unwrap_or_else(|| provisional_instance(&base));
+        // Remembered for FR-792's sake and for nothing else: the spool report
+        // needs the instance *answering*, and this is the only place the daemon
+        // learns it. Recording it adopts nothing — the binding is the `team:*`
+        // lane and a mismatching peer is still refused (FR-791).
+        *d.last_observed_instance.write().await = Some(peer_instance);
 
         Ok(AuthenticatedContext {
             generation,
