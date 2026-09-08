@@ -113,7 +113,30 @@ fn settle_syncing(d: &Device, what: &str, mut predicate: impl FnMut() -> bool) {
         let _ = d.sandbox.cairn(&["sync", "now"]);
         std::thread::sleep(Duration::from_millis(250));
     }
-    panic!("timed out waiting for: {what}");
+    // **What the queue looked like when the deadline passed.**
+    //
+    // "Timed out waiting for X" cannot distinguish work that was never
+    // claimable from work claimed and rejected, or from a store still keyed to
+    // the wrong deployment — and those have opposite repairs. The rows carry
+    // their binding and their attempt count, and `sync_cursor` carries the
+    // instance the store believes it is talking to, so the two can be compared.
+    panic!(
+        "timed out waiting for: {what}\n  events: {:?}\n  commands: {:?}\n  \
+         established namespaces: {:?}",
+        d.column(
+            "SELECT event_id || ' kind=' || kind || ' state=' || state
+                    || ' attempts=' || CAST(attempts AS TEXT)
+                    || ' instance=' || COALESCE(server_instance_id, '<none>')
+               FROM event_spool ORDER BY created_at, event_id"
+        ),
+        d.column(
+            "SELECT command_id || ' state=' || state
+                    || ' attempts=' || CAST(attempts AS TEXT)
+                    || ' instance=' || COALESCE(server_instance_id, '<none>')
+               FROM command_spool ORDER BY command_id"
+        ),
+        d.column("SELECT namespace FROM sync_cursor ORDER BY namespace"),
+    );
 }
 
 /// Wait for a condition to hold for a whole window, not merely to occur.
