@@ -1514,10 +1514,16 @@ impl Server {
             args.push("--admin-password".into());
             args.push(password.into());
         }
+        // **Keep stderr.** It used to go to `/dev/null`, so "exited early
+        // (exit status: 1)" was the whole story a failing start could tell —
+        // and a server that cannot reach PostgreSQL, cannot bind, or refuses
+        // its arguments all look identical from outside. Piped rather than
+        // inherited so it does not interleave with the test output, and read
+        // back only on the failure path below.
         let mut child = Command::new(server_binary())
             .args(&args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("cairn-server runs");
 
@@ -1526,7 +1532,15 @@ impl Server {
             // A server that could not bind is gone, and no amount of polling
             // will bring it back. Notice, and let the caller try another port.
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!("cairn-server at {base} exited early ({status})"));
+                let mut why = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut why);
+                }
+                return Err(format!(
+                    "cairn-server at {base} exited early ({status}); stderr: {}",
+                    why.trim()
+                ));
             }
             if ureq_get(&format!("{base}/api/health")).is_some() {
                 return Ok(Self {

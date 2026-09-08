@@ -200,12 +200,26 @@ fn no_test_in_this_suite_requires_a_secret() {
     }
     assert!(checked > 10, "only {checked} files were checked");
 
-    // The one variable the suite reads, and the tests that read it skip
-    // themselves when it is absent rather than failing — which is what keeps
-    // macOS CI green without Docker.
+    // The two variables the suite reads, and neither is a secret.
+    //
+    // `CAIRN_TEST_DATABASE_URL` names the PostgreSQL the server suites need,
+    // and the tests that read it skip themselves when it is absent rather than
+    // failing — which is what keeps macOS CI green without Docker.
+    //
+    // `CAIRN_SERVER_BIN` names which `cairn-server` to spawn. The Linux job
+    // points it at the release build, because every account the suite creates
+    // is an argon2 hash and every sign-in a verify; absent, the harness falls
+    // back to the binary beside the test executable exactly as before, which
+    // is why the jobs that do not set it are unaffected.
+    //
+    // The rule this enforces is unchanged and is about *secrets*: a vendor
+    // token read from the environment would quietly make an optional job a
+    // required one. Neither of these is a credential, and both have a defined
+    // meaning when unset.
+    const READABLE: [&str; 2] = ["CAIRN_TEST_DATABASE_URL", "CAIRN_SERVER_BIN"];
     for (file, name) in &reads {
-        assert_eq!(
-            name, "CAIRN_TEST_DATABASE_URL",
+        assert!(
+            READABLE.contains(&name.as_str()),
             "{file} reads `{name}` from the environment, which required CI cannot provide"
         );
     }
