@@ -85,3 +85,69 @@ fn without_the_variable_the_binary_beside_the_tests_is_used() {
         ),
     }
 }
+
+/// Ten processes migrating one database concurrently all succeed (D436's
+/// idiom, applied to migration).
+///
+/// Every server applies migrations on start, which is what lets a fresh
+/// deployment need no separate step — and it means a rolling restart, a scaled
+/// deployment, and this suite (a server per test) all issue the same
+/// `CREATE TABLE` at once. PostgreSQL's catalog refuses the loser with
+/// `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`,
+/// and `IF NOT EXISTS` does not help: it is checked before the catalog insert
+/// rather than atomically with it.
+///
+/// **Driven through `users add`, not through starting servers.** `Server::spawn`
+/// retries a failed start four times, and ten racers retrying stagger enough
+/// that they all eventually come up — a test written that way passed with the
+/// fix reverted, which is worse than no test. `users add` goes through the same
+/// `db::connect`, and once, so a lost race is visible.
+///
+/// Measured on this shape with the lock reverted: nine of ten servers exited.
+///
+/// **Falsified by** removing the advisory lock from `db::migrate`.
+#[test]
+fn concurrent_migrations_of_one_database_all_succeed() {
+    let Some(url) = cairn_e2e::Server::fresh_database() else {
+        eprintln!("skipped: CAIRN_TEST_DATABASE_URL is not set");
+        return;
+    };
+    let racers: Vec<_> = (0..10)
+        .map(|i| {
+            let url = url.clone();
+            std::thread::spawn(move || {
+                std::process::Command::new(cairn_e2e::server_binary())
+                    .args([
+                        "--database-url",
+                        &url,
+                        "users",
+                        "add",
+                        "--email",
+                        &format!("racer-{i}@example.test"),
+                        "--display-name",
+                        "racer",
+                        "--password",
+                        "hunter2hunter2",
+                    ])
+                    .output()
+                    .expect("cairn-server runs")
+            })
+        })
+        .collect();
+
+    let mut lost = Vec::new();
+    for handle in racers {
+        let out = handle.join().expect("a racer thread");
+        if !out.status.success() {
+            lost.push(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "{} of ten concurrent migrations of one database failed; \
+         concurrent `CREATE TABLE` loses to PostgreSQL's catalog unless \
+         `db::migrate` serializes on its advisory lock. First: {}",
+        lost.len(),
+        lost.first().map(String::as_str).unwrap_or("")
+    );
+}

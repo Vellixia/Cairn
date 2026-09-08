@@ -1077,6 +1077,21 @@ impl Server {
     /// other test running beside it, and would let *their* rows corrupt its
     /// fixture, which is exactly how a race test comes to promote accounts it
     /// has never heard of.
+    /// A database of this server's own, and its URL, without a server on it.
+    ///
+    /// For the one property that needs several servers to meet on a database
+    /// nobody has migrated yet: `start_own_database` returns only once *its*
+    /// server is up, by which time the migrations are done and the race is
+    /// over.
+    pub fn fresh_database() -> Option<String> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let name = format!("cairn_own_{}", unique());
+        create_database(&admin, &name);
+        Some(replace_database(&admin, &name))
+    }
+
     pub fn start_own_database() -> Option<Self> {
         let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
             .ok()
