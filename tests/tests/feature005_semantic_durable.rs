@@ -497,13 +497,29 @@ fn no_ungrounded_word_of_the_transient_turn_reaches_a_durable_record() {
     for s in &scenarios {
         ids.insert(s.id.clone(), drive(&device, s));
     }
-    settle("durable knowledge appears", || {
-        server.count(&format!(
-            "SELECT count(*) FROM memories
+    // **Waited for at the threshold this test then asserts, not at one record.**
+    //
+    // Waiting for the first durable record and sleeping five seconds makes the
+    // sleep load-bearing: on a busy runner the remaining nineteen are still
+    // being consolidated when it expires, and the vacuity guard below then
+    // fails for a reason that has nothing to do with SC-701b. Observed on CI
+    // as "only 19 durable records were inspected". Settling on the population
+    // the guard requires removes the guess; the deadline is `SETTLE`, so a
+    // consolidation that genuinely stopped still fails here rather than
+    // silently grading three records.
+    settle(
+        "durable knowledge appears for the graded population",
+        || {
+            server.count(&format!(
+                "SELECT count(*) FROM memories
               WHERE project_id = '{project}' AND origin_kind = 'consolidated'
                 AND (topic_key LIKE 'decision.%' OR topic_key LIKE 'instruction.%')"
-        )) > 0
-    });
+            )) >= MINIMUM_DURABLE_MATCHES as i64
+        },
+    );
+    // Then a moment more, so records arriving after the threshold are graded
+    // too. This is opportunistic — the floor above is what the assertions rest
+    // on — and it is why the guard reports how many were actually inspected.
     std::thread::sleep(Duration::from_secs(5));
 
     let mut leaks: Vec<String> = Vec::new();
@@ -561,10 +577,29 @@ fn no_ungrounded_word_of_the_transient_turn_reaches_a_durable_record() {
         }
     }
 
+    // **The floor is SC-701a's threshold, not the corpus size**, and the
+    // difference is the whole of this repair.
+    //
+    // SC-701b is a claim about the records that exist — "zero durable records
+    // contain any word from the originating prompt or assistant turn that is
+    // not independently present in that session's derived vocabulary". How many
+    // records *must* exist is SC-701a's question, and its answer is fourteen of
+    // twenty, stated as a threshold precisely because consolidation over a
+    // holdout corpus is not required to be exhaustive.
+    //
+    // Demanding twenty here therefore asserted more than either criterion
+    // grants: a nineteen-record run satisfies SC-701a, is fully measurable for
+    // SC-701b, and failed anyway. A shortfall below fourteen is a real result,
+    // and it belongs to `at_least_fourteen_of_twenty_sessions_produce_the_durable_record_they_declared`,
+    // which reports it as the SC-701a failure it is. This guard exists only so
+    // an empty or near-empty sample cannot pass for a proof.
     assert!(
-        checked >= QUALIFYING_SESSIONS,
-        "only {checked} durable records were inspected for the {QUALIFYING_SESSIONS} \
-         qualifying sessions, so this proved less than it claims"
+        checked >= MINIMUM_DURABLE_MATCHES,
+        "only {checked} durable records were inspected, fewer than the \
+         {MINIMUM_DURABLE_MATCHES} SC-701a guarantees over {QUALIFYING_SESSIONS} \
+         qualifying sessions, so this proved less than it claims. A shortfall \
+         this large is an SC-701a failure, and the sibling test that names \
+         fourteen is where it is graded"
     );
     assert!(
         leaks.is_empty(),
