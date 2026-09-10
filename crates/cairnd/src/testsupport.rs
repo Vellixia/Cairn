@@ -54,7 +54,6 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         last_activity: Arc::new(AtomicI64::new(chrono::Utc::now().timestamp_millis())),
         in_flight_captures: Arc::new(AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
-        server_unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         last_observed_instance: Arc::new(RwLock::new(None)),
         outage_cache: Arc::new(tokio::sync::Mutex::new(
             crate::deliver::OutageCache::default(),

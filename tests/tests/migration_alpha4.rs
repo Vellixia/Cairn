@@ -815,11 +815,64 @@ fn sandbox_on_migrated_alpha4() -> (Sandbox, Alpha4Store) {
     s.stop_daemon();
 
     // The sidecars go too: a `-wal` from the empty store would contradict the
-    // database replacing it.
+    // database replacing it — and *silently*. SQLite reads the main file
+    // through whatever `-wal` sits beside it, so a leftover write-ahead log
+    // from the sandbox's own empty store masks every table in the migrated file
+    // it is placed next to. The store then answers as the empty one: zero
+    // memories, and the sandbox's own project row instead of the fixture's.
+    //
+    // **The failure that has to be impossible here is the silent one.** These
+    // removals swallowed every error. On Unix `unlink` of a file another process
+    // still holds always succeeds, so the swallow never cost anything; on
+    // Windows the same call fails with a sharing violation for any file a
+    // process still has open, and `stop_daemon` polls the *pipe* rather than the
+    // process — so a daemon can be past answering and still holding the store.
+    // The result was a fixture that installed nothing and a suite that reported
+    // it as `migrated memories are not retrievable`, which sends the next reader
+    // to look at retrieval, the migration and the search index in turn. None of
+    // them is where the fault is.
+    //
+    // So: absent is fine, held is not, and the swap says so itself.
     for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(s.sidecar(suffix));
+        let path = s.sidecar(suffix);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!(
+                "the sandbox's own store could not be cleared before the swap \
+                 ({}): {e}. Something still holds it open, so the migrated \
+                 database would be installed underneath a stale write-ahead log \
+                 and every assertion below would describe the empty store",
+                path.display()
+            ),
+        }
     }
     std::fs::copy(fixture.db_path(), s.db_path()).expect("install the migrated store");
+    assert!(
+        !s.sidecar("-wal").exists() && !s.sidecar("-shm").exists(),
+        "a sidecar reappeared beside the migrated database before it was opened; \
+         the fixture would be masked by it"
+    );
+
+    // **The fixture is verified installed, not assumed installed.**
+    //
+    // The one direct probe the tests below make is
+    // `COUNT(*) FROM memories WHERE topic_key IS NOT NULL`, which returns zero
+    // for an *empty* table exactly as it does for the eight subject-less rows
+    // the fixture holds — so under the very failure it then reports, that
+    // assertion passes vacuously. This is the assertion that cannot.
+    let installed = s
+        .query_column("SELECT CAST(COUNT(*) AS TEXT) FROM memories")
+        .first()
+        .and_then(|n| n.parse::<i64>().ok())
+        .unwrap_or(-1);
+    assert!(
+        installed > 0,
+        "the migrated fixture did not install: the store holds {installed} \
+         memories. Everything below would be asserting against the sandbox's \
+         own empty store, and would report it as a retrieval or migration \
+         fault rather than as this"
+    );
 
     // The fixture's project belongs to the fixture's repository, and Cairn
     // resolves a project by its Git common directory. Without this the daemon
@@ -845,6 +898,22 @@ fn sandbox_on_migrated_alpha4() -> (Sandbox, Alpha4Store) {
                        GROUP BY project_id ORDER BY COUNT(*) DESC LIMIT 1)",
         git_common_dir.replace('\'', "''")
     ));
+    // Verified, because the subquery reads `memories`: against an empty store it
+    // resolves to NULL, `WHERE id = NULL` matches nothing, and the re-point does
+    // nothing at all without saying so. The daemon then finds no project for
+    // this worktree, registers a second one, and the suite reports an empty
+    // store as a retrieval fault.
+    assert_eq!(
+        s.query_column(&format!(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM projects
+              WHERE git_common_dir = '{}'",
+            git_common_dir.replace('\'', "''")
+        )),
+        vec!["1".to_string()],
+        "the fixture's memory-owning project was not re-pointed at this \
+         worktree, so the daemon will register a second project and every \
+         assertion below will describe a store that was migrated and ignored"
+    );
 
     (s, fixture)
 }

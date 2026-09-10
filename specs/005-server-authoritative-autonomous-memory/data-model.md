@@ -483,6 +483,85 @@ as `other_instance`, and `blocked_reason` becomes `server_instance_mismatch`, so
 a stranded backlog is visible rather than a queue that mysteriously stopped
 (FR-792).
 
+### Measured against a fresh sample, never against a remembered one
+
+`other_instance` is a comparison, and the half it compares against is *the
+instance answering now* — not the store's binding, which answers "none" exactly
+when a replacement deployment has arrived, and not an observation an earlier
+delivery attempt left in memory, which is not a fact about now at all.
+
+The second of those is the subtler mistake and it was the live one. A daemon
+that had spoken to the replacement held the observation; a daemon that had not
+fell back to the binding and reported no mismatch. Both are the same store, and
+which one answers is decided by process lifetime: a daemon exits within one
+supervision tick of another owning its socket, so the daemon that observed the
+replacement is routinely gone by the time an operator asks what happened. A
+reason held only in one process's memory is therefore lost precisely when it is
+wanted, and the report falls back to saying nothing is wrong.
+
+So status takes its own sample (FR-792a). While assembling a spool report that
+has undelivered rows to explain, and only then, it performs one bounded
+read-only peer-identity probe — the same `GET /api/version` the drain reads,
+with the same provisional-instance substitution for a server too old to name
+itself, so the probe and the drain can never disagree about who is answering.
+
+**The stated deadline is five seconds.** It is much shorter than the drain's
+twenty, because a drain is background work and a status read is somebody waiting
+at a terminal; it is far longer than a healthy round trip, because exceeding it
+is reported as an unreachable endpoint and that report has to be *true*. Two
+seconds was the first choice and measurement rejected it: on a host at load ~25,
+a 200-repetition run of the cross-daemon scenario reported `server_unreachable`
+against a server that was up and answering in 9 runs of 132 — the endpoint was
+fine and the probe lost its race for CPU. Small CI runners executing a whole
+suite in parallel sit in exactly that regime, so the deadline is set for the
+loaded case, not the idle one. A server that is genuinely gone refuses the
+connection immediately and never approaches it. The CLI allows a status exchange
+thirty seconds, so this cannot be what makes one time out.
+
+Three outcomes, and each decides a different report:
+
+| Probe outcome | `other_instance` measured against | `blocked_reason` |
+| --- | --- | --- |
+| endpoint answers as peer `P` | `P` | `server_instance_mismatch` when a durable binding `B` exists and `P != B`, else the row-derived reason |
+| endpoint unreachable within the deadline | nothing — no current peer is known | `server_unreachable` |
+| no endpoint or no credential configured | nothing | the row-derived reason, or `no_account` |
+
+The probe writes nothing durable (FR-792b). It does not establish or alter the
+`team:*` lane that *is* the binding, does not open a namespace, does not move a
+cursor, does not touch stored credentials, and never enters the claim path — so
+it cannot take a row, cannot spend an attempt and cannot change an event's
+state. Observing a peer is not binding to it: a store with no binding that
+reaches a server gains no binding and reports no mismatch, because there is
+nothing yet for the peer to mismatch.
+
+The in-memory observation survives as telemetry and nothing more (FR-792c). It
+is useful in a log when reconstructing what a daemon saw; it decides no reported
+reason, and specifically a remembered `S2` never masquerades as the current peer
+once the endpoint has gone quiet or come back as `S1`.
+
+### One reason, by stated precedence
+
+A spool can be several kinds of blocked at once and a status line reports one
+thing, so the choice is stated rather than left to the order of the tests that
+compute it (FR-792d). Highest first:
+
+| # | Reason | Holds when | Why it outranks what follows |
+| --- | --- | --- | --- |
+| 1 | `no_account` | nobody is signed in and rows are undelivered | the claim predicate matches an account exactly, so *nothing* can be claimed; a retry reason would describe a retry that is not being attempted |
+| 2 | `server_unreachable` | the probe could not reach the endpoint | Cairn cannot even ask, so no reason derived from row state describes what is happening |
+| 3 | `server_instance_mismatch` (whole) | a durable binding exists and the probe's peer differs from it, or every undelivered row is bound elsewhere | FR-791 refuses this peer, so no row moves whatever its state — and the remedy is to re-point the store, not to wait |
+| 4 | `saturated` | the bound is reached and nothing shed-able is left | the only state in which work is being *lost* rather than delayed |
+| 5 | `retry_exhausted` | a row has run out of attempts | terminal: it will never move again without intervention |
+| 6 | `refused_by_server` | a row was refused permanently | terminal, but the server has spoken; an operator reads it differently from an exhausted retry |
+| 7 | `awaiting_capability` | a row is deferred for a server upgrade | harmless and self-resolving |
+| 8 | `backing_off` | a row is retrying after a failure | Cairn is asking and failing, which is progress of a kind |
+| 9 | `server_instance_mismatch` (partial) | some rows belong elsewhere while the rest drain | reported, because those rows never will move; last, because the deliverable part *is* moving |
+
+Nothing undelivered is never blocked, whatever the network is doing — a reason
+there would make "blocked" mean "has work", and a signal that is always on is
+not a signal. That is also why an empty spool never probes: FR-792's question is
+not being asked, so the answer costs no network.
+
 ### `NULL` is a state, not a wildcard
 
 A row queued before this store had ever established a lane carries `NULL`. That

@@ -1112,7 +1112,12 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         }
 
         Command::Status => {
-            let v = client::send(&Request::Status { cwd: cwd() }).await?;
+            let v = client::send(&Request::Status {
+                cwd: cwd(),
+                // `cairn status` is the command FR-792 is written about.
+                spool_reason: true,
+            })
+            .await?;
             let payload: StatusPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
             Ok(Output::with(v, render::status(&payload)))

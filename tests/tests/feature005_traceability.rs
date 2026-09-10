@@ -240,8 +240,22 @@ fn the_fr_and_sc_inventories_are_unique_and_the_recorded_counts() {
         sc_set.len()
     );
 
-    const EXPECTED_FR: usize = 272;
-    const EXPECTED_SC: usize = 63;
+    // **Moved deliberately, and here is what moved.** FR-792's freshness
+    // semantics were a specification gap: reviewed material said the reason
+    // delivery is not progressing must be visible, and said nothing about
+    // where status gets reachability or peer identity from. CI reported no
+    // mismatch while a replacement deployment was answering, because both
+    // came from process-local state that a daemon replacement discards.
+    //
+    // Added: FR-792a (status takes a fresh, bounded, read-only peer-identity
+    // sample), FR-792b (that probe may touch nothing durable — no binding, no
+    // lane, no cursor, no claim, no attempt), FR-792c (a cached observation is
+    // telemetry and decides no reported reason), FR-792d (the blocked-reason
+    // precedence is stated rather than incidental), and SC-718a (the report is
+    // correct across a daemon replacement, in both directions and when the
+    // endpoint is unreachable). Four FRs, one SC: 272 → 276 and 63 → 64.
+    const EXPECTED_FR: usize = 276;
+    const EXPECTED_SC: usize = 64;
     assert_eq!(
         fr_list.len(),
         EXPECTED_FR,

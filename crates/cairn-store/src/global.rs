@@ -782,6 +782,22 @@ fn personal_payload(
 /// Carries the lifecycle columns as well as the content ones, because a peer
 /// that already holds an authoritative copy learns of its retirement only from
 /// them. `origin_digest` is absent for the same reason as above.
+///
+/// **Both halves of both transitions, or neither** (FR-457). This carried
+/// `ratified_by_user_id` and `retired_at` and *not* `retired_by_user_id`, which
+/// is the same asymmetry `SyncedTeamKnowledge` had, one direction over: the
+/// backlog path could describe a retirement it structurally could not
+/// attribute. The field is here now for the same reason its ratification twin
+/// always was — a transition recorded with a timestamp and no actor is half a
+/// record, and the missing half is the one an operator asks for.
+///
+/// The server's ingest reads a fixed set of names out of this payload and
+/// ignores the rest by construction (`upsert_team` in `cairn-server`, whose
+/// conflict clause deliberately does nothing), so this field travels for
+/// completeness of the record and not because ingest consumes it — exactly as
+/// `state`, `ratified_by_user_id`, `ratified_at`, `retired_at` and
+/// `superseded_by_id` already did. An ingest that *acted* on any of them would
+/// be the privilege escalation that clause exists to refuse.
 #[allow(clippy::too_many_arguments)]
 fn team_payload(
     id: Uuid,
@@ -796,6 +812,7 @@ fn team_payload(
     proposed_by_user_id: Uuid,
     ratified_by_user_id: Option<Uuid>,
     ratified_at: Option<DateTime<Utc>>,
+    retired_by_user_id: Option<Uuid>,
     retired_at: Option<DateTime<Utc>>,
     superseded_by_id: Option<Uuid>,
 ) -> serde_json::Value {
@@ -815,6 +832,7 @@ fn team_payload(
         "proposed_by_user_id": proposed_by_user_id,
         "ratified_by_user_id": ratified_by_user_id,
         "ratified_at": ratified_at,
+        "retired_by_user_id": retired_by_user_id,
         "retired_at": retired_at,
         "superseded_by_id": superseded_by_id,
     })
@@ -999,7 +1017,7 @@ pub async fn enqueue_team_backlog(store: &Store) -> Result<usize> {
         let row = sqlx::query(
             "SELECT knowledge_type, content, topic_key, value_key, writer_id, writer_seq,
                     state, proposed_by_user_id, ratified_by_user_id, ratified_at,
-                    retired_at, superseded_by_id
+                    retired_by_user_id, retired_at, superseded_by_id
                FROM team_knowledge WHERE id = ?1",
         )
         .bind(id.to_string())
@@ -1019,6 +1037,7 @@ pub async fn enqueue_team_backlog(store: &Store) -> Result<usize> {
             rows::uuid(&row, "proposed_by_user_id")?,
             rows::opt_uuid(&row, "ratified_by_user_id")?,
             rows::opt_ts(&row, "ratified_at")?,
+            rows::opt_uuid(&row, "retired_by_user_id")?,
             rows::opt_ts(&row, "retired_at")?,
             rows::opt_uuid(&row, "superseded_by_id")?,
         );
@@ -1309,9 +1328,9 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 // Team's own shape, beyond that shared discipline:
 //
 // * **`proposed → authoritative → retired`, compare-and-swap** (§3, §5b).
-//   [`ratify_team`] and [`retire_team`] are the *only* two `UPDATE` statements
-//   against `team_knowledge` in this crate, and each hardcodes the state it
-//   requires the row to already be in (`'proposed'` and `'authoritative'`
+//   [`ratify_team`] and [`retire_team`] are the two *lifecycle-advancing*
+//   `UPDATE` statements against `team_knowledge`, and each hardcodes the state
+//   it requires the row to already be in (`'proposed'` and `'authoritative'`
 //   respectively) in its own `WHERE` clause — the same shape the contract's
 //   own SQL gives (§3) and the same shape `crate::criteria::check_revision`
 //   already proved for task criteria, adapted from an integer revision to a
@@ -1321,6 +1340,24 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 //   proceed to `'authoritative'`; the state `CHECK` plus this predicate
 //   together make "un-retire" not a statement this module can execute.
 //
+//   **They are not the only two `UPDATE`s on the table, and saying so was how
+//   this invariant got broken.** Two more exist, both applying a decision the
+//   *server* already made rather than making one: [`adopt_team_transition`],
+//   which writes the state, actor and timestamp out of the server's own reply
+//   when the compare-and-swap above lost, and [`merge_synced_team`], which
+//   refreshes the whole row from a pulled page. The second is the writer that
+//   falsified FR-457: it updated on `WHERE id = ?` alone, so a page fetched
+//   before a local retirement and applied after it wrote `NULL` over
+//   `retired_by_user_id` and rolled the row back to `proposed` — after which
+//   `retire_team`'s compare-and-swap refused and the actor was recorded
+//   nowhere. Neither of the two takes a state predicate, because neither is
+//   deciding a transition; what orders them instead is the server's own
+//   version of the row (`server_changed_at`, schema 11), stated at
+//   [`merge_synced_team`]'s `WHERE` clause. A comment claiming a table has
+//   two writers when it has four is not documentation, it is a false
+//   invariant, and the next writer added under it inherits none of the care
+//   the other two were written with.
+//
 // * **No admin check lives here.** `role` is a server-side concept
 //   (`cairn-server`'s `users.role`) that this local SQLite schema does not
 //   carry at all — `users` here has no `role` column (`0001_init.sql`). This
@@ -1329,9 +1366,11 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 //   caller that already established that (the CLI, backed by an admin
 //   token against the server; or the server itself applying its own
 //   already-authorized decision back into this local mirror). What this
-//   module *does* guarantee structurally is narrower and sufficient: there
-//   is no *other* function anywhere in this crate that can move a row to
-//   `authoritative`, and nothing in this file is reachable from the MCP
+//   module *does* guarantee structurally is narrower and sufficient: the only
+//   other functions in this crate that can put a row in `authoritative` are
+//   [`adopt_team_transition`] and [`merge_synced_team`], and neither invents
+//   that state — each copies one a server already decided, from that server's
+//   own reply or its own change feed. Nothing in this file is reachable from the MCP
 //   six-tool surface (T125, T126 — enforced in `crates/cairn/src/mcp.rs`,
 //   outside this file, by that surface simply never calling `ratify_team` or
 //   `retire_team` at all).
@@ -1881,6 +1920,9 @@ pub async fn propose_team(
             &applicability,
             TeamState::Proposed,
             new.proposed_by_user_id,
+            // A fresh proposal has neither transition, so neither actor and
+            // neither timestamp — absent, never fabricated.
+            None,
             None,
             None,
             None,
@@ -1996,6 +2038,25 @@ pub async fn ratify_team(
     ratified_by_user_id: Uuid,
     supersedes: Option<Uuid>,
 ) -> Result<TeamKnowledge> {
+    ratify_team_at_version(store, id, ratified_by_user_id, supersedes, None).await
+}
+
+/// [`ratify_team`], recording the server version this row now reflects in the
+/// same transaction.
+///
+/// The reasoning is [`retire_team_at_version`]'s exactly: a ratification whose
+/// version lands in a later transaction is exposed, for that window, to a page
+/// fetched before it — which rolls the row back to `proposed` and takes
+/// `ratified_by_user_id` with it. That rollback is what made the *retirement*
+/// actor unrecordable in the first place, because the retire then found a state
+/// its compare-and-swap would not accept.
+pub async fn ratify_team_at_version(
+    store: &Store,
+    id: Uuid,
+    ratified_by_user_id: Uuid,
+    supersedes: Option<Uuid>,
+    server_version: Option<DateTime<Utc>>,
+) -> Result<TeamKnowledge> {
     let mut tx = tx::begin(store, "ratify_team").await?;
     let actual = team_state_for_update(&mut tx, id).await?;
     if actual != TeamState::Proposed {
@@ -2003,14 +2064,20 @@ pub async fn ratify_team(
     }
 
     let now = rows::now_text();
+    let version = server_version.map(server_version_text);
     let result = sqlx::query(
         "UPDATE team_knowledge
-            SET state = 'authoritative', ratified_by_user_id = ?1, ratified_at = ?2
+            SET state = 'authoritative', ratified_by_user_id = ?1, ratified_at = ?2,
+                server_changed_at = CASE
+                    WHEN ?4 IS NOT NULL
+                         AND (server_changed_at IS NULL OR server_changed_at < ?4)
+                    THEN ?4 ELSE server_changed_at END
           WHERE id = ?3 AND state = 'proposed'",
     )
     .bind(ratified_by_user_id.to_string())
     .bind(&now)
     .bind(id.to_string())
+    .bind(version.as_deref())
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -2097,6 +2164,19 @@ pub async fn ratify_team(
 /// those and a merge that invented them would be worse than the staleness it
 /// was fixing. A full row arriving later by pull overwrites this the ordinary
 /// way.
+///
+/// **`at` is also the server version this row now reflects**, and recording it
+/// is what stops the next pull from undoing this repair (FR-457). `at` is the
+/// transition's timestamp *as the server wrote it*, and the server's ordering
+/// key for a row is `GREATEST(created_at, ratified_at, retired_at,
+/// superseded_at)` — so a reply saying "retired at T" is a reply saying "this
+/// row's version is now T". Without that, `server_changed_at` would still hold
+/// whatever the last *page* said, every page in flight would compare as newer
+/// than the transition just adopted, and [`merge_synced_team`]'s guard would
+/// have nothing to decline with: the actor would be written here and erased a
+/// second later. The value is advanced, never lowered, and only ever from the
+/// server's own clock — an `at` this store cannot parse leaves it alone rather
+/// than guessing.
 pub async fn adopt_team_transition(
     store: &Store,
     id: Uuid,
@@ -2105,28 +2185,45 @@ pub async fn adopt_team_transition(
     at: Option<&str>,
 ) -> Result<()> {
     let mut tx = tx::begin(store, "adopt_team_transition").await?;
+    // The server's timestamp for this transition, re-encoded into the one
+    // comparable form `server_changed_at` holds. `None` when the reply carried
+    // no parseable timestamp, in which case the version is left exactly as it
+    // was — an unparseable clock reading is not a version, and inventing one
+    // would let a later stale page be declined for the wrong reason.
+    let version = at.and_then(rows::parse_ts).map(server_version_text);
+    // Advanced, never lowered. `?4` is the version above; the `CASE` is what
+    // keeps a reply that is somehow older than the page this row already
+    // reflects from moving the mark backwards.
+    const ADVANCE_VERSION: &str = "server_changed_at = CASE
+                        WHEN ?4 IS NOT NULL
+                             AND (server_changed_at IS NULL OR server_changed_at < ?4)
+                        THEN ?4 ELSE server_changed_at END";
     match state {
         TeamState::Authoritative => {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE team_knowledge
-                    SET state = 'authoritative', ratified_by_user_id = ?2, ratified_at = ?3
-                  WHERE id = ?1",
-            )
+                    SET state = 'authoritative', ratified_by_user_id = ?2, ratified_at = ?3,
+                        {ADVANCE_VERSION}
+                  WHERE id = ?1"
+            ))
             .bind(id.to_string())
             .bind(actor.map(|a| a.to_string()))
             .bind(at)
+            .bind(&version)
             .execute(&mut *tx)
             .await?;
         }
         TeamState::Retired => {
-            sqlx::query(
+            sqlx::query(&format!(
                 "UPDATE team_knowledge
-                    SET state = 'retired', retired_by_user_id = ?2, retired_at = ?3
-                  WHERE id = ?1",
-            )
+                    SET state = 'retired', retired_by_user_id = ?2, retired_at = ?3,
+                        {ADVANCE_VERSION}
+                  WHERE id = ?1"
+            ))
             .bind(id.to_string())
             .bind(actor.map(|a| a.to_string()))
             .bind(at)
+            .bind(&version)
             .execute(&mut *tx)
             .await?;
         }
@@ -2138,10 +2235,85 @@ pub async fn adopt_team_transition(
     Ok(())
 }
 
+/// Record that this row now reflects the server version `at` (FR-457).
+///
+/// **The other half of [`merge_synced_team`]'s guard, for the path that does
+/// not go through a page.** [`ratify_team`] and [`retire_team`] apply a
+/// transition the server has *already* made, and they apply it without any page
+/// having carried it — so `server_changed_at` still names whatever version was
+/// last pulled, and every page already in flight compares as newer than a
+/// transition that in fact happened after all of them. The guard would then let
+/// exactly one of those pages through, and that one page is enough: it writes
+/// `NULL` over `retired_by_user_id` and puts the row back to `proposed`.
+///
+/// `at` is the transition's timestamp *from the server's own reply*, which is
+/// also the server's ordering key for the row after it (`GREATEST(created_at,
+/// ratified_at, retired_at, superseded_at)`) — so this is not a new clock
+/// entering the comparison, it is the same clock read from the reply instead of
+/// from a page.
+///
+/// **Advanced, never lowered, and never invented.** A caller with no server
+/// timestamp to offer does not call this; there is no local-clock fallback,
+/// because a local reading compared against a server reading is the mistake
+/// this column exists to avoid. Separate from the transition's own statement
+/// rather than folded into it: those two functions are called from thirty-odd
+/// places that have no server reply to pass, and widening their signatures to
+/// carry an argument almost every caller would pass as `None` would put the
+/// version in the same list as `retired_by_user_id` — where a `None` means
+/// "nobody acted" and would be a fabrication in the other direction.
+pub async fn note_team_server_version(store: &Store, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+    let version = server_version_text(at);
+    sqlx::query(
+        "UPDATE team_knowledge
+            SET server_changed_at = ?2
+          WHERE id = ?1
+            AND (server_changed_at IS NULL OR server_changed_at < ?2)",
+    )
+    .bind(id.to_string())
+    .bind(&version)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
 pub async fn retire_team(
     store: &Store,
     id: Uuid,
     retired_by_user_id: Uuid,
+) -> Result<TeamKnowledge> {
+    retire_team_at_version(store, id, retired_by_user_id, None).await
+}
+
+/// [`retire_team`], recording **in the same transaction** the server version
+/// this row now reflects.
+///
+/// **Why the version cannot be a second statement.** The row is protected from
+/// a stale pulled page by `merge_synced_team`'s guard, and that guard compares
+/// the page's version against `server_changed_at`. Writing the transition in
+/// one transaction and advancing `server_changed_at` in the next leaves a
+/// window in which the row already holds the new actor while
+/// `server_changed_at` still names the *previous* page's version — so a page
+/// fetched before the transition compares as no older, is admitted, and erases
+/// the actor exactly as it did before any of this existed. The window is far
+/// narrower than the 250-300 ms fetch-to-apply gap that made the original
+/// defect reproducible at 1 in 60, but it is the same defect, and "much less
+/// likely" is not what FR-457 says.
+///
+/// So the two facts are written together or not at all. `server_version` is the
+/// transition's timestamp **as the server wrote it** — the server's ordering key
+/// for a row is `GREATEST(created_at, ratified_at, retired_at, superseded_at)`,
+/// so a reply saying "retired at T" is a reply saying "this row's version is
+/// now T". `None` leaves the mark alone: an absent or unparseable server clock
+/// is not a version, and inventing one would let a later page be declined for
+/// the wrong reason.
+///
+/// Advanced, never lowered, so a reply somehow older than the page this row
+/// already reflects cannot move the mark backwards.
+pub async fn retire_team_at_version(
+    store: &Store,
+    id: Uuid,
+    retired_by_user_id: Uuid,
+    server_version: Option<DateTime<Utc>>,
 ) -> Result<TeamKnowledge> {
     let mut tx = tx::begin(store, "retire_team").await?;
     let actual = team_state_for_update(&mut tx, id).await?;
@@ -2155,14 +2327,20 @@ pub async fn retire_team(
     // recorded with who acted and when" — and retirement is the transition most
     // worth attributing, since it removes guidance from every user on the
     // server.
+    let version = server_version.map(server_version_text);
     let result = sqlx::query(
         "UPDATE team_knowledge
-            SET state = 'retired', retired_at = ?1, retired_by_user_id = ?3
+            SET state = 'retired', retired_at = ?1, retired_by_user_id = ?3,
+                server_changed_at = CASE
+                    WHEN ?4 IS NOT NULL
+                         AND (server_changed_at IS NULL OR server_changed_at < ?4)
+                    THEN ?4 ELSE server_changed_at END
           WHERE id = ?2 AND state = 'authoritative'",
     )
     .bind(&now)
     .bind(id.to_string())
     .bind(retired_by_user_id.to_string())
+    .bind(version.as_deref())
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -2438,6 +2616,40 @@ pub struct SyncedTeamKnowledge {
     /// it.
     pub retired_by_user_id: Option<Uuid>,
     pub retired_at: Option<DateTime<Utc>>,
+    /// **The version the server ordered this page by** — its `changed_at` on
+    /// the wire, `GREATEST(created_at, ratified_at, retired_at, superseded_at)`
+    /// as computed by `team_changes` and `team_knowledge_view`.
+    ///
+    /// Not a column of `team_knowledge` on either side, which is why it is the
+    /// one field whose name differs between the two schemas: here it is
+    /// *whose* clock that matters, so the column it lands in is
+    /// `server_changed_at` (schema 11).
+    ///
+    /// `None` means the peer is a server below that schema and sent no version
+    /// at all. It is **not** "version zero" and never orders anything: see
+    /// [`merge_synced_team`], where such a page applies unconditionally,
+    /// because a store that could not sync with an older server would be a
+    /// worse failure than the staleness this field exists to order.
+    pub server_changed_at: Option<DateTime<Utc>>,
+}
+
+/// The stored form of a server-authored team version (schema 11).
+///
+/// **Fixed width on purpose, and not [`rows::ts_text`].** This is the one
+/// timestamp column in the schema that is *compared* in SQL rather than only
+/// read back, and SQLite compares `TEXT` byte by byte. `to_rfc3339` prints its
+/// fractional part in groups of three digits, or omits it entirely, so two
+/// instants can differ in length; `%.9f` is always nine digits, which makes
+/// byte order and chronological order the same relation for every value this
+/// column can hold. `rows::parse_ts` reads it back like any other RFC 3339
+/// timestamp, so nothing else has to know.
+///
+/// Both sides of every comparison go through this function — the value already
+/// stored was written by it, and the incoming one is re-encoded by it from a
+/// parsed `DateTime<Utc>` — so a peer's own choice of precision (Postgres
+/// prints microseconds) never reaches the comparison.
+fn server_version_text(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S.%9f+00:00").to_string()
 }
 
 /// Merge one team_knowledge row synchronized from `server_instance_id` into
@@ -2496,8 +2708,9 @@ pub async fn merge_synced_team(
                 (id, knowledge_type, content, topic_key, value_key, content_norm_digest,
                  origin_digest, state, proposed_by_user_id, ratified_by_user_id, ratified_at,
                  writer_id, writer_seq, created_at, superseded_by_id, retired_by_user_id,
-                 retired_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 retired_at, server_changed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17)",
         )
         .bind(incoming.id.to_string())
         .bind(incoming.knowledge_type.as_str())
@@ -2515,6 +2728,9 @@ pub async fn merge_synced_team(
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
         .bind(incoming.retired_at.map(rows::ts_text))
+        // The version this row is created reflecting. A first sight of a row
+        // is as much a version to be ordered against as any later one.
+        .bind(incoming.server_changed_at.map(server_version_text))
         .execute(&mut *tx)
         .await?;
 
@@ -2531,7 +2747,8 @@ pub async fn merge_synced_team(
         }
     } else {
         // **Server-wins cache refresh** (FR-712a), including a state that did
-        // not advance.
+        // not advance — but never *backwards* along the server's own clock
+        // (FR-457).
         //
         // What stood here was the FR-609 monotonic clamp: team state only ever
         // moves proposed → authoritative → retired, so a page fetched from the
@@ -2546,23 +2763,71 @@ pub async fn merge_synced_team(
         // an administrator) permanently unapplicable on this device.
         //
         // The staleness the clamp was defending against does not disappear; it
-        // moves to where it can actually be resolved. Ordering pulled pages is
-        // the sync cursor's job, not a per-row comparison of two states neither
-        // of which carries a version.
+        // moves to where it can actually be resolved — and for a while nothing
+        // resolved it. "The sync cursor's job" is true of rows this store has
+        // not seen and says nothing about a page racing this store's *own*
+        // concurrent write of a transition it had just been authorized to make.
+        // That race cost FR-457 outright: a page fetched before a local
+        // retirement and applied after it wrote `NULL` over
+        // `retired_by_user_id` and `retired_at` and put the row back to
+        // `proposed`, after which `retire_team`'s compare-and-swap on
+        // `authoritative` refused and the actor was recorded nowhere at all.
+        // Observed rollback: 11.7 ms.
+        //
+        // **So the page is dated, and the comparison is between two readings of
+        // one clock.** `server_changed_at` holds the server's own ordering key
+        // for the last page this row was made to reflect, and the predicate
+        // declines a page that is not newer than it. Nothing local enters the
+        // comparison, so a device whose clock disagrees with its server cannot
+        // decide which record of a retirement survives.
+        //
+        // **This is not the clamp returning.** The clamp read the *state* and
+        // required it to advance, which is the client judging the authority's
+        // decisions. This reads the authority's own version and requires it to
+        // advance, which is the client declining to apply the authority's
+        // answers out of order. A genuinely newer row still wins whatever it
+        // says — a reversal included — because a newer decision carries a newer
+        // `changed_at`: every statement the server has
+        // (`ratify_team`/`retire_team`/`supersede` in `cairn-server`) only ever
+        // *sets* a lifecycle timestamp to `now()`, never clears one, so
+        // `GREATEST(created_at, ratified_at, retired_at, superseded_at)` is
+        // non-decreasing per row. A future route that cleared one would have to
+        // carry its own newer version, or this predicate would decline it.
+        //
+        // **Two nulls, two different meanings, both resolving to "apply".**
+        // `server_changed_at IS NULL` is a row that predates schema 11: nothing
+        // is known about which version it reflects, and the safe reading of
+        // unknown is that the incoming page wins, so an upgraded store
+        // converges on its next pull exactly as it did before. `?17 IS NULL` is
+        // a *peer* below that schema, which sends no version at all: such a
+        // page also applies, because a store rendered unable to sync with an
+        // older server would be a worse failure than the staleness being
+        // ordered here. Both are stated as explicit disjuncts because
+        // `server_changed_at <= NULL` is `NULL`, which is not true — an older
+        // server would otherwise have had every one of its pages declined.
+        //
+        // `COALESCE` on the way in for the mirror image of that: a page from an
+        // older peer must not *erase* a version this row already has, or one
+        // such page would switch the guard off for that row permanently.
         //
         // Content is refreshed for the same reason it is refreshed for personal
         // knowledge: a server-side correction the cache cannot accept is a
         // correction that never reaches the reader.
         let digest = content_norm_digest(&incoming.content);
-        sqlx::query(
+        let incoming_version = incoming.server_changed_at.map(server_version_text);
+        let applied = sqlx::query(
             "UPDATE team_knowledge
                 SET knowledge_type = ?8, content = ?9, content_norm_digest = ?10,
                     topic_key = ?11, value_key = ?12,
                     state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
                     retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7,
                     proposed_by_user_id = ?13, writer_id = ?14, writer_seq = ?15,
-                    created_at = ?16
-              WHERE id = ?6",
+                    created_at = ?16,
+                    server_changed_at = COALESCE(?17, server_changed_at)
+              WHERE id = ?6
+                AND (server_changed_at IS NULL
+                     OR ?17 IS NULL
+                     OR server_changed_at <= ?17)",
         )
         .bind(incoming.state.as_str())
         .bind(incoming.ratified_by_user_id.map(|u| u.to_string()))
@@ -2580,25 +2845,42 @@ pub async fn merge_synced_team(
         .bind(incoming.writer_id.to_string())
         .bind(incoming.writer_seq)
         .bind(rows::ts_text(incoming.created_at))
+        .bind(&incoming_version)
         .execute(&mut *tx)
         .await?;
 
-        // As for personal knowledge: applicability is replaced, not added to,
-        // so a fact the server removed stops scoping recall here.
-        sqlx::query("DELETE FROM team_knowledge_applicability WHERE team_id = ?1")
-            .bind(incoming.id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        for fact in &incoming.applicability {
-            sqlx::query(
-                "INSERT OR IGNORE INTO team_knowledge_applicability (team_id, kind, value)
-                 VALUES (?1, ?2, ?3)",
-            )
-            .bind(incoming.id.to_string())
-            .bind(fact.kind.as_str())
-            .bind(&fact.value)
-            .execute(&mut *tx)
-            .await?;
+        // **A declined page is not an error, and it is not half-applied
+        // either.** Zero rows means the predicate above judged this page older
+        // than what the row already reflects. The caller is told the page was
+        // processed — it was, and re-delivering it forever would wedge the pull
+        // cursor over a page there is nothing left to do with — but the facts
+        // must not be rewritten from it. Replacing applicability from a stale
+        // page would undo a re-scoping the newer page had already applied,
+        // which is the same erasure the `WHERE` clause exists to prevent,
+        // committed one table over.
+        if applied.rows_affected() > 0 {
+            // As for personal knowledge: applicability is replaced, not added
+            // to, so a fact the server removed stops scoping recall here.
+            sqlx::query("DELETE FROM team_knowledge_applicability WHERE team_id = ?1")
+                .bind(incoming.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            for fact in &incoming.applicability {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO team_knowledge_applicability (team_id, kind, value)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .bind(incoming.id.to_string())
+                .bind(fact.kind.as_str())
+                .bind(&fact.value)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else {
+            tracing::debug!(
+                team = %incoming.id,
+                "declined a pulled team page older than the version this row already reflects"
+            );
         }
     }
 
@@ -5079,6 +5361,7 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
         };
         let merged = merge_synced_team(&store, a, row).await.unwrap();
         assert_eq!(merged.content, "we squash-merge");
@@ -5114,6 +5397,7 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
         };
         merge_synced_team(&store, a, first).await.unwrap();
 
@@ -5135,6 +5419,7 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
         };
         let err = merge_synced_team(&store, b, second).await.unwrap_err();
         match err {
@@ -5154,6 +5439,447 @@ mod tests {
         assert!(row.is_none());
         // The first instance's row is untouched.
         assert_eq!(row_count(&store, "team_knowledge").await, 1);
+    }
+
+    /// One `team_knowledge` row exactly as the server's change feed would send
+    /// it, at a stated server version.
+    ///
+    /// `changed_at` is the server's own ordering key — what `team_changes`
+    /// computes as `GREATEST(created_at, ratified_at, retired_at,
+    /// superseded_at)` — and the whole point of these tests is that two pages
+    /// carrying different values of it are not interchangeable.
+    fn team_page(
+        row: &TeamKnowledge,
+        state: TeamState,
+        changed_at: Option<DateTime<Utc>>,
+    ) -> SyncedTeamKnowledge {
+        SyncedTeamKnowledge {
+            id: row.id,
+            knowledge_type: row.knowledge_type,
+            content: row.content.clone(),
+            topic_key: row.topic_key.clone(),
+            value_key: row.value_key.clone(),
+            applicability: Vec::new(),
+            state,
+            proposed_by_user_id: row.proposed_by_user_id,
+            // A page from before either transition carries neither actor and
+            // neither timestamp. That is not a defect of the fixture — it is
+            // precisely the page whose application erases both.
+            ratified_by_user_id: None,
+            ratified_at: None,
+            writer_id: row.writer_id,
+            writer_seq: row.writer_seq,
+            created_at: row.created_at,
+            superseded_by_id: None,
+            retired_by_user_id: None,
+            retired_at: None,
+            server_changed_at: changed_at,
+        }
+    }
+
+    async fn stored_server_version(store: &Store, id: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT server_changed_at FROM team_knowledge WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// The stored server version orders the way SQLite compares it (FR-457).
+    ///
+    /// The guard in [`merge_synced_team`] is a `TEXT` comparison, and SQLite
+    /// compares `TEXT` byte by byte. So "older than" has to be the same
+    /// relation as "sorts before" for every value this column can hold, or the
+    /// predicate silently decides some pairs backwards — and the pair it gets
+    /// wrong is the one where a retirement is erased.
+    ///
+    /// `to_rfc3339` cannot be used for this: it prints the fractional part in
+    /// groups of three digits or omits it altogether, so two instants can be
+    /// encoded at different lengths. Fixed nine digits makes byte order and
+    /// chronological order the same relation, and the values are still ordinary
+    /// RFC 3339 that [`rows::parse_ts`] reads back.
+    ///
+    /// Falsified by encoding the column with `rows::ts_text`.
+    #[test]
+    fn the_stored_server_version_sorts_in_time_order() {
+        let base = DateTime::parse_from_rfc3339("2026-09-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let instants = [
+            base,
+            base + chrono::Duration::nanoseconds(1),
+            base + chrono::Duration::microseconds(1),
+            base + chrono::Duration::milliseconds(500),
+            base + chrono::Duration::seconds(1),
+            base + chrono::Duration::days(400),
+        ];
+        let encoded: Vec<String> = instants.iter().copied().map(server_version_text).collect();
+
+        let width = encoded[0].len();
+        for (text, instant) in encoded.iter().zip(instants.iter()) {
+            assert_eq!(
+                text.len(),
+                width,
+                "{text} is not the same width as the rest"
+            );
+            assert_eq!(
+                rows::parse_ts(text),
+                Some(*instant),
+                "{text} does not read back as the instant it encodes"
+            );
+        }
+        for pair in encoded.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} must sort before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// A pulled page older than what a row already reflects cannot erase who
+    /// retired it (FR-457).
+    ///
+    /// FR-457 requires every team state transition to be recorded with who
+    /// acted *and* when, and to **remain inspectable after the transition**.
+    /// The last clause is the one that failed, and it failed on the acting
+    /// device: `merge_synced_team` refreshed a row on `WHERE id = ?` and
+    /// nothing else, so a page fetched from the server *before* a local
+    /// retirement and applied after it wrote `NULL` over `retired_by_user_id`
+    /// and `retired_at` and rolled an `authoritative` row back to `proposed`.
+    /// `retire_team`'s compare-and-swap on `authoritative` then found
+    /// `proposed` and refused, and the retirement's actor was recorded nowhere
+    /// at all while `cairn team retire` reported success.
+    ///
+    /// That race was reproducible at roughly one run in sixty and one in four
+    /// under load, which is a defect a test cannot be built on. This makes it
+    /// deterministic by doing in three statements what the race did by
+    /// accident: advance the row locally, then hand the merge the page the
+    /// server had sent before it. No daemon, no server, no clock to lose.
+    ///
+    /// The second half is what keeps the fix from being "ignore the server"
+    /// (FR-712a): a page carrying a *newer* server version still wins outright,
+    /// content, actor and all. The guard declines exactly one thing — a page
+    /// older than the version the row already reflects — and it decides that by
+    /// comparing two readings of the server's own clock, never a local one
+    /// against a remote one.
+    ///
+    /// Falsified by restoring `merge_synced_team`'s predicate to
+    /// `WHERE id = ?6`, by dropping `server_changed_at` from either of its two
+    /// branches, or by removing the version `note_team_server_version` records
+    /// for a locally applied transition.
+    #[tokio::test]
+    async fn a_stale_pulled_page_cannot_erase_who_retired_a_team_entry() {
+        let store = store().await;
+        let inst = instance();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "release tags are annotated",
+            "release.tags",
+            "annotated",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        // Where this device stood after its last successful pull: the proposal,
+        // at the server version the proposal was created with.
+        let proposal_version = Utc::now();
+        let merged = merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged.state, TeamState::Proposed);
+        assert!(
+            stored_server_version(&store, id).await.is_some(),
+            "a merged page must leave the version it was ordered by on the row, \
+             or there is nothing for a later page to be compared against"
+        );
+
+        // The two transitions, applied locally the way `cairn team ratify` and
+        // `cairn team retire` apply them once the server has authorized each —
+        // and then the server version each reply named, which is the only thing
+        // that tells this row it has moved past the page above.
+        ratify_team(&store, id, retirer, None).await.unwrap();
+        note_team_server_version(&store, id, proposal_version + chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        retire_team(&store, id, retirer).await.unwrap();
+        let retirement_version = proposal_version + chrono::Duration::seconds(2);
+        note_team_server_version(&store, id, retirement_version)
+            .await
+            .unwrap();
+
+        // The race, made deterministic: the page the server sent before the
+        // retirement, delivered after it.
+        let survived = merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            survived.state,
+            TeamState::Retired,
+            "a page older than this row rolled a retired entry back to proposed"
+        );
+        assert_eq!(
+            survived.retired_by_user_id,
+            Some(retirer),
+            "a stale page erased who retired the entry, on the device that \
+             retired it (FR-457)"
+        );
+        assert!(
+            survived.retired_at.is_some(),
+            "a stale page erased when the entry was retired (FR-457)"
+        );
+        assert_eq!(
+            survived.ratified_by_user_id,
+            Some(retirer),
+            "a stale page erased who ratified the entry as well (FR-457)"
+        );
+
+        // And the authority still wins when it is genuinely speaking later.
+        let corrector = admin();
+        let corrected_at = retirement_version + chrono::Duration::seconds(1);
+        let mut newer = team_page(&proposed.record, TeamState::Retired, Some(corrected_at));
+        newer.content = "release tags are annotated and signed".to_string();
+        newer.ratified_by_user_id = Some(retirer);
+        newer.ratified_at = Some(proposal_version);
+        newer.retired_by_user_id = Some(corrector);
+        newer.retired_at = Some(corrected_at);
+        let applied = merge_synced_team(&store, inst, newer).await.unwrap();
+        assert_eq!(
+            applied.content, "release tags are annotated and signed",
+            "a newer server page must still correct this row's content (FR-712a)"
+        );
+        assert_eq!(
+            applied.retired_by_user_id,
+            Some(corrector),
+            "a newer server page must still correct who acted (FR-712a)"
+        );
+    }
+
+    /// A transition and the version it reflects are recorded together, so there
+    /// is no instant at which a stale page can still erase it (FR-457).
+    ///
+    /// # What this adds over the test above
+    ///
+    /// That test records each transition and *then* records the version it
+    /// reflects, which is how the repair was first written and is what the
+    /// production paths did. Two statements leave a window: between them the row
+    /// already holds the new actor while `server_changed_at` still names the
+    /// previous page's version, so `merge_synced_team`'s guard evaluates
+    /// `server_changed_at <= incoming` as true and admits a page fetched before
+    /// the transition — which erases the actor exactly as it did before any of
+    /// this existed. Far narrower than the 250-300 ms fetch-to-apply gap that
+    /// made the original defect reproducible at 1 in 60, and the same defect.
+    ///
+    /// So there is no second statement here. The version travels into the swap
+    /// and commits with it, and the stale page arrives with nothing having
+    /// happened in between — which is the strongest form of the scenario the
+    /// production path can actually be in.
+    ///
+    /// **Falsified by** moving the `server_changed_at` advance out of either
+    /// swap's `UPDATE` and back into a following statement: the page is then
+    /// admitted and the retirement's actor is gone.
+    #[tokio::test]
+    async fn a_transition_and_its_server_version_commit_together() {
+        let store = store().await;
+        let inst = instance();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "migrations run on boot",
+            "migrations.boot",
+            "on",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        let proposal_version = Utc::now();
+        merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Exactly what the handlers now do: the server authorized each
+        // transition and named when, and that timestamp goes *into* the swap.
+        // Nothing follows either call.
+        ratify_team_at_version(
+            &store,
+            id,
+            retirer,
+            None,
+            Some(proposal_version + chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(
+                proposal_version + chrono::Duration::seconds(1)
+            )),
+            "the ratification did not record the version it reflects, so the \
+             guard has nothing to decline a stale page with"
+        );
+
+        retire_team_at_version(
+            &store,
+            id,
+            retirer,
+            Some(proposal_version + chrono::Duration::seconds(2)),
+        )
+        .await
+        .unwrap();
+
+        // **The page that makes this test about the retirement.**
+        //
+        // Not the original proposal — the ratification already advanced the mark
+        // past that one, so a proposal-era page is declined whatever the retire
+        // does, and asserting against it would pass with the retire's version
+        // advance deleted. This is the page the server sent *after* the
+        // ratification and *before* the retirement: it carries the ratified
+        // state at the ratification's own version, which is exactly the mark the
+        // row would still hold if the retirement had not recorded its own. The
+        // guard admits an equal version by design, so the only thing standing
+        // between this page and an erased retirement is the retirement having
+        // committed its version with itself.
+        let mut mid = team_page(
+            &proposed.record,
+            TeamState::Authoritative,
+            Some(proposal_version + chrono::Duration::seconds(1)),
+        );
+        mid.ratified_by_user_id = Some(retirer);
+        mid.ratified_at = Some(proposal_version + chrono::Duration::seconds(1));
+        let survived = merge_synced_team(&store, inst, mid).await.unwrap();
+
+        assert_eq!(
+            survived.state,
+            TeamState::Retired,
+            "a page from before the retirement rolled a retired entry back to \
+             authoritative, with no second statement to blame"
+        );
+        assert_eq!(
+            survived.retired_by_user_id,
+            Some(retirer),
+            "who retired the entry was erased on the device that retired it, \
+             with the version recorded in the same transaction (FR-457)"
+        );
+        assert!(
+            survived.retired_at.is_some(),
+            "when the entry was retired was erased (FR-457)"
+        );
+        assert_eq!(
+            survived.ratified_by_user_id,
+            Some(retirer),
+            "who ratified the entry was erased as well (FR-457)"
+        );
+    }
+
+    /// A peer that sends no version at all can still synchronize (FR-457,
+    /// FR-712a).
+    ///
+    /// The guard orders pages by the server's own `changed_at`, and a server
+    /// below local schema 11 sends none. "Cannot be ordered" must mean *the
+    /// page applies*, not *the page is refused*: a store rendered unable to
+    /// accept anything from an older deployment would be a far larger outage
+    /// than the staleness being ordered here, and it would be an outage caused
+    /// by a repair.
+    ///
+    /// The same reading covers a row written before the column existed: its
+    /// `NULL` means nothing is known about which version it reflects, so the
+    /// incoming page wins and an upgraded store converges on its next pull
+    /// exactly as it did before. The guard only ever tightens.
+    ///
+    /// And an unversioned page must not *erase* a version the row already has,
+    /// or one page from an older peer would switch the guard off for that row
+    /// permanently — which is what the `COALESCE` is for.
+    ///
+    /// Falsified by dropping either `IS NULL` disjunct from
+    /// `merge_synced_team`'s predicate, or by binding `?17` directly instead of
+    /// through `COALESCE`.
+    #[tokio::test]
+    async fn a_page_from_a_peer_that_sends_no_version_still_applies() {
+        let store = store().await;
+        let inst = instance();
+        let proposer = member();
+        let proposed = propose(&store, proposer, "we squash-merge", "vcs.merge", "squash").await;
+        let id = proposed.record.id;
+
+        // A row that predates the column, merged from a peer that predates the
+        // field: both nulls, and the page applies.
+        assert!(stored_server_version(&store, id).await.is_none());
+        // Both halves of the ratification, because the table's own `CHECK`
+        // requires them of an authoritative row — the schema does not let a
+        // transition be half-recorded even from a page (FR-457).
+        let ratifier = admin();
+        let ratified_at = Utc::now();
+        let authoritative = |version: Option<DateTime<Utc>>| {
+            let mut page = team_page(&proposed.record, TeamState::Authoritative, version);
+            page.ratified_by_user_id = Some(ratifier);
+            page.ratified_at = Some(ratified_at);
+            page
+        };
+        let mut page = authoritative(None);
+        page.content = "we squash-merge, always".to_string();
+        let applied = merge_synced_team(&store, inst, page).await.unwrap();
+        assert_eq!(applied.content, "we squash-merge, always");
+        assert_eq!(applied.state, TeamState::Authoritative);
+        assert!(
+            stored_server_version(&store, id).await.is_none(),
+            "an unversioned page must not invent a version for the row"
+        );
+
+        // Once a version *is* known, an unversioned page still applies — and
+        // still must not erase it.
+        let known = Utc::now();
+        let mut versioned = authoritative(Some(known));
+        versioned.content = "we squash-merge on main".to_string();
+        merge_synced_team(&store, inst, versioned).await.unwrap();
+        let recorded = stored_server_version(&store, id).await;
+        assert!(recorded.is_some());
+
+        let mut unversioned = authoritative(None);
+        unversioned.content = "we squash-merge on every branch".to_string();
+        let applied = merge_synced_team(&store, inst, unversioned).await.unwrap();
+        assert_eq!(
+            applied.content, "we squash-merge on every branch",
+            "an older peer's page must still apply"
+        );
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            recorded,
+            "an older peer's page erased the version this row already had, \
+             which switches the guard off for it permanently"
+        );
     }
 
     #[tokio::test]

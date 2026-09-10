@@ -919,6 +919,13 @@ pub async fn team_knowledge_view(
                 superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
                 retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
                 retired_at: row.try_get("retired_at").ok().flatten(),
+                // The alias this query already selected and ordered by.
+                // `GREATEST` ignores nulls and `created_at` is `NOT NULL`, so
+                // the column is always present; `created_at` is the fallback
+                // only so a decode failure cannot drop the whole page.
+                changed_at: row
+                    .try_get("changed_at")
+                    .unwrap_or_else(|_| row.get("created_at")),
                 applicability: facts.remove(&id).unwrap_or_default(),
             }
             .to_json()
@@ -1210,6 +1217,13 @@ pub async fn team_changes(
                 superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
                 retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
                 retired_at: row.try_get("retired_at").ok().flatten(),
+                // The alias this query already selected and ordered by.
+                // `GREATEST` ignores nulls and `created_at` is `NOT NULL`, so
+                // the column is always present; `created_at` is the fallback
+                // only so a decode failure cannot drop the whole page.
+                changed_at: row
+                    .try_get("changed_at")
+                    .unwrap_or_else(|_| row.get("created_at")),
                 applicability: facts.remove(&id).unwrap_or_default(),
             }
             .to_json(),
@@ -1328,6 +1342,13 @@ fn personal_row_json(
 /// cursor, and a device has nothing to do with it — what a device needs is
 /// `superseded_by_id`, which does travel.
 ///
+/// One field is in both lists under two names. `changed_at` here is
+/// `server_changed_at` on the mirror: the same value, renamed on arrival
+/// because on a device the load-bearing fact about it is *whose clock it is*.
+/// It is not a column of `team_knowledge` on either side — here it is the
+/// derived ordering key both queries compute, there it is what the last
+/// applied page's key was recorded as.
+///
 /// This list is the thing to check when a column is added to either side. It
 /// silently lost `retired_by_user_id` once, which made "who retired this" a
 /// question only the server could answer (FR-457).
@@ -1361,6 +1382,24 @@ struct TeamWireRow {
     /// operator asks for.
     retired_by_user_id: Option<Uuid>,
     retired_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// **The version this server ordered the row by** — the same
+    /// `GREATEST(created_at, ratified_at, retired_at, superseded_at)` both
+    /// queries above already compute to page and sort on, carried rather than
+    /// recomputed so the value a device compares against is byte-for-byte the
+    /// value this page was sorted by.
+    ///
+    /// It exists because a device could not previously order a pulled page
+    /// against its own concurrent local write. `merge_synced_team` overwrote
+    /// unconditionally, so a page fetched *before* a local transition and
+    /// applied after it rolled the row back — writing `NULL` over
+    /// `retired_by_user_id` and `retired_at` and leaving FR-457's "who acted"
+    /// unanswerable on the very machine that acted. The mirror had nothing to
+    /// compare because the only clock that can decide the question, the
+    /// server's, was never sent. This is that clock.
+    ///
+    /// One clock, not two: the mirror stores this value and compares the next
+    /// page's against *it*, never against a local timestamp.
+    changed_at: chrono::DateTime<chrono::Utc>,
     applicability: Vec<Value>,
 }
 
@@ -1383,6 +1422,7 @@ impl TeamWireRow {
             "superseded_by_id": self.superseded_by_id,
             "retired_by_user_id": self.retired_by_user_id,
             "retired_at": self.retired_at.map(|t| t.to_rfc3339()),
+            "changed_at": self.changed_at.to_rfc3339(),
         })
     }
 }
@@ -1977,12 +2017,14 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            changed_at: chrono::Utc::now(),
             applicability: vec![json!({ "kind": "tool", "value": "git" })],
         }
     }
 
     /// **The wire shape is `cairn_store::global::SyncedTeamKnowledge`, field for
-    /// field** (`crates/cairn-store/src/global.rs`).
+    /// field** (`crates/cairn-store/src/global.rs`) — `changed_at` excepted,
+    /// which the mirror names `server_changed_at`.
     ///
     /// Asserted as an exact key set rather than field by field, because both
     /// directions of drift break the mirror: a missing field fails
@@ -2016,6 +2058,14 @@ mod tests {
             // passed and the field reached nobody.
             "retired_by_user_id",
             "retired_at",
+            // The server's own version of the row (FR-457, FR-712a). The one
+            // name in this list that is *not* spelled the same on the mirror:
+            // it is stored there as `server_changed_at`, because on a device
+            // the salient fact about the value is whose clock it came from.
+            // Without it a device cannot tell a page fetched before its own
+            // local transition from one fetched after, and the merge that
+            // guesses wrong erases who acted.
+            "changed_at",
         ]
         .into_iter()
         .collect();

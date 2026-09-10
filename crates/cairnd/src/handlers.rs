@@ -46,7 +46,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         }
 
         Request::Init { cwd } => init(d, &cwd).await,
-        Request::Status { cwd } => status(d, &cwd).await,
+        Request::Status { cwd, spool_reason } => status(d, &cwd, spool_reason).await,
 
         Request::SessionStart {
             cwd,
@@ -1174,7 +1174,7 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     }))
 }
 
-async fn status(d: &Daemon, cwd: &str) -> Reply {
+async fn status(d: &Daemon, cwd: &str, spool_reason: bool) -> Reply {
     let r = d.resolve(cwd).await?;
     let git = git_status(r.repo.worktree_path.clone()).await?;
     // Memory scoped to a branch or task that no longer resolves becomes
@@ -1212,7 +1212,7 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         local_schema_version: cairn_store::migrate::latest_version(),
         sessions_awaiting_handoff: debt.0,
         knowledge: knowledge_health(d, r.project.id).await,
-        capture: capture_health(d, r.project.id).await,
+        capture: capture_health(d, r.project.id, spool_reason).await,
         handoff_synthesis_failures: debt
             .1
             .into_iter()
@@ -1350,38 +1350,66 @@ async fn durability(d: &Daemon, cwd: &str) -> Reply {
 /// Returns `None` rather than zeros when the store cannot answer. Zeros would
 /// read as "capture is healthy and idle", which is a claim, and an unavailable
 /// store has not established it.
-async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
+async fn capture_health(d: &Daemon, project_id: Uuid, spool_reason: bool) -> Option<CaptureHealth> {
     let capacity = cairn_store::spool::SpoolCapacity::default();
     let counts = cairn_store::spool::disposition_counts(&d.store, project_id)
         .await
         .ok()?;
-    // **Measured against the server answering, not against the binding.**
+    // **Measured against the server answering now, from a sample taken now.**
     //
     // "Which rows belong to a different deployment?" is a question about the
     // peer: rows carry the instance they were queued for, and the mismatch is
-    // between that and whoever is answering now. Comparing them to the store's
+    // between that and whoever is answering. Two wrong answers were available
+    // and this code held both of them in turn. Comparing rows to the store's
     // own binding answers "none" precisely when a replacement deployment has
-    // arrived, which is the one case FR-792 exists to make visible — a backlog
-    // that reads as a queue that mysteriously stopped.
+    // arrived — the one case FR-792 exists to make visible. Comparing them to
+    // whatever instance this process last happened to observe is wrong for a
+    // subtler reason: that memory does not survive the daemon being replaced,
+    // and `supervise` replaces daemons routinely, so the process that saw the
+    // replacement was reliably gone by the time anyone asked.
     //
-    // The binding is the fallback, for a daemon that has not reached the
-    // server since it started: it has observed nothing, and the store's own
-    // instance is the honest answer until it has.
-    let instance = match *d.last_observed_instance.read().await {
-        Some(observed) => Some(observed),
-        None => cairn_store::cursor::bound_server_instance(&d.store)
-            .await
-            .ok()
-            .flatten(),
-    };
-    let bound_for_log = cairn_store::cursor::bound_server_instance(&d.store)
+    // So status takes its own bounded, read-only sample (FR-792a) — but only
+    // when there is a backlog for it to explain. An empty spool has no reason
+    // to report, so it must not depend on the network to say so.
+    let bound = cairn_store::cursor::bound_server_instance(&d.store)
         .await
         .ok()
         .flatten();
-    let observed_for_log = *d.last_observed_instance.read().await;
-    tracing::info!(
+    let undelivered_now = cairn_store::spool::undelivered_total(&d.store).await.ok()?;
+    let probe = if spool_reason && undelivered_now > 0 {
+        Some(crate::sync::probe_peer_instance(d).await)
+    } else {
+        None
+    };
+    // The instance the counts are measured against.
+    //
+    // `Unreachable` deliberately yields `None`: with nothing answering there is
+    // no current peer, and a remembered one must not stand in for it (FR-792c).
+    // A store that cannot reach its endpoint has an outage, not a mismatch.
+    let instance = match probe {
+        Some(crate::sync::PeerProbe::Peer(peer)) => Some(peer),
+        Some(crate::sync::PeerProbe::Unreachable) => None,
+        // Nothing configured, or nothing to explain. Either way no peer is
+        // answering, so no row can belong to a different one.
+        Some(crate::sync::PeerProbe::NotConfigured) => None,
+        None => bound,
+    };
+    // The whole-spool mismatch: this store is bound to one deployment and a
+    // different one is answering. FR-791 will refuse it, so no row will move
+    // whatever its own state says — and the rows themselves cannot show this,
+    // because a row queued before the first successful sync carries no instance
+    // at all and would otherwise report a healthy queue.
+    let peer_mismatch = match (probe, bound) {
+        (Some(crate::sync::PeerProbe::Peer(peer)), Some(b)) => peer != b,
+        // No binding is not a mismatch. Observing a peer neither creates a
+        // binding nor constitutes one (FR-792b).
+        _ => false,
+    };
+    let unreachable = matches!(probe, Some(crate::sync::PeerProbe::Unreachable));
+    tracing::debug!(
         target: "cairn::observation",
-        compared_against = ?instance, bound = ?bound_for_log, observed = ?observed_for_log,
+        compared_against = ?instance, bound = ?bound, probe = ?probe,
+        peer_mismatch, undelivered_now,
         "spool status is measuring against this instance"
     );
     let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity, instance)
@@ -1393,9 +1421,6 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
     // Read once for both spools, so the two halves of one report cannot
     // disagree about whether anybody is signed in.
     let signed_in = d.account_identity().await.is_some();
-    let unreachable = d
-        .server_unreachable
-        .load(std::sync::atomic::Ordering::Relaxed);
 
     let mut dispositions: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
@@ -1407,24 +1432,26 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
 
     Some(CaptureHealth {
         dispositions,
-        events: spool_health(&events, signed_in, unreachable),
-        commands: spool_health(&commands, signed_in, unreachable),
+        events: spool_health(&events, signed_in, peer_mismatch, unreachable),
+        commands: spool_health(&commands, signed_in, peer_mismatch, unreachable),
     })
 }
 
 /// One spool's health on the wire.
 ///
-/// `signed_in` and `unreachable` are passed rather than read from the breakdown,
-/// because the rows cannot know either one — and they are the two blocking
-/// reasons that leave no trace in the spool at all (FR-792).
+/// `signed_in`, `peer_mismatch` and `unreachable` are passed rather than read
+/// from the breakdown, because the rows cannot know any of them — and they are
+/// the blocking reasons that leave no trace in the spool at all (FR-792).
 ///
-/// A drain with no account never claims, and a drain that cannot reach the
-/// server fails before claiming, so in both cases every row sits `waiting` and
+/// A drain with no account never claims; a drain that cannot reach the server
+/// fails before claiming; and a drain answered by the wrong deployment is
+/// refused before it claims. In all three cases every row sits `waiting` and
 /// looks identical to work that was queued a second ago and is about to go. A
 /// user staring at a queue that is not moving is owed the difference.
 fn spool_health(
     b: &cairn_store::spool::SpoolBreakdown,
     signed_in: bool,
+    peer_mismatch: bool,
     unreachable: bool,
 ) -> SpoolHealth {
     SpoolHealth {
@@ -1440,21 +1467,37 @@ fn spool_health(
         saturated: b.saturated,
         other_instance: b.other_instance,
         oldest_at: b.oldest_at.map(|t| t.to_rfc3339()),
-        // No account outranks every other reason: nothing at all can be claimed
-        // — the claim predicate matches an account exactly — so a `backing_off`
-        // here would describe a retry that is not being attempted.
-        blocked_reason: match (signed_in, unreachable, b.undelivered() > 0) {
+        // **The stated precedence** (FR-792d, `data-model.md` §5b). A spool can
+        // be several kinds of blocked at once and a status line reports one
+        // thing, so the choice is written here as an ordered decision rather
+        // than left to the order in which the conditions happen to be computed.
+        //
+        // 1. `no_account`      nothing at all can be claimed — the claim
+        //                      predicate matches an account exactly — so a
+        //                      retry reason would describe a retry nobody is
+        //                      attempting.
+        // 2. `server_unreachable`
+        //                      Cairn cannot even ask, so no reason derived
+        //                      from row state describes what is happening.
+        // 3. `server_instance_mismatch` (whole)
+        //                      the answering deployment is not the one this
+        //                      store is bound to; FR-791 refuses it, so no row
+        //                      moves whatever its state, and the remedy is to
+        //                      re-point the store rather than to wait.
+        // 4..8                 the row-derived reasons, in the severity order
+        //                      `SpoolBreakdown::blocked_reason` states.
+        // 9. `server_instance_mismatch` (partial)
+        //                      also row-derived, and last there: the
+        //                      deliverable part is still moving.
+        blocked_reason: match (signed_in, unreachable, peer_mismatch, b.undelivered() > 0) {
             // Nothing waiting is never blocked, whatever the network is doing.
-            (_, _, false) => b.blocked_reason().map(str::to_string),
-            // No account outranks everything: nothing at all can be claimed —
-            // the claim predicate matches an account exactly — so `backing_off`
-            // would describe a retry that is not being attempted.
-            (false, _, true) => Some("no_account".to_string()),
-            // Then reachability, which outranks the row-derived reasons for the
-            // same kind of reason: `backing_off` says Cairn is retrying and
-            // failing, and `server_unreachable` says it cannot even ask.
-            (true, true, true) => Some("server_unreachable".to_string()),
-            (true, false, true) => b.blocked_reason().map(str::to_string),
+            // A reason here would make "blocked" mean "has work", and a signal
+            // that is always on is not a signal.
+            (_, _, _, false) => b.blocked_reason().map(str::to_string),
+            (false, _, _, true) => Some("no_account".to_string()),
+            (true, true, _, true) => Some("server_unreachable".to_string()),
+            (true, false, true, true) => Some("server_instance_mismatch".to_string()),
+            (true, false, false, true) => b.blocked_reason().map(str::to_string),
         },
     }
 }
@@ -3661,7 +3704,16 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
                 e
             }
         })?;
-    match cairn_store::global::ratify_team(&d.store, id, actor, supersedes).await {
+    // The swap is about to win or lose, and either way no pulled page has
+    // carried this transition — so the version the row now reflects is in the
+    // server's reply and nowhere else yet. It travels *into* the swap, so the
+    // transition and its version commit together: recorded afterwards, a page
+    // fetched before the ratification is admitted in between and rolls the row
+    // back to `proposed`, taking `ratified_by_user_id` with it (FR-457).
+    let version = crate::sync::team_transition_version(&remote);
+    match cairn_store::global::ratify_team_at_version(&d.store, id, actor, supersedes, version)
+        .await
+    {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
@@ -3671,7 +3723,11 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
             // the correct content for a local copy that is a cache (FR-712a),
             // and leaving the stale one would show `proposed` for guidance the
             // whole deployment now follows.
-            crate::sync::adopt_team_answer(d, &remote).await;
+            //
+            // **And if adopting it fails, this refuses.** The `?` is the whole
+            // fix: the result used to be discarded, so a ratification that was
+            // recorded nowhere on this machine still answered `ok` (FR-457).
+            crate::sync::adopt_team_answer(d, &remote).await?;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
@@ -3716,7 +3772,10 @@ async fn require_account(d: &Daemon) -> Result<Uuid, WireError> {
 /// the same `state_conflict`-after-server-success treatment.
 async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
     let (remote, actor) = crate::sync::team_retire_remote(d, id).await?;
-    match cairn_store::global::retire_team(&d.store, id, actor).await {
+    // As `team_ratify`: the version travels into the swap so the retirement and
+    // the version it reflects commit together.
+    let version = crate::sync::team_transition_version(&remote);
+    match cairn_store::global::retire_team_at_version(&d.store, id, actor, version).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
@@ -3724,7 +3783,9 @@ async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
             // Same reasoning as `team_ratify`, and the symptom that found it:
             // the acting device recorded a retirement with no actor and no
             // timestamp, because the swap it expected to make never applied.
-            crate::sync::adopt_team_answer(d, &remote).await;
+            // Refuses when this last chance to record it also fails, rather
+            // than reporting a retirement nothing here can attribute.
+            crate::sync::adopt_team_answer(d, &remote).await?;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
@@ -4278,6 +4339,337 @@ mod tests {
         json["error"].clone()
     }
 
+    /// The blocked-reason precedence is the stated one, at every level
+    /// (FR-792d, `data-model.md` §5b).
+    ///
+    /// # Why a table and not a scenario
+    ///
+    /// A spool can be several kinds of blocked at once and a status line
+    /// reports one thing, so which one it reports is a decision — and before
+    /// this it was made by the order in which the conditions happened to be
+    /// computed, across two functions, one of which could not see two of the
+    /// inputs. An end-to-end test can reach perhaps three of these
+    /// combinations, and only by arranging a server, an outage and a backlog
+    /// for each; the ordering itself is a property of one pure function over a
+    /// struct of counts, so this drives it directly and every adjacent pair in
+    /// the published table is actually pinned.
+    ///
+    /// Each case asserts a *pair*: the reason that must win and the one it must
+    /// beat, both true at once. A case where only one condition held would pass
+    /// under any ordering at all.
+    ///
+    /// **Falsified by** reordering any two arms of either `match`, and by
+    /// moving a reason between the caller-supplied set and the row-derived one.
+    #[test]
+    fn one_reason_wins_and_the_order_is_the_published_one() {
+        use cairn_store::spool::SpoolBreakdown;
+
+        /// One row of the published table: the reason that must win, the
+        /// adjacent reason it must beat, and the state in which both hold.
+        struct Case {
+            expected: Option<&'static str>,
+            why: &'static str,
+            breakdown: SpoolBreakdown,
+            signed_in: bool,
+            peer_mismatch: bool,
+            unreachable: bool,
+        }
+
+        /// A breakdown with nothing wrong with it, spoiled per case.
+        fn quiet() -> SpoolBreakdown {
+            SpoolBreakdown {
+                waiting: 0,
+                in_flight: 0,
+                retrying: 0,
+                deferred: 0,
+                terminal: 0,
+                terminal_retry_exhausted: 0,
+                bytes: 0,
+                saturated: false,
+                other_instance: 0,
+                oldest_at: None,
+            }
+        }
+
+        let cases = vec![
+            Case {
+                expected: None,
+                why: "an empty spool is never blocked, whatever the network is \
+                      doing — a reason here would make `blocked` mean `has work`",
+                breakdown: quiet(),
+                signed_in: false,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("no_account"),
+                why: "nothing can be claimed at all, so it outranks \
+                      unreachability and a mismatch both",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: false,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("server_unreachable"),
+                why: "Cairn cannot even ask, so it outranks a mismatch it could \
+                      not have observed and every row-derived reason",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    retrying: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("server_instance_mismatch"),
+                why: "the answering deployment is not the bound one, so no row \
+                      moves whatever its state — it outranks saturation",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: true,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("saturated"),
+                why: "work is being lost rather than delayed, so it outranks a \
+                      terminal row that is merely stuck",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    terminal: 1,
+                    terminal_retry_exhausted: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("retry_exhausted"),
+                why: "a row that will never move again outranks a deferral that \
+                      resolves itself",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    terminal: 1,
+                    terminal_retry_exhausted: 1,
+                    deferred: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("refused_by_server"),
+                why: "a permanent refusal outranks a deferral and a backoff",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    terminal: 1,
+                    deferred: 1,
+                    retrying: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("awaiting_capability"),
+                why: "waiting for a server upgrade outranks a transient backoff",
+                breakdown: SpoolBreakdown {
+                    deferred: 1,
+                    retrying: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("backing_off"),
+                why: "Cairn is asking and failing, which outranks a partial \
+                      mismatch whose deliverable half is still moving",
+                breakdown: SpoolBreakdown {
+                    retrying: 1,
+                    waiting: 1,
+                    other_instance: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("server_instance_mismatch"),
+                why: "reported last when only some rows belong elsewhere: those \
+                      rows never will move, but the rest are draining normally",
+                breakdown: SpoolBreakdown {
+                    waiting: 2,
+                    other_instance: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+        ];
+
+        for c in cases {
+            let got = spool_health(&c.breakdown, c.signed_in, c.peer_mismatch, c.unreachable);
+            assert_eq!(
+                got.blocked_reason.as_deref(),
+                c.expected,
+                "{}\n  breakdown: {:?}\n  signed_in={} peer_mismatch={} unreachable={}",
+                c.why,
+                c.breakdown,
+                c.signed_in,
+                c.peer_mismatch,
+                c.unreachable
+            );
+        }
+    }
+
+    /// A status read only touches the network when it is asked for the spool's
+    /// reason (FR-792a, FR-105).
+    ///
+    /// # Why this test exists rather than a comment
+    ///
+    /// Answering "why is delivery not progressing" truthfully needs a fresh
+    /// sample of who is answering the endpoint, and taking one costs a network
+    /// round trip. `cairn status` and `cairn doctor` show that reason and must
+    /// pay for it. But `Request::Status` is also how `cairn agents`,
+    /// `cairn connect`, `cairn repair` and `cairn disconnect` read one unrelated
+    /// number — `sessions_awaiting_handoff` — and **FR-105 forbids detection
+    /// from requiring network access at all**. Nothing structural stops a later
+    /// change from making the probe unconditional again: it would still pass
+    /// every FR-792 test, and `cairn agents` would quietly start depending on a
+    /// server being reachable. So the boundary is pinned here.
+    ///
+    /// The endpoint is a port nothing listens on, which makes the two cases
+    /// distinguishable without a server: a probe that is taken cannot reach it
+    /// and reports `server_unreachable`, and a probe that is never taken leaves
+    /// the reason to be derived from the rows, which say nothing about the
+    /// network. So the assertion is not "it was fast" — a timing test would be
+    /// flaky and would prove nothing — but "the answer is one only a probe
+    /// could have produced".
+    ///
+    /// **Falsified by** probing regardless of `spool_reason`, and by dropping
+    /// the flag so both callers ask the same question.
+    #[tokio::test]
+    async fn detection_reads_status_without_touching_the_network() {
+        let r = Repo::new().await;
+        let p = fx::project(&r.daemon, "probe-scope", None).await;
+        let s = fx::session(&r.daemon, &p, "probe-scope-1").await;
+
+        // A credential pointing at a port nothing serves. Port 1 is privileged
+        // and unbound, so the connection is refused immediately rather than
+        // waiting out the probe's deadline.
+        r.daemon
+            .mutate_credentials(|c| {
+                c.url = Some("http://127.0.0.1:1".to_string());
+                c.token = Some("probe-scope-token".to_string());
+                // Signed in, because `no_account` outranks reachability by
+                // design (FR-792d): with nobody signed in nothing can be
+                // claimed at all, and that reason would mask the one under
+                // test here.
+                c.account_id = Some(Uuid::now_v7());
+            })
+            .await
+            .expect("set the fixture's credential");
+
+        // One undelivered row, because a spool with nothing in it is never
+        // blocked and never probes — the interesting case is the one where
+        // FR-792's question is live.
+        let admitted = cairn_store::spool::spool_event(
+            &r.daemon.store,
+            cairn_store::spool::SpoolCapacity::default(),
+            cairn_store::spool::NewEvent {
+                project_id: p.id,
+                account_id: Uuid::now_v7(),
+                event: cairn_core::event::SafeCanonicalEvent {
+                    event_id: Uuid::nil(),
+                    session_seq: 0,
+                    contract_version: 1,
+                    kind: cairn_core::event::EventKind::FileRead,
+                    agent: cairn_core::event::EventAgent::ClaudeCode,
+                    vendor_event: None,
+                    session_id: s.id,
+                    occurred_at: chrono::Utc::now(),
+                    content: Some(cairn_core::event::EventContent::File {
+                        repo_file: Some("src/probe.rs".to_string()),
+                        repo_file_from: None,
+                        change_kind: None,
+                        file_identity: cairn_core::event::FileIdentity::Present,
+                    }),
+                },
+                server_instance_id: None,
+            },
+        )
+        .await
+        .expect("spool one event");
+        assert!(
+            matches!(admitted, cairn_store::spool::EventAdmission::Spooled { .. }),
+            "the fixture queued nothing, so neither case below is about a \
+             blocked spool: {admitted:?}"
+        );
+
+        let asked = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            asked["capture"]["events"]["blocked_reason"].as_str(),
+            Some("server_unreachable"),
+            "a caller that asked for the reason did not get a fresh sample of \
+             the endpoint (FR-792a): {}",
+            asked["capture"]["events"]
+        );
+
+        let unasked = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: false,
+            },
+        )
+        .await;
+        assert_ne!(
+            unasked["capture"]["events"]["blocked_reason"].as_str(),
+            Some("server_unreachable"),
+            "detection reached the network to answer a question it never reads; \
+             FR-105 requires it not to: {}",
+            unasked["capture"]["events"]
+        );
+        // And the cheap read is still a real read: the depth and the age of the
+        // backlog are local facts and must be reported either way (FR-792).
+        assert!(
+            unasked["capture"]["events"]["undelivered"]
+                .as_i64()
+                .unwrap_or(0)
+                > 0
+                && unasked["capture"]["events"]["oldest_at"].as_str().is_some(),
+            "the network-free read stopped reporting the depth and age FR-792 \
+             asks for: {}",
+            unasked["capture"]["events"]
+        );
+    }
+
     #[tokio::test]
     async fn daemon_status_reports_this_run_and_the_schema_it_opened() {
         let r = Repo::new().await;
@@ -4314,7 +4706,14 @@ mod tests {
     #[tokio::test]
     async fn status_reports_the_real_working_tree() {
         let r = Repo::new().await;
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(v["repository"]["branch"], "main");
         assert!(v["repository"]["commit_sha"].is_string());
         assert_eq!(v["repository"]["untracked"], 0);
@@ -4322,7 +4721,14 @@ mod tests {
         // An untracked file must show up as one, rather than the cached value
         // from a moment ago.
         r.write("scratch.txt", "x\n");
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(v["repository"]["untracked"], 1);
     }
 
@@ -4336,6 +4742,7 @@ mod tests {
             &r,
             Request::Status {
                 cwd: elsewhere.path().display().to_string(),
+                spool_reason: true,
             },
         )
         .await;
@@ -4701,7 +5108,14 @@ mod tests {
             .await;
         }
 
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(
             v["observation_count"], 1,
             "only the non-excluded edit should have been stored: {v}"

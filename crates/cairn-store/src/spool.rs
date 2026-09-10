@@ -1343,6 +1343,28 @@ pub async fn session_events(store: &Store, session_id: Uuid) -> Result<Vec<SafeC
         .collect())
 }
 
+/// How many rows either spool still holds undelivered, across both.
+///
+/// **The cheap question that decides whether status needs the network at all**
+/// (FR-792a). FR-792 asks why delivery is not progressing, and that question is
+/// only live when something is waiting: an empty spool has no reason to report,
+/// so it must not be made to pay for a peer probe to discover that. One count
+/// over the two tables answers it without an instance to compare against,
+/// because "is anything waiting" is not a question about who is answering.
+///
+/// Deliberately not derived from [`SpoolBreakdown`]: obtaining a breakdown is
+/// what needs the instance, and needing the instance is what this is asked
+/// *before*.
+pub async fn undelivered_total(store: &Store) -> Result<i64> {
+    let n: i64 = sqlx::query_scalar(&format!(
+        "SELECT (SELECT COUNT(*) FROM event_spool   WHERE state IN {UNDELIVERED})
+              + (SELECT COUNT(*) FROM command_spool WHERE state IN {UNDELIVERED})"
+    ))
+    .fetch_one(store.pool())
+    .await?;
+    Ok(n)
+}
+
 pub async fn event_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,

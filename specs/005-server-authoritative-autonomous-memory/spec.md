@@ -735,6 +735,41 @@ privacy boundary has already approved, and is specified under Consolidation.
   store is bound to MUST be refused, preserving the existing protection.
 - **FR-792**: The user MUST be able to see the spool's depth, its oldest entry, and the reason
   delivery is not progressing.
+- **FR-792a**: The reason FR-792 requires is a claim about **now**, so when a server endpoint is
+  configured Cairn MUST determine both reachability and the identity of the answering server
+  instance from a fresh, bounded, read-only peer-identity probe taken while the status is being
+  assembled — not from an observation some earlier delivery attempt happened to leave behind.
+  The probe MUST be bounded by a stated deadline, and exceeding it MUST be reported as an
+  unreachable endpoint rather than allowed to delay the report indefinitely. Where the spool
+  holds nothing undelivered there is no reason to report and no probe is required, so a store
+  with an empty spool MUST NOT be made to depend on the network to answer FR-792 at all.
+- **FR-792b**: The probe FR-792a requires MUST be read-only with respect to every durable
+  fact. It MUST NOT establish, adopt or alter the store's durable server binding, MUST NOT
+  open or alter a personal, team or pattern namespace, MUST NOT move a cursor, MUST NOT
+  synchronize, MUST NOT alter stored credentials, and MUST NOT claim a spool row, spend a
+  delivery attempt, deliver knowledge or change any event's state. Observing a peer is not
+  binding to it: where the store has no durable binding, a probe that reaches a server MUST
+  NOT create one, and MUST NOT by itself constitute a mismatch.
+- **FR-792c**: A cached peer observation MAY be retained and exposed diagnostically, but MUST
+  NOT decide the reported reason. In particular a stale observation MUST NOT stand in for the
+  current peer: an endpoint that cannot be reached is reported as unreachable even when a
+  mismatching instance was observed before, and an endpoint now answering as the bound
+  instance reports no mismatch even when a mismatching instance was observed before. This is
+  what makes FR-792 survive the daemon being replaced, which it must: a daemon exits as soon
+  as another owns its socket, so any reason held only in one process's memory is lost exactly
+  when an operator goes looking for it.
+- **FR-792d**: The blocked-reason vocabulary is closed, and where several of its reasons hold
+  at once the one reported MUST be decided by a stated precedence rather than by the order of
+  the tests that compute it. The precedence, highest first, is: `no_account` (nothing can be
+  claimed at all, because the claim predicate matches an account exactly); `server_unreachable`
+  (Cairn cannot even ask, so no row-derived reason describes what is happening);
+  `server_instance_mismatch` (the answering deployment is not the one this store is bound to,
+  so FR-791 will refuse it and no row will move whatever its state); `saturated` (the only
+  state in which work is being lost rather than delayed); `retry_exhausted`;
+  `refused_by_server`; `awaiting_capability`; `backing_off`; and last, a partial
+  `server_instance_mismatch`, where some rows belong to another deployment while the rest are
+  draining normally — reported, because those rows never will move, but reported last, because
+  the deliverable part is moving and a reason implying otherwise would be wrong.
 
 ### Automatic consolidation
 
@@ -1501,6 +1536,14 @@ feature's tests, and a single counterexample fails it.
   server has not accepted.
 - **SC-718**: 100% of briefings served from cache are labelled as cached; zero cached briefings
   are presented as current.
+- **SC-718a**: Across the daemon being replaced between a mismatching server appearing and the
+  status being asked for, 100% of status reads name the server that is actually answering:
+  where a bound store is answered by a different instance the report is
+  `server_instance_mismatch` with a non-zero count of rows belonging to another instance,
+  where the bound instance is answering again the mismatch has cleared, and where the endpoint
+  cannot be reached the report is `server_unreachable` rather than a previously observed
+  instance presented as current. In every one of those reads the durable binding is unchanged,
+  no spool row is claimed or refused, and zero delivery attempts are spent.
 - **SC-719**: Migrating a populated Feature 004 store loses zero project memories, zero personal
   knowledge records and zero team knowledge records.
 - **SC-720**: Migration reassigns the author, domain or scope of zero existing records.

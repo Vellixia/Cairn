@@ -568,6 +568,132 @@ fn provisional_instance(url: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// What a bounded, read-only peer-identity probe found (FR-792a).
+///
+/// Three outcomes rather than an `Option<Uuid>`, because the three decide
+/// different reports and collapsing any two of them is how the defect this
+/// exists to fix was written in the first place. "No peer known" is not one
+/// state: an endpoint that did not answer is `server_unreachable`, and an
+/// endpoint that was never configured is not blocked on the network at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerProbe {
+    /// No endpoint or no credential is configured. Nothing was sent, and there
+    /// is no peer for a queued row to be mismatched against.
+    NotConfigured,
+    /// The endpoint answered and named this instance.
+    Peer(Uuid),
+    /// The endpoint did not answer inside [`PEER_PROBE_DEADLINE`].
+    Unreachable,
+}
+
+/// How long status waits for the endpoint to name itself (FR-792a).
+///
+/// **Stated, and much shorter than the drain's twenty seconds.** A drain is
+/// background work and can afford to wait out a slow server; a status read is
+/// somebody waiting at a terminal. The CLI allows a status exchange thirty
+/// seconds, so this cannot be what makes one time out.
+///
+/// **Five seconds, and the first guess of two was measured wrong.** Exceeding
+/// this deadline is reported as an unreachable endpoint, so the deadline decides
+/// how readily status calls a *healthy* server unreachable — and that is a false
+/// report, which is worse than a slow one. At two seconds, a 200-repetition
+/// stress of the cross-daemon lifecycle scenario on a host at load ~25 reported
+/// `server_unreachable` against a server that was up and answering in 9 runs of
+/// 132: the endpoint was fine and the probe simply lost its race for CPU. CI
+/// runners are small and run the whole suite in parallel, so they sit in exactly
+/// that regime.
+///
+/// Loopback to a live server is a sub-millisecond round trip; five seconds is
+/// therefore three orders of magnitude of headroom for scheduling noise, while
+/// still bounding the read for a person who is waiting. It is not a fix for a
+/// server that is genuinely gone — that connection is refused immediately and
+/// never approaches the deadline.
+pub(crate) const PEER_PROBE_DEADLINE: Duration = Duration::from_millis(5_000);
+
+/// Ask the configured endpoint who it is, changing nothing (FR-792a, FR-792b).
+///
+/// **Why status takes its own sample.** FR-792 asks for the reason delivery is
+/// not progressing, which is a claim about now, and the two things that decide
+/// it — whether the endpoint answers, and which deployment answers — were both
+/// read from this process's memory of an earlier delivery attempt. That memory
+/// does not survive the daemon being replaced, and the daemon is replaced
+/// routinely: `supervise` exits a daemon within one tick of another owning its
+/// socket. So the daemon that watched a replacement server appear was reliably
+/// gone by the time an operator asked what was wrong, and the survivor, having
+/// observed nothing, fell back to the store's own binding and reported that
+/// nothing was wrong — with the whole backlog queued for a deployment that no
+/// longer exists.
+///
+/// **What makes it read-only.** Everything durable is untouched by
+/// construction, not by care: this function reads the credential snapshot, does
+/// one `GET`, and returns. It never calls `establish_global_namespaces`, so no
+/// lane is opened and the `team:*` lane that *is* the binding cannot move
+/// (FR-495/FR-496, D438). It touches no cursor, no spool row, no claim, no
+/// attempt counter and no event state, because it calls nothing that can. It
+/// does not go through [`AuthenticatedContext::acquire`], which would be the
+/// tempting reuse: that path demands a proven account, waits twenty seconds and
+/// exists to be the front door for work, and a status read is none of those.
+///
+/// The instance is parsed exactly as `acquire` parses it, provisional
+/// substitution included, so a probe and a drain can never disagree about who
+/// is answering.
+pub(crate) async fn probe_peer_instance(d: &Daemon) -> PeerProbe {
+    // One read, so the endpoint and the token describe one credential by
+    // construction rather than by two reads happening to agree.
+    let (url, token) = {
+        let creds = d.server.read().await;
+        (creds.url.clone(), creds.token.clone())
+    };
+    // Not "unreachable": there is nothing to reach. An unconfigured store is
+    // not blocked on the network, and saying it was would send someone to
+    // check a server they never named.
+    let (Some(base), Some(token)) = (url, token) else {
+        return PeerProbe::NotConfigured;
+    };
+    let base = base.trim_end_matches('/').to_string();
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(PEER_PROBE_DEADLINE)
+        .build()
+    else {
+        return PeerProbe::Unreachable;
+    };
+    let response = http
+        .get(format!("{base}/api/version"))
+        .bearer_auth(&token)
+        .send()
+        .await;
+    // Any answer at all is the endpoint being there. A refusal still identifies
+    // a reachable deployment, and an unparseable body from a reachable server is
+    // the provisional-instance case rather than an outage — the same
+    // substitution `acquire` makes, so the two agree.
+    let peer = match response {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
+            body.get("server_instance_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(|| provisional_instance(&base))
+        }
+        Err(_) => return PeerProbe::Unreachable,
+    };
+    // Telemetry only (FR-792c). Recorded because it is genuinely useful when
+    // reconstructing what a daemon saw, and it decides nothing: the report is
+    // built from the sample just taken, not from this.
+    {
+        let mut observed = d.last_observed_instance.write().await;
+        let previous = *observed;
+        *observed = Some(peer);
+        if previous != Some(peer) {
+            tracing::info!(
+                target: "cairn::observation",
+                previous = ?previous, observed = %peer, endpoint = %base,
+                "a status probe found a different server instance"
+            );
+        }
+    }
+    PeerProbe::Peer(peer)
+}
+
 /// Read this token's account id from `GET /api/auth/me` and record it.
 ///
 /// Best-effort: an unreachable server leaves whatever was already known, which
@@ -1209,6 +1335,45 @@ async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
     out
 }
 
+/// What one pulled row's merge attempt means for the pull cursor.
+///
+/// `bool` was not enough, and the difference between its two false cases is a
+/// difference between a delay and an outage. A merge that failed *this time*
+/// must hold the cursor, or the row is never requested again and is lost on
+/// this device permanently. A row that can never be decoded at all must not
+/// hold it, or one such row stops the lane for every row behind it, forever —
+/// which is not a hypothetical: a `team_knowledge` row whose `writer_id` is not
+/// a UUID cannot be turned into a `SyncedTeamKnowledge` by any amount of
+/// retrying, and while the cursor waited for it the same page was re-applied on
+/// every pull cycle. That is how a stale page got a second, third and
+/// thousandth chance to overwrite a locally-recorded retirement.
+pub(crate) enum Merged {
+    /// The row landed in the store.
+    Landed,
+    /// The row cannot be decoded, and no later attempt would decode it
+    /// differently. Reported at `warn` where it is dropped, because a silently
+    /// discarded record is the one outcome nobody can investigate.
+    Undecodable,
+    /// The row did not land this time — a transient store failure, or a refusal
+    /// that a change of circumstances would lift. The cursor waits for it.
+    Deferred,
+}
+
+/// Report one permanently undecodable pulled row and drop it.
+///
+/// The id is logged as the raw wire value rather than a parsed one, because the
+/// id is sometimes the field that failed to parse and "which row" is the whole
+/// value of the line.
+fn undecodable(lane: &str, row: &serde_json::Value, field: &str) -> Merged {
+    tracing::warn!(
+        lane,
+        id = %row.get("id").map(ToString::to_string).unwrap_or_else(|| "absent".to_string()),
+        field,
+        "dropping a pulled row that cannot be decoded; the cursor moves past it"
+    );
+    Merged::Undecodable
+}
+
 async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
     // **A lane only ever pulls as the account it names, from the instance it
     // names** (FR-495, FR-496, FR-597). Both halves come from one credential
@@ -1245,18 +1410,25 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         .unwrap_or_default();
 
     let mut landed = 0usize;
+    let mut dropped = 0usize;
     let mut all_merged = true;
     for row in &rows {
         let merged = match namespace {
             SyncNamespace::Personal(_, owner) => merge_pulled_personal(d, *owner, row).await,
             SyncNamespace::Team(instance) => merge_pulled_team(d, *instance, row).await,
             SyncNamespace::Patterns(_, owner) => merge_pulled_pattern(d, *owner, row).await,
-            SyncNamespace::Project(_) => false,
+            // Unreachable: this function returns above for a project lane,
+            // which has its own puller and its own entity types. Deferred
+            // rather than dropped, so if it ever became reachable the failure
+            // would be a stalled lane and not a discarded record.
+            SyncNamespace::Project(_) => Merged::Deferred,
         };
-        if merged {
-            landed += 1;
-        } else {
-            all_merged = false;
+        match merged {
+            Merged::Landed => landed += 1,
+            // Counted, not held against the cursor. Already reported at `warn`
+            // by whoever decided it, with the row id.
+            Merged::Undecodable => dropped += 1,
+            Merged::Deferred => all_merged = false,
         }
     }
 
@@ -1274,11 +1446,23 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     // never rewritten, so a row that already landed is a no-op the second time.
     // Re-reading a page is the right price for never dropping one.
     //
-    // A row that can *never* merge — one whose server instance does not match
-    // this store's team binding (FR-496) — would otherwise wedge the lane here.
-    // It cannot: `pull_global` refuses to pull a lane whose peer reports a
-    // different instance before reading a single row, so a mismatched row cannot
-    // reach this loop.
+    // **"Cheap and safe" was only ever true of a page that eventually lands.**
+    // A row that can never be decoded holds the cursor forever, and the same
+    // page is then re-applied on every pull cycle for the life of the store:
+    // the re-reading stops being a price and becomes a repeated write. That is
+    // measurable damage rather than a wasted request — a stale page re-applied
+    // once a cycle will eventually land on the far side of a local transition
+    // and erase who performed it (FR-457). So [`Merged::Undecodable`] does not
+    // hold the cursor; it is logged with the row id and stepped over, and only
+    // a transient failure waits.
+    //
+    // One class of never-mergeable row was already argued away here and the
+    // argument was too narrow. A row whose server instance does not match this
+    // store's team binding (FR-496) indeed cannot reach this loop, because
+    // `pull_global` refuses such a lane before reading a single row. That says
+    // nothing about a row whose *own fields* do not parse — a `writer_id` that
+    // is not a UUID, an unparseable `created_at`, a `state` outside the
+    // vocabulary — and one of those is exactly what wedged a real lane.
     // **A cursor is a position in one caller's feed, and the `team:*` feed is
     // caller-dependent** (FR-592, `contracts/sync-namespaces.md` §1a).
     //
@@ -1348,8 +1532,9 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         tracing::warn!(
             namespace = %namespace.key(),
             landed,
+            dropped,
             of = rows.len(),
-            "holding the pull cursor: not every row in the page merged"
+            "holding the pull cursor: a row in the page may still merge later"
         );
     }
     Ok(landed)
@@ -1411,15 +1596,15 @@ fn pulled_time(row: &serde_json::Value, field: &str) -> Option<chrono::DateTime<
 /// rows to whoever happened to be current when the page landed, which is the
 /// same partition-crossing this lane key exists to prevent (FR-567, FR-568).
 /// A lane that names an account is the authority on whose rows it carries.
-async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> bool {
+async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> Merged {
     let Some(id) = pulled_uuid(row, "id") else {
-        return false;
+        return undecodable("personal", row, "id");
     };
     let Some(writer_id) = pulled_uuid(row, "writer_id") else {
-        return false;
+        return undecodable("personal", row, "writer_id");
     };
     let Some(created_at) = pulled_time(row, "created_at") else {
-        return false;
+        return undecodable("personal", row, "created_at");
     };
     let knowledge_type: MemoryType = row
         .get("knowledge_type")
@@ -1453,10 +1638,10 @@ async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value)
     };
 
     match cairn_store::global::merge_synced_personal(&d.store, incoming).await {
-        Ok(_) => true,
+        Ok(_) => Merged::Landed,
         Err(e) => {
             tracing::debug!(personal = %id, error = %e, "a pulled personal row did not merge");
-            false
+            Merged::Deferred
         }
     }
 }
@@ -1473,15 +1658,15 @@ async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value)
 /// The cached row is not authority either way. Losing it loses nothing the
 /// server accepted (FR-703), and the merge that writes it lets the server
 /// correct what is already there (FR-712a).
-async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> bool {
+async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> Merged {
     let Some(pattern_id) = pulled_uuid(row, "pattern_id") else {
-        return false;
+        return undecodable("patterns", row, "pattern_id");
     };
     let Some(created_at) = pulled_time(row, "created_at") else {
-        return false;
+        return undecodable("patterns", row, "created_at");
     };
     let Some(updated_at) = pulled_time(row, "updated_at") else {
-        return false;
+        return undecodable("patterns", row, "updated_at");
     };
     let text = |field: &str| {
         row.get(field)
@@ -1517,10 +1702,10 @@ async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) 
     };
 
     match cairn_store::global::merge_synced_pattern(&d.store, incoming).await {
-        Ok(()) => true,
+        Ok(()) => Merged::Landed,
         Err(e) => {
             tracing::debug!(pattern = %pattern_id, error = %e, "a pulled pattern row did not merge");
-            false
+            Merged::Deferred
         }
     }
 }
@@ -1533,18 +1718,26 @@ async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) 
 /// deployment, and blending two servers' ratification histories is exactly what
 /// must not happen silently (`sync-namespaces.md` §10). It is logged and the row
 /// is skipped, so the lane keeps working for everything else.
-pub(crate) async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) -> bool {
+pub(crate) async fn merge_pulled_team(
+    d: &Daemon,
+    instance: Uuid,
+    row: &serde_json::Value,
+) -> Merged {
     let Some(id) = pulled_uuid(row, "id") else {
-        return false;
+        return undecodable("team", row, "id");
     };
+    // The row that wedged a real lane. `writer_id` is a `TEXT` column on the
+    // server and a `Uuid` on the mirror, so a value some other client invented
+    // is unrepresentable here — and no retry changes that. It is dropped with
+    // its id said out loud, and the lane keeps moving.
     let Some(writer_id) = pulled_uuid(row, "writer_id") else {
-        return false;
+        return undecodable("team", row, "writer_id");
     };
     let Some(created_at) = pulled_time(row, "created_at") else {
-        return false;
+        return undecodable("team", row, "created_at");
     };
     let Some(proposed_by_user_id) = pulled_uuid(row, "proposed_by_user_id") else {
-        return false;
+        return undecodable("team", row, "proposed_by_user_id");
     };
     let Ok(state) = row
         .get("state")
@@ -1552,7 +1745,7 @@ pub(crate) async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_js
         .unwrap_or("proposed")
         .parse::<TeamState>()
     else {
-        return false;
+        return undecodable("team", row, "state");
     };
     let knowledge_type: MemoryType = row
         .get("knowledge_type")
@@ -1587,13 +1780,19 @@ pub(crate) async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_js
         superseded_by_id: pulled_uuid(row, "superseded_by_id"),
         retired_by_user_id: pulled_uuid(row, "retired_by_user_id"),
         retired_at: pulled_time(row, "retired_at"),
+        // **The version the server ordered this page by** (FR-457). Absent
+        // when the peer predates the field, which the merge treats as "this
+        // page cannot be ordered, so it applies" — see `merge_synced_team`.
+        // Not defaulted to `created_at` or to now: a fabricated version is
+        // worse than none, because none is honest about what is not known.
+        server_changed_at: pulled_time(row, "changed_at"),
     };
 
     match cairn_store::global::merge_synced_team(&d.store, instance, incoming).await {
-        Ok(_) => true,
+        Ok(_) => Merged::Landed,
         Err(e) => {
             tracing::debug!(team = %id, error = %e, "a pulled team row did not merge");
-            false
+            Merged::Deferred
         }
     }
 }
@@ -2234,10 +2433,26 @@ async fn stale_if_changed(
 /// FR-712a the local row is a cache and the server's answer is the correct
 /// content for it. This is that rule applied to the one path that predates it.
 ///
-/// Failure is logged and swallowed. The transition already happened on the
-/// server, so refusing the caller now would report a failure that did not occur;
-/// the next pull repairs the row.
-pub(crate) async fn adopt_team_answer(d: &Daemon, reply: &serde_json::Value) {
+/// **Failure refuses, and no longer reports success.** What stood here said the
+/// failure was logged and swallowed, because "the transition already happened on
+/// the server, so refusing the caller now would report a failure that did not
+/// occur; the next pull repairs the row." Both halves of that were wrong in the
+/// same direction. The command's whole job on this path is to record the
+/// transition locally, so a caller told `ok` when nothing was written is told
+/// the opposite of what happened — and the local half of FR-457 ("who acted,
+/// inspectable after the transition") is exactly what did not get recorded. The
+/// next pull *may* repair the row; it may also be the pull that overwrote it,
+/// and it is not something the caller can see either way.
+///
+/// So this reports what [`stale_if_changed`] reports for the same shape of
+/// half-completed write: the server's effect stands, this device recorded
+/// nothing, and `cairn sync now` is the way to reconcile. A refusal naming the
+/// server-side success is strictly more information than a success naming
+/// nothing.
+pub(crate) async fn adopt_team_answer(
+    d: &Daemon,
+    reply: &serde_json::Value,
+) -> Result<(), WireError> {
     let row = reply.get("entry").unwrap_or(reply);
     // **Not `merge_pulled_team`**, which was the first attempt and could never
     // have worked. That function builds a whole `SyncedTeamKnowledge` and needs
@@ -2245,12 +2460,18 @@ pub(crate) async fn adopt_team_answer(d: &Daemon, reply: &serde_json::Value) {
     // id, the new state, who acted and when, and nothing else. So the merge
     // failed on every call, logged a line nobody read, and left exactly the
     // stale row this function exists to repair.
+    //
+    // A reply this device cannot read is a reply this device cannot apply, which
+    // is the same outcome as a failed write and is reported as one. Returning
+    // silently here was the other half of the same hole.
     let Some(state) = row
         .get("state")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<cairn_core::domain::TeamState>().ok())
     else {
-        return;
+        return Err(not_recorded_locally(
+            "the server's answer could not be read",
+        ));
     };
     let actor = ["retired_by_user_id", "ratified_by_user_id"]
         .iter()
@@ -2262,8 +2483,50 @@ pub(crate) async fn adopt_team_answer(d: &Daemon, reply: &serde_json::Value) {
     if let Err(e) =
         cairn_store::global::adopt_team_transition(&d.store, id_of(row), state, actor, at).await
     {
-        tracing::debug!(error = %e, "the server's team answer did not apply; the next pull repairs it");
+        tracing::warn!(error = %e, "the server's team answer did not apply locally");
+        return Err(not_recorded_locally(&e.to_string()));
     }
+    Ok(())
+}
+
+/// The refusal for a transition the server made and this device did not record.
+///
+/// Worded as [`stale_if_changed`]'s is, because it is the same situation
+/// reached by a different route: the server-side effect stands and was
+/// authorized, the local record does not exist, and the caller needs to know
+/// which of the two it is holding.
+fn not_recorded_locally(why: &str) -> WireError {
+    WireError::new(
+        codes::STORAGE_UNAVAILABLE,
+        format!(
+            "the transition was applied on the server but not recorded locally ({why}) — run `cairn sync now`"
+        ),
+    )
+}
+
+/// The server version a transition reply carries, if any.
+///
+/// **Extraction only — the write belongs in the transition's own transaction.**
+/// The row's version and the transition itself have to be recorded together:
+/// written as two transactions, there is a window in which the row already
+/// holds the new actor while `server_changed_at` still names the previous
+/// page's version, and a page fetched before the transition is admitted through
+/// [`cairn_store::global::merge_synced_team`]'s guard and erases the actor —
+/// the same defect, through a much narrower door. So this hands the value to
+/// `retire_team_at_version` / `ratify_team_at_version` and writes nothing
+/// itself.
+///
+/// The server's ordering key for a row is `GREATEST(created_at, ratified_at,
+/// retired_at, superseded_at)`, so a reply saying "retired at T" is a reply
+/// saying "this row's version is now T". `None` when the reply carried no
+/// parseable timestamp, which leaves the mark alone rather than guessing.
+pub(crate) fn team_transition_version(
+    reply: &serde_json::Value,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let row = reply.get("entry").unwrap_or(reply);
+    ["retired_at", "ratified_at"]
+        .iter()
+        .find_map(|k| pulled_time(row, k))
 }
 
 /// The id a transition reply names.
@@ -3210,18 +3473,6 @@ async fn settle_command(
     .map_err(storage_err)
 }
 
-/// Record what the last attempt to reach the server discovered.
-///
-/// Only two callers set it — the two places a drain actually touches the network
-/// — because a reachability flag written from everywhere is a flag nobody can
-/// reason about. Successes clear it as readily as failures set it, so a recovered
-/// server stops being reported as down on the very next drain rather than
-/// waiting for the queue to empty.
-fn note_reachability(d: &Daemon, reachable: bool) {
-    d.server_unreachable
-        .store(!reachable, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// Drain the event spool once, in claim order, settling every claimed row.
 ///
 /// **Every claimed row is settled before this returns, including on the error
@@ -3236,21 +3487,12 @@ fn note_reachability(d: &Daemon, reachable: bool) {
 pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
     use cairn_store::spool;
     let _drain_guard = d.sync_drain.lock().await;
-    // **Acquiring the context is itself the reachability probe** — it reads
-    // `/api/version` — so its failure is where an outage first becomes known.
-    // Recorded rather than only returned, because the rows say nothing about it:
-    // a drain that fails here has claimed nothing, so every row stays `waiting`
-    // and looks exactly like work queued a moment ago (FR-792).
-    let context = match AuthenticatedContext::acquire(d).await {
-        Ok(context) => {
-            note_reachability(d, true);
-            context
-        }
-        Err(e) => {
-            note_reachability(d, false);
-            return Err(e);
-        }
-    };
+    // Acquiring the context reads `/api/version`, so its failure is where an
+    // outage first stops this drain. It is only returned, never recorded: what
+    // status reports about reachability comes from status's own bounded sample
+    // (FR-792a), because a flag left in this process's memory is gone the next
+    // time a daemon is replaced — which is exactly when an operator asks.
+    let context = AuthenticatedContext::acquire(d).await?;
 
     let claimed = spool::claim_events(&d.store, context.account, context.peer_instance, limit)
         .await
@@ -3275,7 +3517,6 @@ pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainRep
             // Transport. Every claimed row is released with a backoff rather
             // than left in flight, because the alternative is a minute of
             // apparent progress after a failure that already happened.
-            note_reachability(d, false);
             for c in &claimed {
                 settle_event(d, c.event_id, ItemOutcome::Transient, "transport").await?;
                 report.record(ItemOutcome::Transient);

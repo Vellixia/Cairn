@@ -215,6 +215,29 @@
     upgraded in place, keyed on the provisional id and never on the URL.
 - [X] T100 [US4] Surface event/command depth, oldest entry, retry blocker, saturation, permanent refusals, and fresh-knowledge-unavailable state in `crates/cairnd/src/handlers.rs` (depends on T097–T099; FR-788–FR-792)
   - Settled during implementation: FR-792 was two thirds unimplemented. `oldest_at` and `blocked_reason` added, with `server_unreachable` and `no_account` supplied by the caller because the rows cannot show either.
+  - Settled again, after CI: the two caller-supplied reasons were read out of
+    **process-local** state — `Daemon::server_unreachable` and
+    `Daemon::last_observed_instance` — and neither survives the daemon being
+    replaced. `supervise` exits a daemon within one two-second tick of another
+    owning its socket, and any command starts one (FR-046), so the process that
+    watched a replacement deployment arrive was routinely gone by the time an
+    operator asked what was wrong; the survivor, having observed nothing, fell
+    back to the store's own binding and reported no mismatch while the whole
+    backlog was queued for a server that no longer answered. Measured 5 failures
+    in 80 on CI; reproduced deterministically as `other_instance = 0` against
+    three undelivered rows.
+    Reviewed material did not settle where status gets reachability or peer
+    identity from at all, so this was a **specification gap** rather than a
+    coding slip: FR-792a–FR-792d and SC-718a now state it. Status takes its own
+    bounded, read-only `GET /api/version` sample while assembling a report that
+    has undelivered rows to explain; a cached observation is telemetry and
+    decides nothing; the blocked-reason precedence is published rather than left
+    to `if`/`else` order. The `server_unreachable` latch is deleted — it was the
+    same defect in the reachability half.
+    The probe is opt-in on the wire (`Request::Status { spool_reason }`) because
+    `cairn agents`, `connect`, `repair` and `disconnect` reach the same request
+    for `sessions_awaiting_handoff` alone, and FR-105 forbids detection from
+    requiring network access.
 - [X] T101 [US4] Make T093 outage/replay/no-local-authority tests pass in `tests/tests/feature005_outage.rs` (depends on T096–T100)
   - Settled during implementation: found that `cairn memory add` printed "Remembered ?" for a queued command, which claims a durability it does not have.
 - [X] T102 [US4] Make T094 credential/cache/server-instance isolation tests pass in `tests/tests/feature005_identity_outage.rs` (depends on T099–T100)
@@ -423,7 +446,7 @@
 | FR-717–FR-730 vendor-native capture and provenance | T035, T040–T051, T057, T060–T064 |
 | FR-734–FR-745 safe canonical event model | T011–T014, T019, T028–T030, T037 |
 | FR-749–FR-780 privacy and safe-event ingest | T017–T018, T028–T030, T037, T041, T043, T050–T058, T158 |
-| FR-781–FR-792 edge spool/outage behavior | T020–T022, T068, T093–T105 |
+| FR-781–FR-792, FR-792a–FR-792d edge spool/outage behavior and status freshness | T020–T022, T068, T093–T105 |
 | FR-793–FR-816 consolidation, extraction, verification restraint, explicit commands | T012, T015–T016, T025–T033, T042–T064, T125–T136 |
 | FR-817–FR-826 domain preservation and project precedence | T010, T023–T026, T034, T053, T065–T082, T084–T090 |
 | FR-827–FR-850 and FR-838a–FR-838f retrieval, agent delivery, traces | T035, T065–T082, T106–T124 |
@@ -441,8 +464,8 @@
 | SC-739–SC-753 restart, backlog, adversarial extraction/path/key/cutover/deadline | T016, T018, T031–T045, T093–T105, T138–T160 |
 
 <!-- Mechanical coverage inventory. Keep exact identifiers so T163 can compare sets. -->
-<!-- FR: FR-701 FR-702 FR-703 FR-704 FR-705 FR-706 FR-707 FR-708 FR-708a FR-708b FR-708c FR-708d FR-708e FR-708f FR-708g FR-709 FR-710 FR-710a FR-711 FR-712 FR-712a FR-717 FR-718 FR-719 FR-720 FR-721 FR-722 FR-723 FR-724 FR-725 FR-726 FR-727 FR-727a FR-727b FR-727c FR-727d FR-727e FR-728 FR-729 FR-730 FR-734 FR-735 FR-736 FR-737 FR-738 FR-739 FR-740 FR-741 FR-742 FR-743 FR-744 FR-745 FR-749 FR-749a FR-749b FR-749c FR-749d FR-750 FR-751 FR-752 FR-753 FR-754 FR-755 FR-756 FR-757 FR-758 FR-759 FR-760 FR-761 FR-762 FR-763 FR-763a FR-763b FR-764 FR-765 FR-766 FR-767 FR-768 FR-769 FR-769a FR-770 FR-771 FR-772 FR-773 FR-774 FR-775 FR-776 FR-777 FR-777a FR-777a1 FR-777b FR-777c FR-777d FR-777e FR-777f FR-777g FR-778 FR-779 FR-780 FR-781 FR-782 FR-783 FR-784 FR-785 FR-786 FR-787 FR-788 FR-789 FR-790 FR-790a FR-791 FR-792 FR-793 FR-793a FR-793a1 FR-793b FR-793c FR-793d FR-794 FR-795 FR-796 FR-796d FR-796a FR-796b FR-796c FR-797 FR-798 FR-798a FR-798b FR-798c FR-799 FR-800 FR-801 FR-801a FR-802 FR-803 FR-804 FR-804a FR-805 FR-805a FR-805a1 FR-805b FR-805c FR-805d FR-805e FR-805f FR-806 FR-807 FR-808 FR-809 FR-809a FR-810 FR-810a FR-811 FR-811a FR-811b FR-811c FR-811d FR-811e FR-811f FR-811g FR-811h FR-811i FR-812 FR-813 FR-814 FR-815 FR-815a FR-816 FR-817 FR-818 FR-819 FR-819a FR-820 FR-821 FR-822 FR-823 FR-824 FR-825 FR-826 FR-838a FR-838b FR-838c FR-838d FR-838e FR-838f FR-827 FR-828 FR-829 FR-830 FR-831 FR-832 FR-833 FR-834 FR-835 FR-836 FR-837 FR-838 FR-839 FR-840 FR-841 FR-842 FR-843 FR-844 FR-845 FR-846 FR-846a FR-847 FR-848 FR-849 FR-850 FR-851 FR-852 FR-853 FR-854 FR-855 FR-856 FR-857 FR-858 FR-859 FR-860 FR-861 FR-862 FR-863 FR-864 FR-864a FR-865 FR-866 FR-867 FR-867a FR-867b FR-868 FR-869 FR-870 FR-871 FR-872 FR-873 FR-874 FR-875 FR-876 FR-876a FR-876b FR-876b1 FR-876c FR-876d FR-876e FR-877 FR-878 FR-879 FR-880 FR-881 FR-882 FR-883 FR-884 FR-885 FR-886 FR-887 FR-888 FR-889 FR-889a FR-890 FR-891 FR-892 FR-893 FR-894 FR-894a FR-895 FR-901 FR-902 FR-903 FR-904 FR-905 -->
-<!-- SC: SC-701 SC-701a SC-701b SC-702 SC-703 SC-704 SC-705 SC-706 SC-707 SC-708 SC-709 SC-710 SC-711 SC-712 SC-713 SC-714 SC-715 SC-716 SC-717 SC-718 SC-719 SC-720 SC-721 SC-722 SC-723 SC-724 SC-725 SC-726 SC-727 SC-728 SC-729 SC-730 SC-731 SC-732 SC-733 SC-734 SC-735 SC-736 SC-737 SC-738 SC-760 SC-761 SC-762 SC-763 SC-764 SC-765 SC-766 SC-767 SC-739 SC-740 SC-741 SC-742 SC-743 SC-744 SC-745 SC-746 SC-747 SC-748 SC-749 SC-750 SC-751 SC-752 SC-753 -->
+<!-- FR: FR-701 FR-702 FR-703 FR-704 FR-705 FR-706 FR-707 FR-708 FR-708a FR-708b FR-708c FR-708d FR-708e FR-708f FR-708g FR-709 FR-710 FR-710a FR-711 FR-712 FR-712a FR-717 FR-718 FR-719 FR-720 FR-721 FR-722 FR-723 FR-724 FR-725 FR-726 FR-727 FR-727a FR-727b FR-727c FR-727d FR-727e FR-728 FR-729 FR-730 FR-734 FR-735 FR-736 FR-737 FR-738 FR-739 FR-740 FR-741 FR-742 FR-743 FR-744 FR-745 FR-749 FR-749a FR-749b FR-749c FR-749d FR-750 FR-751 FR-752 FR-753 FR-754 FR-755 FR-756 FR-757 FR-758 FR-759 FR-760 FR-761 FR-762 FR-763 FR-763a FR-763b FR-764 FR-765 FR-766 FR-767 FR-768 FR-769 FR-769a FR-770 FR-771 FR-772 FR-773 FR-774 FR-775 FR-776 FR-777 FR-777a FR-777a1 FR-777b FR-777c FR-777d FR-777e FR-777f FR-777g FR-778 FR-779 FR-780 FR-781 FR-782 FR-783 FR-784 FR-785 FR-786 FR-787 FR-788 FR-789 FR-790 FR-790a FR-791 FR-792 FR-792a FR-792b FR-792c FR-792d FR-793 FR-793a FR-793a1 FR-793b FR-793c FR-793d FR-794 FR-795 FR-796 FR-796d FR-796a FR-796b FR-796c FR-797 FR-798 FR-798a FR-798b FR-798c FR-799 FR-800 FR-801 FR-801a FR-802 FR-803 FR-804 FR-804a FR-805 FR-805a FR-805a1 FR-805b FR-805c FR-805d FR-805e FR-805f FR-806 FR-807 FR-808 FR-809 FR-809a FR-810 FR-810a FR-811 FR-811a FR-811b FR-811c FR-811d FR-811e FR-811f FR-811g FR-811h FR-811i FR-812 FR-813 FR-814 FR-815 FR-815a FR-816 FR-817 FR-818 FR-819 FR-819a FR-820 FR-821 FR-822 FR-823 FR-824 FR-825 FR-826 FR-838a FR-838b FR-838c FR-838d FR-838e FR-838f FR-827 FR-828 FR-829 FR-830 FR-831 FR-832 FR-833 FR-834 FR-835 FR-836 FR-837 FR-838 FR-839 FR-840 FR-841 FR-842 FR-843 FR-844 FR-845 FR-846 FR-846a FR-847 FR-848 FR-849 FR-850 FR-851 FR-852 FR-853 FR-854 FR-855 FR-856 FR-857 FR-858 FR-859 FR-860 FR-861 FR-862 FR-863 FR-864 FR-864a FR-865 FR-866 FR-867 FR-867a FR-867b FR-868 FR-869 FR-870 FR-871 FR-872 FR-873 FR-874 FR-875 FR-876 FR-876a FR-876b FR-876b1 FR-876c FR-876d FR-876e FR-877 FR-878 FR-879 FR-880 FR-881 FR-882 FR-883 FR-884 FR-885 FR-886 FR-887 FR-888 FR-889 FR-889a FR-890 FR-891 FR-892 FR-893 FR-894 FR-894a FR-895 FR-901 FR-902 FR-903 FR-904 FR-905 -->
+<!-- SC: SC-701 SC-701a SC-701b SC-702 SC-703 SC-704 SC-705 SC-706 SC-707 SC-708 SC-709 SC-710 SC-711 SC-712 SC-713 SC-714 SC-715 SC-716 SC-717 SC-718 SC-718a SC-719 SC-720 SC-721 SC-722 SC-723 SC-724 SC-725 SC-726 SC-727 SC-728 SC-729 SC-730 SC-731 SC-732 SC-733 SC-734 SC-735 SC-736 SC-737 SC-738 SC-760 SC-761 SC-762 SC-763 SC-764 SC-765 SC-766 SC-767 SC-739 SC-740 SC-741 SC-742 SC-743 SC-744 SC-745 SC-746 SC-747 SC-748 SC-749 SC-750 SC-751 SC-752 SC-753 -->
 
 ---
 

@@ -169,7 +169,15 @@ async fn snapshot() -> Result<Snapshot, WireError> {
 /// owed, not complete, so it withholds the completion guarantee (FR-240
 /// clause 4).
 async fn boundary_owed() -> bool {
-    match client::send(&Request::Status { cwd: cwd() }).await {
+    // Detection must not require network access (FR-105), and this reads one
+    // count that has nothing to do with the spool — so it asks the cheap
+    // question rather than paying for a peer probe it will not look at.
+    match client::send(&Request::Status {
+        cwd: cwd(),
+        spool_reason: false,
+    })
+    .await
+    {
         Ok(v) => v["sessions_awaiting_handoff"].as_i64().unwrap_or(0) > 0,
         Err(_) => false,
     }
@@ -999,7 +1007,13 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
     let env = env();
     let mut snap = snapshot().await?;
     let owed = boundary_owed().await;
-    let status = client::send(&Request::Status { cwd: cwd() }).await.ok();
+    // `cairn doctor` reports the queue, so it wants the reason to be current.
+    let status = client::send(&Request::Status {
+        cwd: cwd(),
+        spool_reason: true,
+    })
+    .await
+    .ok();
     // Sync degradation belongs in doctor: it is a condition of the
     // installation, it resolves without the developer doing anything, and
     // discovering it only through a count in `sync status` would make retained

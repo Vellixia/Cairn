@@ -75,21 +75,6 @@ pub struct Daemon {
     /// door for sign-out, credential change and account change alike
     /// (FR-790a).
     pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
-    /// Whether the last attempt to reach the server failed (FR-792).
-    ///
-    /// **The one blocking reason the spool rows cannot show.** A drain that
-    /// cannot reach the server fails while acquiring its authenticated context,
-    /// before it claims anything — deliberately, because claiming a row and then
-    /// discovering the server is gone spends an attempt for nothing. The
-    /// consequence is that during an outage every row stays `waiting`, which is
-    /// indistinguishable from "queued a moment ago and about to go". A user
-    /// looking at eleven rows sitting still deserves to be told the server is
-    /// unreachable rather than left to infer it.
-    ///
-    /// In memory and per process, like the rest of the reachability state: it
-    /// describes what this daemon just experienced, not a fact about the world
-    /// worth persisting. A restart correctly starts out not knowing.
-    pub server_unreachable: Arc<std::sync::atomic::AtomicBool>,
     /// The instance the endpoint last reported, if this process has asked.
     ///
     /// **Observation, never authority.** The store's binding is the singular
@@ -106,10 +91,14 @@ pub struct Daemon {
     /// sorted first among every lane, so it happened to be right about as
     /// often as the ids fell the right way.
     ///
-    /// In memory and per process, exactly like `server_unreachable` beside it:
-    /// it describes what this daemon just saw, not a fact worth persisting. A
-    /// restart correctly starts out not knowing, and status falls back to the
-    /// binding until the first probe.
+    /// **Telemetry, and nothing that decides a report** (FR-792c). It is in
+    /// memory and per process, which is exactly why it may not decide one: a
+    /// daemon exits within one supervision tick of another owning its socket,
+    /// so the process that observed a replacement server is routinely gone by
+    /// the time an operator asks what happened, and a reason held only here is
+    /// lost precisely when it is wanted. Status takes its own bounded sample
+    /// instead (`sync::probe_peer_instance`, FR-792a); this stays because it is
+    /// genuinely useful in a log when reconstructing what a daemon saw.
     pub last_observed_instance: Arc<RwLock<Option<Uuid>>>,
 }
 

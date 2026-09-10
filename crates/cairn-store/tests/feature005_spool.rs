@@ -1306,6 +1306,10 @@ fn synced_team(id: Uuid, content: &str, state: TeamState) -> SyncedTeamKnowledge
         superseded_by_id: None,
         retired_by_user_id: None,
         retired_at: None,
+        // Unversioned on purpose: these tests are about the spool, not about
+        // page ordering, and `None` is the "apply unconditionally" case that
+        // matches what every one of them expects of a merge.
+        server_changed_at: None,
     }
 }
 

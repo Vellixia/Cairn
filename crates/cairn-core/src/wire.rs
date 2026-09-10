@@ -493,6 +493,22 @@ pub enum Request {
     },
     Status {
         cwd: String,
+        /// Whether this caller is presenting the spool report and therefore
+        /// needs its blocked reason to be current (FR-792a).
+        ///
+        /// **A flag because the callers genuinely ask different questions.**
+        /// Answering "why is delivery not progressing" truthfully needs a fresh,
+        /// bounded peer sample, and taking one costs a network round trip.
+        /// `cairn status` and `cairn doctor` show that reason and must pay for
+        /// it. `cairn agents`, `connect`, `repair` and `disconnect` reach this
+        /// same request only for `sessions_awaiting_handoff`, and FR-105 forbids
+        /// detection from requiring network access — so they must not be made
+        /// to pay for an answer they never read.
+        ///
+        /// Defaulted, so an older CLI talking to a newer daemon asks the
+        /// cheaper question rather than failing to parse.
+        #[serde(default)]
+        spool_reason: bool,
     },
 
     SessionStart {
@@ -2279,7 +2295,10 @@ mod tests {
 
     #[test]
     fn request_is_tagged_by_op() {
-        let r = Request::Status { cwd: "/tmp".into() };
+        let r = Request::Status {
+            cwd: "/tmp".into(),
+            spool_reason: true,
+        };
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"op\":\"status\""));
         let back: Request = serde_json::from_str(&s).unwrap();

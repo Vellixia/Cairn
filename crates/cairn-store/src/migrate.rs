@@ -66,6 +66,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "spool_server_instance",
         include_str!("../migrations/0010_spool_server_instance.sql"),
     ),
+    (
+        11,
+        "team_server_version",
+        include_str!("../migrations/0011_team_server_version.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

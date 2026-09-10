@@ -42,6 +42,10 @@ pub const LOCAL_SCHEMA_V9: i64 = 9;
 /// The version US4's repair adds, binding each spooled row to the server
 /// instance it was queued for (FR-791).
 pub const LOCAL_SCHEMA_V10: i64 = 10;
+/// The version that lets a mirrored team row say which *server* version it
+/// reflects, so a pulled page older than the row cannot erase who acted on it
+/// (FR-457).
+pub const LOCAL_SCHEMA_V11: i64 = 11;
 /// The local schema version Feature 005 upgrades *from*.
 pub const LOCAL_SCHEMA_V7: i64 = 7;
 /// The server schema version Feature 005 introduces (`data-model.md` §6).

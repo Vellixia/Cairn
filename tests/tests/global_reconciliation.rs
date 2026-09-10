@@ -586,6 +586,22 @@ fn a_retirement_carries_who_acted_to_a_second_device() {
         ratifier.first().is_some_and(|w| !w.is_empty()),
         "the ratification reached the second device without its actor: {ratifier:?}"
     );
+
+    // **And the page said which version of the row it was.** The actor above
+    // survives on the acting device only because a pulled page can be dated:
+    // `merge_synced_team` declines one older than the version the row already
+    // reflects, and it can only do that if the server sends the key it ordered
+    // the page by. This reads it back off a device that has nothing but pulled
+    // rows, so a `changed_at` dropped from the wire fails here rather than
+    // showing up months later as an occasional erased retirement.
+    let versioned = second.query_column(&format!(
+        "SELECT COALESCE(server_changed_at, '') FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert!(
+        versioned.first().is_some_and(|v| !v.is_empty()),
+        "a pulled team row carries no server version, so nothing can tell a \
+         stale page from a current one (FR-457): {versioned:?}"
+    );
 }
 
 // ===========================================================================

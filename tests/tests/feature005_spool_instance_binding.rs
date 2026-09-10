@@ -578,10 +578,25 @@ fn work_queued_before_any_instance_binds_once_and_is_not_rebound() {
     // again put the store in a state the drain never recovered from within the
     // window, and the restart is not what is under test — SQLite's WAL takes a
     // second writer perfectly well for two statements.
-    d.sandbox
-        .execute_sql("UPDATE event_spool SET server_instance_id = NULL");
-    d.sandbox
-        .execute_sql("UPDATE command_spool SET server_instance_id = NULL");
+    //
+    // **Scoped to rows that are actually queued**, and that scope is
+    // load-bearing rather than tidy. `settle_syncing` above waits for the
+    // session to reach the server, and under load a capture event can drain
+    // with it — so by this point the spool may already hold a `delivered` row.
+    // Nulling that row's binding too produced a `delivered` row bound to
+    // nothing, which adoption then correctly never touched: it binds rows it
+    // can *claim*, and a delivered row is not claimable. The final assertion
+    // counts `IS NULL` across every state, so that row failed it — a green
+    // test whenever the pre-outage drain lost the race and a red one whenever
+    // it won, which is a test measuring the scheduler rather than adoption.
+    d.sandbox.execute_sql(
+        "UPDATE event_spool SET server_instance_id = NULL
+          WHERE state IN ('pending','in_flight','failed')",
+    );
+    d.sandbox.execute_sql(
+        "UPDATE command_spool SET server_instance_id = NULL
+          WHERE state IN ('pending','in_flight','failed')",
+    );
     // Counted again rather than compared against the earlier snapshot. Capture
     // is fire-and-forget, so one hook can still be landing rows while the next
     // statement runs — the earlier count is a lower bound on what is queued, not
@@ -672,5 +687,423 @@ fn work_queued_before_any_instance_binds_once_and_is_not_rebound() {
          pre-outage `session_opened` event was itself unbound by the statement \
          above and re-adopted with the rest — it is inside the count, not \
          additional to it."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The report has to survive the daemon that saw the replacement
+// (FR-792, FR-792a–FR-792d, SC-718a)
+// ---------------------------------------------------------------------------
+
+/// The whole of `sync_cursor`, as text, so "the probe changed nothing" is an
+/// assertion about the table rather than about a field somebody remembered to
+/// check.
+///
+/// Only usable while the server is unreachable — see [`sync_lanes`] for why.
+fn sync_state_strict(d: &Device) -> Vec<String> {
+    d.column(
+        "SELECT namespace
+                || ' pull=' || COALESCE(pull_cursor, '<none>')
+                || ' last_success=' || COALESCE(last_success_at, '<none>')
+                || ' capability=' || COALESCE(CAST(server_capability AS TEXT), '<none>')
+           FROM sync_cursor ORDER BY namespace",
+    )
+}
+
+/// The lanes and their cursors — the part of `sync_cursor` a status probe could
+/// conceivably touch.
+///
+/// **Why not the whole table here.** `last_success_at` and `server_capability`
+/// are the background worker's record of a sync that succeeded, and the worker
+/// runs on its own half-second tick beside whatever a test is doing. A
+/// reachable server therefore moves `project:`'s `last_success_at` between any
+/// two reads a few hundred milliseconds apart, and an assertion over the whole
+/// table would be measuring the worker rather than the probe — it would fail on
+/// correct behaviour and pass or fail by timing.
+///
+/// What is left is exactly what FR-792b forbids the probe from doing: adding or
+/// removing a lane — an adopted `team:S2` is the failure this whole file exists
+/// to prevent — and moving a cursor. The stronger whole-table assertion is
+/// still made, in the one state where the worker provably cannot write either
+/// column: with the endpoint down, no sync can succeed, so anything that
+/// changed was changed by the read itself.
+fn sync_lanes(d: &Device) -> Vec<String> {
+    d.column(
+        "SELECT namespace || ' pull=' || COALESCE(pull_cursor, '<none>')
+           FROM sync_cursor ORDER BY namespace",
+    )
+}
+
+/// Every undelivered row with its state, binding and attempt count.
+fn queued_rows(d: &Device) -> Vec<String> {
+    let mut rows = d.column(
+        "SELECT 'event ' || event_id || ' state=' || state
+                || ' attempts=' || CAST(attempts AS TEXT)
+                || ' instance=' || COALESCE(server_instance_id, '<none>')
+           FROM event_spool WHERE state IN ('pending','in_flight','failed')
+          ORDER BY event_id",
+    );
+    rows.extend(d.column(
+        "SELECT 'command ' || command_id || ' state=' || state
+                || ' attempts=' || CAST(attempts AS TEXT)
+                || ' instance=' || COALESCE(server_instance_id, '<none>')
+           FROM command_spool WHERE state IN ('pending','in_flight','failed')
+          ORDER BY command_id",
+    ));
+    rows
+}
+
+/// The team lane is the durable binding, so this is what "S2 was not adopted"
+/// means concretely: no lane for it, in any state.
+fn team_lanes(d: &Device) -> Vec<String> {
+    d.column("SELECT namespace FROM sync_cursor WHERE namespace LIKE 'team:%' ORDER BY namespace")
+}
+
+/// FR-792 across daemon lifetimes, which is where it was broken.
+///
+/// # The defect this exists to prevent
+///
+/// The instance the spool report measured rows against was
+/// `Daemon::last_observed_instance` — in memory, per process — falling back to
+/// the store's own binding when this process had not yet spoken to the server.
+/// Both halves are wrong for the same reason and the fallback is the worse one:
+/// comparing rows to the binding answers "no rows belong elsewhere" *precisely*
+/// when a replacement deployment has arrived, because the rows and the binding
+/// agree and it is the peer that has changed.
+///
+/// That would be a narrow race if daemons were long-lived, and they are not.
+/// `cairnd`'s `supervise` exits a daemon within one two-second tick of another
+/// owning its socket, and any command starts one automatically (FR-046). So the
+/// process that watched S2 appear is routinely gone by the time an operator asks
+/// what happened, and the survivor — having observed nothing — reported that
+/// nothing was wrong while the entire backlog was queued for a deployment that
+/// no longer answers.
+///
+/// # Why each step here is deterministic rather than lucky
+///
+/// The sync worker's loop *begins* with `sleep(WORKER_TICK)`, so a daemon born
+/// to serve one request has provably not touched the network when it serves it.
+/// Reading the status as the **first command after `stop_daemon`** therefore
+/// puts a daemon with no inherited observation in front of the question, every
+/// time, with a 500 ms margin rather than a hope.
+///
+/// The stale-observation step is deterministic from the other side: with the
+/// endpoint down, nothing can *change* the observation this process already
+/// holds, so `last_observed_instance` is pinned at S2 while the truthful answer
+/// is that the server cannot be reached.
+///
+/// # Falsified by
+///
+/// - restoring the fallback, `observed.unwrap_or(bound)` — step 3 goes green on
+///   `other_instance = 0` and no reason;
+/// - deciding the reason from the cached observation instead of a fresh sample —
+///   step 2 reports `server_instance_mismatch` for a server that is simply down;
+/// - letting the probe establish or adopt the peer — step 3's binding, team-lane
+///   and `sync_cursor` assertions fail;
+/// - letting the probe enter the claim path — step 3's attempt and row-state
+///   assertions fail.
+#[test]
+fn the_spool_report_names_the_answering_server_across_a_daemon_replacement() {
+    let Some(mut server) = server() else { return };
+    let d = device(&server, "lifetime");
+
+    let s1: Uuid = server
+        .text("SELECT id::text FROM server_instance")
+        .parse()
+        .expect("the server has an instance id");
+    let s2 = Uuid::now_v7();
+
+    // -----------------------------------------------------------------------
+    // 0. A backlog bound to S1, with the server away so it stays one.
+    // -----------------------------------------------------------------------
+    let key = format!("lifetime-{}", Uuid::now_v7());
+    let out = d.sandbox.hook(
+        "SessionStart",
+        json!({ "session_id": key, "source": "startup" }),
+    );
+    assert_eq!(out.code, 0, "session start: {}", out.stderr);
+    settle_syncing(&d, "the session reaches S1", || {
+        server.count(&format!(
+            "SELECT count(*) FROM sessions WHERE project_id = '{}'",
+            d.project
+        )) > 0
+    });
+
+    server.go_offline();
+    let out = d.sandbox.hook(
+        "PostToolUse",
+        json!({
+            "session_id": key, "tool_name": "Edit",
+            "tool_input": { "file_path": "src/lifetime.rs" }
+        }),
+    );
+    assert_eq!(out.code, 0, "a hook must not fail during an outage");
+    let queued = d.sandbox.json(&[
+        "memory",
+        "add",
+        "the report must outlive the daemon that saw it",
+    ]);
+    assert_eq!(
+        queued["accepted_for_delivery"],
+        json!(true),
+        "the command was not queued: {queued}"
+    );
+
+    // **Waited for, not read.** Capture is fire-and-forget: the hook returns
+    // as soon as the daemon has accepted the payload, and the canonical event
+    // it produces lands a moment later. Snapshotting the spool immediately
+    // caught it mid-fill — 1 run in 182 held only the command row, and the
+    // vacuity guard below correctly refused to proceed. Waiting for the event
+    // is not a weakening of anything: the rest of this test is about what
+    // happens to queued work, and this is where the work becomes queued.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline
+        && d.count(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM event_spool
+              WHERE state IN ('pending','in_flight','failed')",
+        ) == 0
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let event_ids_before = d.column(
+        "SELECT event_id FROM event_spool
+          WHERE state IN ('pending','in_flight','failed') ORDER BY event_id",
+    );
+    let rows_before = queued_rows(&d);
+    assert!(
+        !event_ids_before.is_empty(),
+        "no capture event reached the spool within the window, so the \
+         cross-instance assertions would have nothing to measure: {rows_before:?}"
+    );
+    assert!(
+        rows_before.len() >= 2,
+        "nothing was queued, so every assertion below would pass vacuously: \
+         {rows_before:?}"
+    );
+    let lanes_before = team_lanes(&d);
+    assert_eq!(
+        lanes_before,
+        vec![format!("team:{s1}")],
+        "the store is not bound to S1 alone, so the rest measures nothing: \
+         {lanes_before:?}"
+    );
+
+    // -----------------------------------------------------------------------
+    // 1. A different deployment answers at the same address, and this daemon
+    //    sees it. Nothing else changes: same database, account, token, project,
+    //    session, rows and port.
+    // -----------------------------------------------------------------------
+    server.execute(&format!("UPDATE server_instance SET id = '{s2}'"));
+    server.come_back();
+    let _ = d.sandbox.cairn(&["sync", "now"]);
+
+    // -----------------------------------------------------------------------
+    // 2. **A stale observation is not the current peer** (FR-792c). The
+    //    endpoint goes down while this daemon still remembers S2 — and with it
+    //    down, nothing can revise that memory, so it is pinned. The honest
+    //    report is that the server cannot be reached, not that a deployment
+    //    nobody can reach is the wrong one.
+    // -----------------------------------------------------------------------
+    server.go_offline();
+    let stale = d.spool("events");
+    assert_eq!(
+        stale["blocked_reason"].as_str(),
+        Some("server_unreachable"),
+        "an endpoint that cannot be reached was reported from a remembered \
+         instance instead (FR-792c): {stale}\n  s1={s1} s2={s2}\n  \
+         daemon observation trace:\n{}",
+        observation_trace(&d),
+    );
+    assert_eq!(
+        stale["other_instance"].as_i64(),
+        Some(0),
+        "nothing is answering, so no row can belong to a different deployment \
+         than the one that is (FR-792c): {stale}"
+    );
+    assert_eq!(
+        team_lanes(&d),
+        lanes_before,
+        "the binding moved while the server was unreachable"
+    );
+
+    // -----------------------------------------------------------------------
+    // 3. **The daemon that saw S2 is replaced, and the report is unchanged.**
+    //    The status read below is the first command after the stop, so the
+    //    daemon serving it was born to serve it and has observed nothing.
+    // -----------------------------------------------------------------------
+    server.come_back();
+    // **Prove the endpoint is answering before asserting what answering means.**
+    // `come_back` returns once the address is bound, which is not the same as
+    // the server having served anything — and the assertion below is precisely
+    // about what a probe finds there. One round trip through the daemon settles
+    // it. Harmless to the scenario: S2 is not this store's binding, so no
+    // S1-bound row can drain, and the daemon that makes this call is stopped
+    // two statements later, so nothing it learns survives into the read.
+    settle_syncing(&d, "S2 is answering again", || {
+        d.sandbox.cairn(&["sync", "now"]).code == 0
+    });
+    let lanes_and_cursors_before = sync_lanes(&d);
+    let rows_at_mismatch = queued_rows(&d);
+    d.sandbox.stop_daemon();
+
+    let fresh = d.spool("events");
+    assert!(
+        fresh["other_instance"].as_i64().unwrap_or(0) > 0,
+        "a daemon that never saw S2 reported no mismatched work, so the backlog \
+         reads as a queue that mysteriously stopped — which is the outcome \
+         FR-792 exists to prevent: {fresh}\n  s1={s1} s2={s2}\n  rows: {:?}\n  \
+         daemon observation trace:\n{}",
+        queued_rows(&d),
+        observation_trace(&d),
+    );
+    assert_eq!(
+        fresh["blocked_reason"].as_str(),
+        Some("server_instance_mismatch"),
+        "the reason delivery is not progressing is not reported by a daemon \
+         that did not personally witness the replacement (FR-792a): {fresh}"
+    );
+    assert!(
+        fresh["undelivered"].as_i64().unwrap_or(0) > 0,
+        "the held work is gone, so the mismatch report is about nothing: {fresh}"
+    );
+
+    // The probe is a read. Everything durable it could have touched is checked
+    // rather than assumed, because "read-only" is the property the rest of this
+    // rests on: an adopted S2 would deliver S1's work to the wrong deployment.
+    assert_eq!(
+        team_lanes(&d),
+        lanes_before,
+        "the status probe established or moved the durable server binding \
+         (FR-792b); S2 must never become the lane merely by answering"
+    );
+    assert_eq!(
+        sync_lanes(&d),
+        lanes_and_cursors_before,
+        "the status probe added a lane or moved a cursor (FR-792b)"
+    );
+    assert_eq!(
+        queued_rows(&d),
+        rows_at_mismatch,
+        "the status probe claimed a row, spent an attempt or changed a state \
+         (FR-792b); a report is not entitled to touch the queue it describes"
+    );
+    assert_eq!(
+        d.count("SELECT CAST(COUNT(*) AS TEXT) FROM event_spool WHERE state = 'refused'"),
+        0,
+        "a status read refused work it was never entitled to judge"
+    );
+
+    // -----------------------------------------------------------------------
+    // 4. **An unreachable endpoint is unreachable, on a daemon with no
+    //    history.** The removed per-process reachability latch reported this
+    //    case as healthy for exactly as long as the new daemon took to fail its
+    //    first drain — which is a window an operator lands in, because the
+    //    command they run is what starts the daemon.
+    //
+    //    Ordered before the restore deliberately. Nothing can drain here, so
+    //    the backlog is still there to be reported on; once S1 answers again it
+    //    is delivered within a tick, and an assertion about an empty spool
+    //    would hold for the uninteresting reason.
+    // -----------------------------------------------------------------------
+    server.go_offline();
+    // Taken with the endpoint already down and the daemon already stopped, so
+    // between this and the read below nothing can synchronize: any change to
+    // `sync_cursor` at all was made by the read itself. This is the whole-table
+    // assertion `sync_lanes` cannot safely make while the server is answering.
+    d.sandbox.stop_daemon();
+    let sync_state_before_read = sync_state_strict(&d);
+
+    let down = d.spool("events");
+    assert!(
+        down["undelivered"].as_i64().unwrap_or(0) > 0,
+        "nothing is queued, so there is no reason to report either way: {down}"
+    );
+    assert_eq!(
+        down["blocked_reason"].as_str(),
+        Some("server_unreachable"),
+        "a daemon that has never reached the server reported an outage as \
+         healthy (FR-792a): {down}"
+    );
+    assert_eq!(
+        down["other_instance"].as_i64(),
+        Some(0),
+        "nothing is answering, so nothing can be mismatched: {down}"
+    );
+    assert_eq!(
+        sync_state_strict(&d),
+        sync_state_before_read,
+        "the status read wrote to synchronization state (FR-792b); with the \
+         endpoint down nothing else could have"
+    );
+    assert_eq!(
+        team_lanes(&d),
+        lanes_before,
+        "the binding changed during an outage"
+    );
+
+    // -----------------------------------------------------------------------
+    // 5. **The mismatch clears from the current peer, and the very same rows
+    //    deliver.** S1 comes back while no daemon exists, so the daemon that
+    //    answers has observed nothing at all — no S2 in memory, no outage in
+    //    memory — and the only thing that can tell it the mismatch is over is
+    //    its own sample.
+    //
+    //    Delivery is the assertion, because delivery is unambiguous: these are
+    //    the rows queued for S1 before any of this began, and they reach S1.
+    //    A report that had kept reporting a mismatch, or an implementation that
+    //    had adopted S2 along the way, could not produce this.
+    // -----------------------------------------------------------------------
+    d.sandbox.stop_daemon();
+    server.execute(&format!("UPDATE server_instance SET id = '{s1}'"));
+    server.come_back();
+
+    settle_syncing(
+        &d,
+        "the held work delivers once the right server returns",
+        || {
+            d.count(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM event_spool
+                  WHERE state IN ('pending','in_flight','failed')",
+            ) == 0
+                && d.count(
+                    "SELECT CAST(COUNT(*) AS TEXT) FROM command_spool
+                      WHERE state IN ('pending','in_flight','failed')",
+                ) == 0
+        },
+    );
+    for id in &event_ids_before {
+        assert!(
+            d.column("SELECT event_id FROM event_spool WHERE state = 'delivered'")
+                .contains(id),
+            "event {id} was queued for S1 before any of this and did not reach \
+             S1 afterwards; three daemon replacements, two outages and a \
+             replacement deployment must cost the queue nothing. Spool now: {:?}",
+            queued_rows(&d),
+        );
+    }
+    assert_eq!(
+        d.count("SELECT CAST(COUNT(*) AS TEXT) FROM event_spool WHERE state = 'refused'"),
+        0,
+        "work was refused after the right server came back"
+    );
+    assert_eq!(
+        team_lanes(&d),
+        lanes_before,
+        "S2 was adopted somewhere along the way; the binding must still be S1 \
+         alone (FR-495, FR-496, FR-792b)"
+    );
+
+    let drained = d.spool("events");
+    assert!(
+        drained["blocked_reason"].is_null(),
+        "delivery is progressing again and the report still says it is \
+         blocked: {drained}"
+    );
+    assert_eq!(
+        drained["other_instance"].as_i64(),
+        Some(0),
+        "the work reached the deployment it was queued for and is still \
+         counted against another: {drained}"
     );
 }
