@@ -665,7 +665,19 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
     assert_eq!(
         now_there,
         vec![a_id],
-        "the held proposal did not go out as A once A was authenticated again"
+        "the held proposal did not go out as A once A was authenticated again\n  \
+         outbox: {:?}\n  config_account: {:?}",
+        a.sandbox.query_column(&format!(
+            "SELECT state || ' attempts=' || CAST(attempts AS TEXT)
+                    || ' next_attempt_at=' || COALESCE(next_attempt_at, '<none>')
+                    || ' blocked=' || COALESCE(blocked_reason, '<none>')
+                    || ' last_error=' || COALESCE(last_error, '<none>')
+               FROM outbox WHERE entity_id = '{id}'"
+        )),
+        std::fs::read_to_string(a.sandbox.cairn_home().join("config.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|c| c["server_account_id"].clone()),
     );
 }
 
