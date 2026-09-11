@@ -581,8 +581,32 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         if !complete {
             incomplete_at_close.push(trial);
         }
+        // **Why a decline declined**, which is the one thing the kind list
+        // cannot say. A trial that produced no durable record because its
+        // decision signal was never captured looks, in the kinds alone, exactly
+        // like a trial whose extractor found nothing — `capture_declinedx1`
+        // either way. The disposition separates them, and they are different
+        // findings: `capture_deadline_exceeded` is Cairn dropping a
+        // capture-class event under load, which FR-749b requires it to be free
+        // to do, while `no_safe_semantic_mapping` or `privacy_refused` is a
+        // decision about the content itself and would repeat on every run of a
+        // frozen corpus.
+        let declines = server
+            .query_column(&format!(
+                "SELECT COALESCE(content->>'disposition', '?')
+                        || '/' || COALESCE(content->>'stage', '?')
+                   FROM safe_events
+                  WHERE session_id = '{session}' AND kind = 'capture_declined'
+                  ORDER BY session_seq"
+            ))
+            .join(",");
+        let declines = if declines.is_empty() {
+            String::new()
+        } else {
+            format!(" declines[{declines}]")
+        };
         evidence_at_close.push(format!(
-            "trial {trial}: seq {span} complete={complete} [{kinds}]"
+            "trial {trial}: seq {span} complete={complete} [{kinds}]{declines}"
         ));
     }
 
