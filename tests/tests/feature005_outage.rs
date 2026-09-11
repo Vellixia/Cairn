@@ -350,11 +350,30 @@ fn hook_traffic_during_an_outage_never_fails_the_agent_and_nothing_is_lost() {
     // …and the health report agrees, with an age. A depth on its own does not
     // say whether anything is wrong; the age of the oldest entry is the number
     // a person acts on (FR-792).
+    //
+    // **Bracketed, because both sides are moving.** Capture is fire-and-forget:
+    // the hook returns before the row lands, so the spool keeps growing after
+    // the count above was taken. Comparing that count to a status read made a
+    // moment later compared two different instants and failed whenever a row
+    // arrived in between — observed on CI as `left: Some(12), right: Some(10)`,
+    // the status being the *newer* and larger of the two.
+    //
+    // The server is away, so nothing drains and the depth only grows. That makes
+    // the honest check an interval rather than an equality: read the table,
+    // read the status, read the table again, and require the status to fall
+    // between them. A report that disagreed with the spool would fall outside,
+    // and a report that quietly stopped counting would fall below — so this is
+    // strictly what the old assertion meant to say, without the assumption that
+    // two reads of a moving quantity are simultaneous.
     let health = events_health(&d.sandbox);
-    assert_eq!(
-        health["undelivered"].as_i64(),
-        Some(after),
-        "`cairn status` and the spool table disagree about the backlog: {health}"
+    let after_status = undelivered_events(&d.sandbox);
+    let reported = health["undelivered"].as_i64().unwrap_or(-1);
+    assert!(
+        reported >= after && reported <= after_status,
+        "`cairn status` and the spool table disagree about the backlog: the \
+         table held {after} rows before the status read and {after_status} \
+         after, and the status reported {reported}, which is outside that \
+         interval: {health}"
     );
     assert!(
         health["oldest_at"].as_str().is_some(),
