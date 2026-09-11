@@ -1143,9 +1143,32 @@ impl Server {
 
     /// Sign in and return the session cookie, panicking if the credential is
     /// refused.
+    ///
+    /// **The panic says whether the account exists**, because a bare 401 does
+    /// not. `no account with that email and password` is one message for two
+    /// unrelated failures — the row was never written, or it was written and the
+    /// password did not verify — and they have opposite repairs. This has cost a
+    /// CI investigation once already: `feature005_pattern_delivery` failed here
+    /// on one runner, nine sibling tests in the same binary passed, and the
+    /// message could not say which half was wrong.
+    ///
+    /// Read directly from the database rather than through the API, so a server
+    /// that is refusing every request cannot also decide what the diagnosis
+    /// says.
     pub fn cookie_for_password(&self, email: &str, password: &str) -> String {
-        self.sign_in(email, password)
-            .unwrap_or_else(|why| panic!("{email} could not sign in: {why}"))
+        self.sign_in(email, password).unwrap_or_else(|why| {
+            let rows = self.query_column(&format!(
+                "SELECT email || ' disabled=' || COALESCE(disabled::text, '?')
+                   FROM users WHERE email = '{}'",
+                email.replace('\'', "''")
+            ));
+            let total: i64 = self.count("SELECT COUNT(*) FROM users");
+            panic!(
+                "{email} could not sign in: {why}\n                   rows in `users` for that email: {rows:?}\n                   accounts on this server: {total}\n                   (an empty row list means the account was never written and the \
+                 fault is upstream of sign-in; a present row means the password \
+                 did not verify)"
+            )
+        })
     }
 
     /// Sign in, or `None` if the credential is refused.
@@ -1693,6 +1716,22 @@ impl Server {
             out.status.success(),
             "cairn-server users add {email}: {}",
             String::from_utf8_lossy(&out.stderr)
+        );
+        // Read back what was just written. `users add` exiting zero says the
+        // process was happy, not that a row landed in the database this server
+        // is serving — and every caller here goes straight on to sign in as that
+        // account, where the failure surfaces as an indistinguishable 401.
+        // Asserting it at the write keeps the diagnosis where the fault is.
+        let seen = self.query_column(&format!(
+            "SELECT email FROM users WHERE email = '{}'",
+            email.replace('\'', "''")
+        ));
+        assert_eq!(
+            seen.len(),
+            1,
+            "`cairn-server users add {email}` reported success and the account \
+             is not readable on {}: found {seen:?}",
+            self.database_url
         );
     }
 
