@@ -176,6 +176,47 @@ fn settle(what: &str, mut predicate: impl FnMut() -> bool) {
     panic!("timed out waiting for: {what}");
 }
 
+/// Wait until every one of the twenty sessions' consolidation has reached a
+/// **terminal** state, rather than until some durable knowledge has appeared.
+///
+/// # Why this predicate and not a count of records
+///
+/// SC-701b is a universal claim — *zero* durable records carry a word that did
+/// not cross the boundary — and a universal claim cannot be graded while the
+/// population is still growing. Waiting for a *number of records* and then
+/// sleeping is a false-pass generator: the moment fourteen records exist the
+/// test proceeds, grades those fourteen, finds no leak and passes, while
+/// sessions fifteen through twenty are still consolidating. A leaking record
+/// produced by the twentieth session lands after the verdict.
+///
+/// So the wait is on consolidation's own terminal state, which the server
+/// records durably: a generation is `done` in `consolidation_session`, and no
+/// event of it is left `pending` in `consolidation_work`. Both halves are
+/// required. The first alone can be true for a session whose work was
+/// re-opened; the second alone is true before consolidation has begun at all,
+/// because a session with no queued work has nothing pending.
+///
+/// This is a completeness condition, not a delay, so there is nothing to tune
+/// and nothing that gets slower on a fast machine. A consolidation that
+/// genuinely stops still fails here, inside `SETTLE`, and says which sessions
+/// never finished.
+fn settle_consolidation_terminal(server: &Server, project: Uuid, sessions: usize) {
+    settle(
+        &format!("all {sessions} sessions' consolidation reaches a terminal state"),
+        || {
+            let done = server.count(&format!(
+                "SELECT count(*) FROM consolidation_session
+                  WHERE project_id = '{project}' AND state = 'done'"
+            ));
+            let still_pending = server.count(&format!(
+                "SELECT count(*) FROM consolidation_work
+                  WHERE project_id = '{project}' AND state = 'pending'"
+            ));
+            done >= sessions as i64 && still_pending == 0
+        },
+    );
+}
+
 struct Device {
     sandbox: Sandbox,
     project: Uuid,
@@ -356,16 +397,11 @@ fn at_least_fourteen_of_twenty_sessions_produce_the_durable_record_they_declared
                 AND kind IN ('decision_signal','user_instruction_signal')"
         )) > 0
     });
-    settle("consolidation produces durable knowledge", || {
-        server.count(&format!(
-            "SELECT count(*) FROM memories
-              WHERE project_id = '{project}' AND origin_kind = 'consolidated'
-                AND (topic_key LIKE 'decision.%' OR topic_key LIKE 'instruction.%')"
-        )) > 0
-    });
-    // Give the aggregator rules a chance to see the whole corpus rather than
-    // whichever half had arrived when the first run fired.
-    std::thread::sleep(Duration::from_secs(5));
+    // Every session's consolidation, finished — not "some knowledge exists,
+    // then wait five seconds and hope". The aggregator rules are supposed to
+    // see the whole corpus, and this is the condition that says they have,
+    // rather than a sleep standing in for it.
+    settle_consolidation_terminal(&server, project, QUALIFYING_SESSIONS);
 
     let mut hits: Vec<&Scenario> = Vec::new();
     let mut misses: Vec<String> = Vec::new();
@@ -497,30 +533,19 @@ fn no_ungrounded_word_of_the_transient_turn_reaches_a_durable_record() {
     for s in &scenarios {
         ids.insert(s.id.clone(), drive(&device, s));
     }
-    // **Waited for at the threshold this test then asserts, not at one record.**
+    // **The population must be closed before a universal claim is graded.**
     //
-    // Waiting for the first durable record and sleeping five seconds makes the
-    // sleep load-bearing: on a busy runner the remaining nineteen are still
-    // being consolidated when it expires, and the vacuity guard below then
-    // fails for a reason that has nothing to do with SC-701b. Observed on CI
-    // as "only 19 durable records were inspected". Settling on the population
-    // the guard requires removes the guess; the deadline is `SETTLE`, so a
-    // consolidation that genuinely stopped still fails here rather than
-    // silently grading three records.
-    settle(
-        "durable knowledge appears for the graded population",
-        || {
-            server.count(&format!(
-                "SELECT count(*) FROM memories
-              WHERE project_id = '{project}' AND origin_kind = 'consolidated'
-                AND (topic_key LIKE 'decision.%' OR topic_key LIKE 'instruction.%')"
-            )) >= MINIMUM_DURABLE_MATCHES as i64
-        },
-    );
-    // Then a moment more, so records arriving after the threshold are graded
-    // too. This is opportunistic — the floor above is what the assertions rest
-    // on — and it is why the guard reports how many were actually inspected.
-    std::thread::sleep(Duration::from_secs(5));
+    // SC-701b says *zero* durable records carry an ungrounded word. Waiting for
+    // a number of records and then sleeping graded a moving population: the
+    // fourteenth record arrives, the test grades fourteen, finds no leak, and
+    // passes — while six sessions are still consolidating and any one of them
+    // could still produce the leak this test exists to catch. That is a
+    // false pass, not a flake, and no sleep length fixes it.
+    //
+    // Consolidation's own terminal state closes the population. After this
+    // returns, every session has finished and the set of durable records is
+    // final, so grading all of them is grading all there will be.
+    settle_consolidation_terminal(&server, project, QUALIFYING_SESSIONS);
 
     let mut leaks: Vec<String> = Vec::new();
     let mut checked = 0usize;

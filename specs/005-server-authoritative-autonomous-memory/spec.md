@@ -733,6 +733,20 @@ privacy boundary has already approved, and is specified under Consolidation.
   user's personal knowledge to the next user of that machine.
 - **FR-791**: A server answering with a different server instance identity than the one a
   store is bound to MUST be refused, preserving the existing protection.
+- **FR-791a**: A team knowledge row MUST carry a server-assigned version that strictly
+  increases on every write to that row, and the change feed MUST order and page on it. A
+  wall-clock timestamp MUST NOT be used as that version: the server stamps lifecycle columns
+  with transaction-start time, so a transaction opening before an earlier one commits records
+  the earlier instant, and `GREATEST` over those columns can hold the same value across two
+  different states. Two failures follow and both MUST be closed — a state comparison that
+  cannot order the two, and a feed that never re-sends a change whose key did not move, which
+  leaves other devices permanently unaware of it.
+- **FR-791b**: A mirrored team row MUST refuse an incoming page or transition reply that is
+  older than the version the row already reflects, whatever the row's own state. Equality
+  under a sequence-assigned version is the same change arriving again and MUST be admitted as
+  idempotent; equality under the timestamp fallback is two indistinguishable states and MUST
+  NOT be allowed to change state, actor or timestamp. A peer that sends no version MUST still
+  synchronize under the previous comparison.
 - **FR-792**: The user MUST be able to see the spool's depth, its oldest entry, and the reason
   delivery is not progressing.
 - **FR-792a**: The reason FR-792 requires is a claim about **now**, so when a server endpoint is

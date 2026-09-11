@@ -5,7 +5,7 @@
 //! because `migration-cutover.md` §11 requires the proof to be against the
 //! schema users have rather than against a clean database.
 
-use cairn_e2e::feature005::{install_legacy_v7, LegacyIds, LOCAL_SCHEMA_V11};
+use cairn_e2e::feature005::{install_legacy_v7, LegacyIds, LOCAL_SCHEMA_V12};
 use cairn_e2e::{attach_server, Sandbox, Server};
 
 /// A populated v7 store, upgraded in place, with a server attached.
@@ -70,7 +70,7 @@ fn a_populated_feature_004_store_survives_being_reopened_by_this_build() {
 
     assert_eq!(
         m.s.query_column("SELECT CAST(MAX(version) AS TEXT) FROM schema_migrations"),
-        vec![LOCAL_SCHEMA_V11.to_string()],
+        vec![LOCAL_SCHEMA_V12.to_string()],
         "the daemon did not migrate the swapped-in v7 store to the current schema"
     );
     assert_eq!(

@@ -71,6 +71,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "team_server_version",
         include_str!("../migrations/0011_team_server_version.sql"),
     ),
+    (
+        12,
+        "team_server_revision",
+        include_str!("../migrations/0012_team_server_revision.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

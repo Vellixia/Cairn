@@ -16,7 +16,8 @@
 //!   patterns stay two.
 
 use cairn_e2e::feature005::{
-    Local, LocalAt, LOCAL_SCHEMA_V10, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9,
+    Local, LocalAt, LOCAL_SCHEMA_V10, LOCAL_SCHEMA_V11, LOCAL_SCHEMA_V12, LOCAL_SCHEMA_V7,
+    LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9,
 };
 
 fn rt() -> tokio::runtime::Runtime {
@@ -103,6 +104,97 @@ fn v9_migrates_to_v10_and_binds_the_spools_to_a_server_instance() {
                 "v10 did not bind {table}"
             );
         }
+    });
+}
+
+/// A mirrored team row gains the server's **monotonic revision** in v12, and
+/// keeps v11's timestamp beside it (FR-456, FR-457, FR-465).
+///
+/// # Why both columns
+///
+/// v11 gave this table `server_changed_at` so a pulled page could be ordered
+/// against the row it was about to overwrite. The value it holds is the
+/// server's own ordering key,
+/// `GREATEST(created_at, ratified_at, retired_at, superseded_at)` — computed
+/// over columns the server stamps with `now()`, which is *transaction start*
+/// time. A retirement whose transaction opened before an earlier-committing
+/// ratification therefore leaves that key exactly where the ratification left
+/// it: two different states, one value, and nothing able to order them.
+/// Measured against this repository's own PostgreSQL as a one-second inversion,
+/// deterministically.
+///
+/// `server_revision` is a sequence value the server assigns at statement time
+/// on every row write, so it *is* a row version. `server_changed_at` stays
+/// because a server below server schema v5 sends no revision at all and a store
+/// must never become unable to synchronize with one — the guards prefer the
+/// revision when both sides have one and fall back to the timestamp otherwise.
+///
+/// **Nullable and not backfilled**, asserted here: a row already in the table
+/// has never been told a revision, and the fallback comparison decides its next
+/// page exactly as it did before. The guard tightens; it never withholds a row
+/// a device would otherwise have had.
+///
+/// **Falsified by** a v12 that replaces `server_changed_at` instead of adding
+/// beside it, or that backfills `server_revision` with a value ordering
+/// against a real one.
+#[test]
+fn v11_migrates_to_v12_and_records_the_servers_monotonic_revision() {
+    rt().block_on(async {
+        let db = LocalAt::new(LOCAL_SCHEMA_V11).await;
+        let column = |name: &str| {
+            format!(
+                "SELECT count(*) FROM pragma_table_info('team_knowledge')
+                  WHERE name = '{name}'"
+            )
+        };
+        assert_eq!(
+            db.count(&column("server_changed_at")).await,
+            1,
+            "v11 is the version that adds the timestamp, so this fixture is wrong"
+        );
+        assert_eq!(
+            db.count(&column("server_revision")).await,
+            0,
+            "v11 already has server_revision, so v12 is not what introduces it"
+        );
+
+        // A row already in the table, with a version recorded the only way v11
+        // could record one.
+        db.execute(
+            "INSERT INTO team_knowledge
+                 (id, knowledge_type, content, content_norm_digest, state,
+                  proposed_by_user_id, writer_id, writer_seq, created_at,
+                  server_changed_at)
+             VALUES ('11111111-1111-4111-8111-111111111111', 'convention',
+                     'we squash-merge', 'digest', 'proposed',
+                     '22222222-2222-4222-8222-222222222222', 'writer-1', 1,
+                     '2026-09-10T14:41:40.000000000+00:00',
+                     '2026-09-10T14:41:44.048009000+00:00')",
+        )
+        .await;
+
+        let db = db.migrate_to_latest().await;
+        assert!(db.schema_version().await >= LOCAL_SCHEMA_V12);
+        assert!(
+            db.column_exists("team_knowledge", "server_revision").await,
+            "v12 did not add server_revision"
+        );
+        assert!(
+            db.column_exists("team_knowledge", "server_changed_at")
+                .await,
+            "v12 removed the fallback an older server still needs"
+        );
+        assert_eq!(
+            db.count(
+                "SELECT count(*) FROM team_knowledge
+                  WHERE server_revision IS NULL
+                    AND server_changed_at = '2026-09-10T14:41:44.048009000+00:00'"
+            )
+            .await,
+            1,
+            "v12 either backfilled a revision it cannot know or lost the \
+             timestamp it must keep"
+        );
     });
 }
 

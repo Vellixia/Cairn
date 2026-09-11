@@ -1,0 +1,57 @@
+-- Local schema v12 — a mirrored team row remembers the server's **monotonic
+-- revision**, not only the timestamp it was last seen at.
+--
+-- Schema 11 gave this table `server_changed_at` so a pulled page could be
+-- ordered against the row it was about to overwrite, and the value it stores is
+-- the server's own ordering key,
+-- `GREATEST(created_at, ratified_at, retired_at, superseded_at)`. That was the
+-- right shape and the wrong quantity: **it is not a row version.**
+--
+-- Every column inside that `GREATEST` is stamped with PostgreSQL `now()`, which
+-- is *transaction start* time, not statement time. Two lifecycle writes whose
+-- transactions open in one order and commit in the other therefore record their
+-- timestamps in the wrong order. Measured against this repository's own
+-- PostgreSQL, with no lock contention required:
+--
+--     S2 opens its transaction   14:41:43.252792  -> writes retired_at  = 43.252792
+--     S1 ratifies (own tx)       14:41:44.048009  -> writes ratified_at = 44.048009
+--     final row: state = 'retired', retired_at < ratified_at = true,
+--                GREATEST(...) = 44.048009 — the ratification's value
+--
+-- The row went proposed -> authoritative -> retired, and its `changed_at` after
+-- the retirement is byte-for-byte its `changed_at` after the ratification. So
+-- one value stood for two different states, and `merge_synced_team`'s
+-- `server_changed_at <= ?` admitted a page fetched after the ratification over
+-- the retired row — un-retiring guidance an administrator had withdrawn.
+-- Equality could not be refused there either, because equality is also what a
+-- redelivered page looks like; `adopt_team_transition` refuses it and pays for
+-- that with adoptions it declines and the next pull has to repair.
+--
+-- **A version has to come from something that counts, not something that
+-- reads a clock.** Server migration 5 adds `team_knowledge.revision`, assigned
+-- from a sequence by a trigger on every row write: monotonic in the order the
+-- writes actually happened, and impossible for a write to leave unchanged. It
+-- travels as `revision` beside `changed_at`, and this column is where the last
+-- applied page's value is kept.
+--
+-- **`server_changed_at` stays, and stays load-bearing.** It is the fallback for
+-- a *server* below migration 5, which sends no revision at all and which this
+-- store must keep synchronizing with exactly as it does today. The guards
+-- prefer the revision when both sides have one and fall back to the timestamp
+-- otherwise, and the two comparisons differ in one deliberate way: equality is
+-- admitted on the revision path, because with a sequence an equal revision is
+-- the *same server change* and re-applying it is idempotent — while equality on
+-- the timestamp path is refused, because a tie there is two states nothing can
+-- order.
+--
+-- **Not backfilled, and `NULL` is read as "unknown", not as revision zero.** A
+-- row already in this table has never been told a revision, so nothing is known
+-- about which one it reflects; the safe reading of unknown is that the incoming
+-- page wins on the fallback comparison, which is exactly what an upgraded store
+-- did before this column existed. It starts declining pages by revision from
+-- the first page that carries one. The guard tightens; it never withholds a row
+-- a device would otherwise have had.
+--
+-- `INTEGER` because SQLite's integer affinity is 64-bit — a `BIGINT` on the
+-- server side round-trips whole.
+ALTER TABLE team_knowledge ADD COLUMN server_revision INTEGER;

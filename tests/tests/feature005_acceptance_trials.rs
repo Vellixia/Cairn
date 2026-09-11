@@ -174,6 +174,12 @@ fn settle(what: &str, timeout: Duration, mut predicate: impl FnMut() -> bool) {
 struct Session {
     agent: &'static str,
     events: Vec<(&'static str, Value)>,
+    /// The canonical event kind that **closes** this fixture's stream — the
+    /// last thing the client spools for the session, and therefore the marker
+    /// that says the whole stream has been delivered rather than a prefix of
+    /// it. See [`drive`] for why waiting on anything less is a synchronization
+    /// bug, not a capability one.
+    terminal: &'static str,
 }
 
 fn claude_session(key: &str) -> Session {
@@ -223,6 +229,9 @@ fn claude_session(key: &str) -> Session {
                 json!({ "session_id": key, "reason": "clear" }),
             ),
         ],
+        // `SessionEnd` is the last vendor event, and it normalizes to
+        // `session_closed`.
+        terminal: "session_closed",
     }
 }
 
@@ -270,6 +279,9 @@ fn codex_session(key: &str) -> Session {
             ),
             ("SessionEnd", json!({ "thread_id": key, "reason": "clear" })),
         ],
+        // As for Claude Code: `SessionEnd` closes the stream, and the codex
+        // adapter normalizes it to `session_closed`.
+        terminal: "session_closed",
     }
 }
 
@@ -313,6 +325,12 @@ fn opencode_session(key: &str) -> Session {
             ),
             ("session.idle", json!({ "sessionID": key })),
         ],
+        // OpenCode has no session-end event at all: `session.idle` means the
+        // agent went quiet and is **never** `session_closed`
+        // (`crates/cairn-integrate/src/agents/opencode.rs`, `Route::Quiesced`).
+        // So the kind that closes this fixture's stream is `agent_quiesced`,
+        // and demanding `session_closed` here would wait forever.
+        terminal: "agent_quiesced",
     }
 }
 
@@ -320,6 +338,42 @@ fn opencode_session(key: &str) -> Session {
 ///
 /// Only syncs — no consolidation wait here, unlike the US1 story's `drive`.
 /// That wait is batched once per agent, after all ten trials, by the caller.
+///
+/// # Two waits, because the session row and its events travel separately
+///
+/// This used to return as soon as the `sessions` row count for the project had
+/// gone up, and that predicate guarantees almost nothing about the evidence
+/// consolidation will run on. The session row and the safe events reach the
+/// server by **two different paths**: the row rides the ordinary outbox, which
+/// `cairn hook` drains synchronously at a delivery point
+/// (`cairnd::deliver` → `sync::push_pending`), while the events sit in
+/// `event_spool` until the background worker's next 500 ms tick calls
+/// `sync::drain_event_spool`. The row therefore lands *first, by design* —
+/// event ingest refuses an event whose session the server does not hold yet
+/// (`cairn_server::events`, step 6, `SessionBindingError::Unresolvable`), so
+/// the ordering is required, not incidental.
+///
+/// Measured, not assumed: instrumenting the old predicate showed the server
+/// held **0 of this session's 12 canonical events** at the instant it fired in
+/// 6 of 10 trials, with the remainder arriving 49–263 ms later. `run_trials`
+/// then force-completes the sessions and starts consolidation. The only reason
+/// the test passed was the wall time of the twenty-odd SQL round trips and the
+/// worker spawn that happen to sit in between — accidental slack, which is
+/// exactly the kind of thing a loaded CI box does not reproduce. Consolidation
+/// on a prefix of a session's stream produces fewer records, or none: with the
+/// slack removed, a run electing a session at 0/12 and 6/12 events finished
+/// having produced **zero** durable records, which is precisely the "only
+/// 9/10" SC-701 reported.
+///
+/// So this now waits on a *semantic* condition instead of a coincidence: the
+/// session's terminal canonical event has arrived **and** the stream leading to
+/// it has no holes. `session_seq` is a dense, 1-based, per-session counter
+/// allocated when the event is spooled
+/// (`cairn_store::spool::allocate_session_seq`), so `COUNT(*) = MAX(session_seq)`
+/// is exactly "every sequence number up to the highest is present" — and with
+/// the terminal event among them, "every sequence number" is the whole stream.
+/// One statement, so the count and the maximum are read from one snapshot and
+/// cannot be torn. No sleep anywhere in the condition.
 fn drive(device: &Device, server: &Server, session: Session) -> Uuid {
     // Snapshotted *before* this trial's events fire, not after: sync can
     // finish while these events are still being posted, and a snapshot taken
@@ -329,6 +383,8 @@ fn drive(device: &Device, server: &Server, session: Session) -> Uuid {
     let before = server.count(&format!(
         "SELECT COUNT(*) FROM sessions WHERE project_id = '{project}'"
     ));
+    let agent = session.agent;
+    let terminal = session.terminal;
 
     for (event, payload) in session.events {
         let result = device.sandbox.hook_as(session.agent, event, payload);
@@ -340,7 +396,9 @@ fn drive(device: &Device, server: &Server, session: Session) -> Uuid {
         );
     }
 
-    settle("the session reaches the server", SYNC_SETTLE, || {
+    // First wait: the session *row*. Not a completion condition — only how
+    // this test learns the id the second wait needs.
+    settle("the session row reaches the server", SYNC_SETTLE, || {
         server.count(&format!(
             "SELECT COUNT(*) FROM sessions WHERE project_id = '{project}'"
         )) > before
@@ -352,6 +410,26 @@ fn drive(device: &Device, server: &Server, session: Session) -> Uuid {
         .first()
         .cloned()
         .expect("a synced session");
+
+    // Second wait: the *evidence*. This is the one the caller's forced
+    // completion depends on.
+    settle(
+        &format!(
+            "{agent}'s session {id} to deliver its whole canonical event stream, \
+                  terminal `{terminal}` included, before it is closed and consolidated"
+        ),
+        SYNC_SETTLE,
+        || {
+            server.count(&format!(
+                "SELECT CASE WHEN COUNT(*) > 0
+                              AND COUNT(*) = MAX(session_seq)
+                              AND COUNT(*) FILTER (WHERE kind = '{terminal}') = 1
+                             THEN 1::bigint ELSE 0::bigint END
+                   FROM safe_events WHERE session_id = '{id}'"
+            )) == 1
+        },
+    );
+
     id.parse().expect("uuid")
 }
 
@@ -425,6 +503,10 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
     let server = server()?;
     let device = device(&server, agent);
     let project = device.project;
+    // The canonical kind that closes this agent's stream, read off the fixture
+    // itself rather than restated here — one source of truth for what "the
+    // whole session arrived" means, shared with `drive`.
+    let terminal = build("kind-probe").terminal;
 
     assert_eq!(
         server.count(&format!(
@@ -454,36 +536,77 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
     //
     // SC-701 has failed on CI as "only 9/10", and the one thing the assertion
     // cannot say is *which* trial produced nothing and what evidence
-    // consolidation had for it. `drive` waits for the session *row* to reach
-    // the server — not for that session's safe events — and capture is
-    // fire-and-forget, so a trial whose later events are still spooled would be
-    // closed and consolidated on partial evidence. Whether that is what happens
-    // is unproven: it has not reproduced locally in 25 runs. This records the
-    // evidence so the next occurrence answers it instead of restating the
-    // count.
+    // consolidation had for it. That question is now **settled**: `drive` used
+    // to wait only for the session *row*, which reaches the server on a
+    // different path from the events and therefore always first, and
+    // instrumentation showed the server holding 0 of 12 canonical events at
+    // the instant that predicate fired. Closing and consolidating a session on
+    // a prefix of its stream produces fewer records, or none. `drive` now waits
+    // for the terminal canonical event and a gap-free sequence before it
+    // returns, so by the time this snapshot is taken every trial's evidence is
+    // complete by construction.
+    //
+    // The snapshot is kept anyway, and it is now a *discriminator* rather than
+    // a hope: if SC-701 ever reports "only 9/10" again, these lines say whether
+    // the stream was complete. A complete stream next to a missing record means
+    // the fault is in consolidation or extraction, not in synchronization, and
+    // the next investigation starts there instead of here.
     //
     // Taken before the close, because afterwards it is no longer the state
     // consolidation was started on.
-    let evidence_at_close: Vec<String> = sessions
-        .iter()
-        .enumerate()
-        .map(|(trial, session)| {
-            let kinds = server
-                .query_column(&format!(
-                    "SELECT kind || 'x' || COUNT(*)::text FROM safe_events
-                      WHERE session_id = '{session}' GROUP BY kind ORDER BY kind"
-                ))
-                .join(",");
-            let span = server
-                .query_column(&format!(
-                    "SELECT COALESCE(MIN(session_seq), -1)::text || '..'
-                            || COALESCE(MAX(session_seq), -1)::text
-                       FROM safe_events WHERE session_id = '{session}'"
-                ))
-                .join("");
-            format!("trial {trial}: seq {span} [{kinds}]")
-        })
-        .collect();
+    let mut evidence_at_close: Vec<String> = Vec::with_capacity(TRIALS);
+    let mut incomplete_at_close: Vec<usize> = Vec::new();
+    for (trial, session) in sessions.iter().enumerate() {
+        let kinds = server
+            .query_column(&format!(
+                "SELECT kind || 'x' || COUNT(*)::text FROM safe_events
+                  WHERE session_id = '{session}' GROUP BY kind ORDER BY kind"
+            ))
+            .join(",");
+        let span = server
+            .query_column(&format!(
+                "SELECT COALESCE(MIN(session_seq), -1)::text || '..'
+                        || COALESCE(MAX(session_seq), -1)::text
+                        || ' of ' || COUNT(*)::text
+                   FROM safe_events WHERE session_id = '{session}'"
+            ))
+            .join("");
+        let complete = server.count(&format!(
+            "SELECT CASE WHEN COUNT(*) > 0
+                          AND COUNT(*) = MAX(session_seq)
+                          AND COUNT(*) FILTER (WHERE kind = '{terminal}') = 1
+                         THEN 1::bigint ELSE 0::bigint END
+               FROM safe_events WHERE session_id = '{session}'"
+        )) == 1;
+        if !complete {
+            incomplete_at_close.push(trial);
+        }
+        evidence_at_close.push(format!(
+            "trial {trial}: seq {span} complete={complete} [{kinds}]"
+        ));
+    }
+
+    // **The invariant the forced completion below depends on, asserted where it
+    // matters.**
+    //
+    // `drive` already refuses to return until each session's stream is whole,
+    // so this cannot fail while that predicate is intact — which is exactly why
+    // it belongs here. It names the guarantee at the point of use, so a future
+    // change that weakens the wait fails as "the evidence was not there",
+    // naming the trials, instead of resurfacing as an unexplained "only 9/10"
+    // from the accuracy assertion two hundred lines down. Reverting `drive` to
+    // the old session-row-count predicate removes the guarantee this rests on,
+    // and it was observed failing under it — but only on a box fast enough to
+    // reach here before the spool drained, so this is a guard, not a reliable
+    // detector of that mutation. What *is* deterministic is the measurement in
+    // `drive`'s comment: the old predicate fires with the stream absent.
+    assert!(
+        incomplete_at_close.is_empty(),
+        "{agent}: consolidation would have been started on a partial event stream \
+         for trials {incomplete_at_close:?} — SC-701 measures what the extractor \
+         can do with a session's evidence, so the evidence has to be there first\n    {}",
+        evidence_at_close.join("\n    ")
+    );
 
     // Close every trial's session the way the server would see it closed
     // (contracts/consolidation.md §3) — one statement for all ten, matching
@@ -689,6 +812,16 @@ fn report(r: &AgentReport) {
     );
     for (id, checked, passed) in &r.criteria {
         println!("criterion {id}: {passed}/{checked}");
+    }
+    // What the extractor was actually given, per trial. Printed rather than
+    // held for a failure message: a reviewer applying the rubric needs to know
+    // how much evidence each record was drawn from, and the stream length is
+    // not always the fixture's maximum: shorter streams have been observed on a
+    // loaded machine (nine canonical events rather than twelve, terminal event
+    // present and no gaps), so the number of events behind a record is worth
+    // stating rather than assuming.
+    for line in &r.evidence_at_close {
+        println!("evidence {line}");
     }
     println!(
         "nothing_asked_for_it: {}",

@@ -46,10 +46,23 @@ pub const LOCAL_SCHEMA_V10: i64 = 10;
 /// reflects, so a pulled page older than the row cannot erase who acted on it
 /// (FR-457).
 pub const LOCAL_SCHEMA_V11: i64 = 11;
+/// The version that replaces that timestamp with the server's **monotonic
+/// revision** (FR-456, FR-457, FR-465).
+///
+/// v11's `server_changed_at` was the right shape and the wrong quantity: it is
+/// `GREATEST` over columns the server stamps with transaction-start `now()`, so
+/// a retirement can leave it exactly where the preceding ratification left it —
+/// two different states sharing one version, which no comparison can order.
+/// v12 adds `server_revision`, and keeps `server_changed_at` as the fallback
+/// for a server below server schema v5.
+pub const LOCAL_SCHEMA_V12: i64 = 12;
 /// The local schema version Feature 005 upgrades *from*.
 pub const LOCAL_SCHEMA_V7: i64 = 7;
 /// The server schema version Feature 005 introduces (`data-model.md` §6).
 pub const SERVER_SCHEMA_V4: i64 = 4;
+/// The version that gives `team_knowledge` its monotonic `revision`, and moves
+/// the team pull feed onto it (FR-456, FR-457, FR-465).
+pub const SERVER_SCHEMA_V5: i64 = 5;
 /// The server schema version Feature 005 upgrades *from*.
 pub const SERVER_SCHEMA_V3: i64 = 3;
 

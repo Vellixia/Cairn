@@ -206,34 +206,19 @@ async fn attributed_session(
 /// so the set to screen against is the author's whole membership, not their
 /// current context. Screening against one project would let a personal note
 /// name a different one freely.
+///
+/// **One gatherer, not two.** These routes used to run their own membership
+/// query, and it differed from the one the synchronization entry point runs by
+/// a single predicate — which is to say the two sides of one privacy screen
+/// disagreed about which projects a caller can be caught naming. A privacy
+/// rule with two implementations drifts (D446), so there is now one:
+/// `global::identities_for`, which is where the rule and the reason for it
+/// live (FR-577, FR-822).
 async fn all_identities_for(
     pool: &PgPool,
     reader: &ReaderContext,
 ) -> ApiResult<Vec<ProjectIdentity>> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT p.name, p.repository_remote
-           FROM projects p JOIN project_members m ON m.project_id = p.id
-          WHERE m.user_id = $1",
-    )
-    .bind(reader.user_id())
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::new();
-    for (name, remote) in rows {
-        out.push(ProjectIdentity(name));
-        if let Some(remote) = remote {
-            // **The shared parser, not a second splitting rule.** This loop
-            // used to split on `.` as well and filter nothing, so every
-            // project on `github.com` contributed the bare token `com` — and
-            // the screen matches on containment, so `compare`, `command`,
-            // `compile` and `component` were all refused as though they named
-            // the project. `global::remote_identities` is the one place that
-            // decides what a remote says; only the membership query above is
-            // this route's own.
-            out.extend(crate::global::remote_identities(&remote));
-        }
-    }
-    Ok(out)
+    crate::global::identities_for(pool, reader.user_id()).await
 }
 
 // ---------------------------------------------------------------------------

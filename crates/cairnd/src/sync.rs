@@ -1786,6 +1786,18 @@ pub(crate) async fn merge_pulled_team(
         // Not defaulted to `created_at` or to now: a fabricated version is
         // worse than none, because none is honest about what is not known.
         server_changed_at: pulled_time(row, "changed_at"),
+        // **The monotonic version, which is what actually orders two pages**
+        // (FR-456, FR-457, FR-465). `changed_at` above is the server's
+        // `GREATEST` over lifecycle columns stamped with transaction-start
+        // `now()`, so a retirement can leave it byte-for-byte where the
+        // preceding ratification left it — two states, one value. `revision`
+        // comes from a sequence and every server-side write advances it.
+        //
+        // Absent when the peer is below server migration 5, which the merge
+        // treats as "order this page by `changed_at` as before" — not as
+        // revision zero. Read with `as_i64` so a JSON `null` and a missing key
+        // are the same answer.
+        server_revision: row.get("revision").and_then(|v| v.as_i64()),
     };
 
     match cairn_store::global::merge_synced_team(&d.store, instance, incoming).await {
@@ -2480,8 +2492,14 @@ pub(crate) async fn adopt_team_answer(
     let at = ["retired_at", "ratified_at"]
         .iter()
         .find_map(|k| row.get(k).and_then(|v| v.as_str()));
+    // The monotonic version this transition was assigned, straight from the
+    // reply that made it — see [`team_transition_version`], which extracts the
+    // same two facts for the swap path. Absent from a server below server
+    // migration 5, which leaves the adoption ordered by `at` as before.
+    let revision = row.get("revision").and_then(|v| v.as_i64());
     if let Err(e) =
-        cairn_store::global::adopt_team_transition(&d.store, id_of(row), state, actor, at).await
+        cairn_store::global::adopt_team_transition(&d.store, id_of(row), state, actor, at, revision)
+            .await
     {
         tracing::warn!(error = %e, "the server's team answer did not apply locally");
         return Err(not_recorded_locally(&e.to_string()));
@@ -2516,17 +2534,31 @@ fn not_recorded_locally(why: &str) -> WireError {
 /// `retire_team_at_version` / `ratify_team_at_version` and writes nothing
 /// itself.
 ///
-/// The server's ordering key for a row is `GREATEST(created_at, ratified_at,
-/// retired_at, superseded_at)`, so a reply saying "retired at T" is a reply
-/// saying "this row's version is now T". `None` when the reply carried no
-/// parseable timestamp, which leaves the mark alone rather than guessing.
+/// **Both halves, and the revision is the one that decides.** `revision` is
+/// `team_knowledge.revision` as the server assigned it to this very write — a
+/// sequence value taken at statement time, monotonic in the order the writes
+/// happened. `changed_at` is reconstructed from the transition's own timestamp,
+/// which is also the server's older ordering key for the row after it
+/// (`GREATEST(created_at, ratified_at, retired_at, superseded_at)`), so a reply
+/// saying "retired at T" is a reply saying "this row's `changed_at` is now T".
+///
+/// The timestamp is kept because a server below server migration 5 sends no
+/// revision and must still work; it cannot replace one, because those columns
+/// are stamped with transaction-start `now()` and a retirement can therefore
+/// leave that `GREATEST` exactly where the preceding ratification left it.
+///
+/// A half the reply did not carry, or that this store cannot read, is `None`
+/// and leaves that mark alone rather than guessing.
 pub(crate) fn team_transition_version(
     reply: &serde_json::Value,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+) -> cairn_store::global::ServerVersion {
     let row = reply.get("entry").unwrap_or(reply);
-    ["retired_at", "ratified_at"]
-        .iter()
-        .find_map(|k| pulled_time(row, k))
+    cairn_store::global::ServerVersion {
+        changed_at: ["retired_at", "ratified_at"]
+            .iter()
+            .find_map(|k| pulled_time(row, k)),
+        revision: row.get("revision").and_then(|v| v.as_i64()),
+    }
 }
 
 /// The id a transition reply names.

@@ -100,6 +100,15 @@ Cross-member overwrite disappears with the upsert: there is no command that repl
 member's memory content. Correcting someone else's knowledge is `supersede`, which creates a
 new record and links it — visible, attributed and reversible, rather than a silent overwrite.
 
+**Content screening, per command.** Every command that creates global content — personal
+create, team propose, pattern promote — screens its free text and its applicability values
+before it writes, against the caller's project identities, through the same gatherer the
+synchronization entry point uses (`promotion-privacy.md` §2a, FR-577a). The set is the union
+of every project the caller is a member of, deleted projects included. Personal, team and
+pattern records are project-independent (FR-822, FR-708a), so the project a request happens to
+name is not the question: any project its author works in, or worked in, is a name the record
+must not carry.
+
 ## 3.3 Reusable patterns
 
 Patterns are the one record type with no prior server path at all. The canonical server record

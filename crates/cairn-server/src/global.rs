@@ -36,12 +36,27 @@ use uuid::Uuid;
 /// catches the case a client-side check structurally cannot: content naming
 /// project X, pushed by a client that was working in project Y at the time. The
 /// client only ever holds the identity of the project in front of it.
+///
+/// **Every membership, including the projects since deleted (FR-577a).** This
+/// is the one gatherer: the command routes read it through
+/// `commands::all_identities_for` and the synchronization entry point calls it
+/// directly, so there is one answer to "which projects can this caller be
+/// caught naming" rather than two that disagree.
 pub async fn identities_for(pool: &PgPool, user_id: Uuid) -> ApiResult<Vec<ProjectIdentity>> {
     let rows = sqlx::query(
+        // Membership is the whole filter, and there is deliberately no
+        // `deleted_at` predicate beside it. Deleting a project is a soft
+        // delete that leaves its name and its remote exactly where they were,
+        // while the personal and team knowledge derived from it outlives it
+        // untouched (FR-519) — so the name stays disclosable long after the
+        // project stops existing, and a screen that let go of it would begin
+        // accepting the one disclosure it exists to refuse. Where the reach of
+        // a privacy screen is in question the broader answer is the right one
+        // (FR-549, D447).
         "SELECT p.name, p.repository_remote
            FROM project_members m
            JOIN projects p ON p.id = m.project_id
-          WHERE m.user_id = $1 AND p.deleted_at IS NULL",
+          WHERE m.user_id = $1",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -615,6 +630,31 @@ impl GlobalChangesQuery {
 const PERSONAL_CAPABILITY: &str = "personal_knowledge";
 const TEAM_CAPABILITY: &str = "team_knowledge";
 
+/// The schema at which `team_knowledge.revision` exists (migration 5).
+///
+/// Not a [`require_capability`] floor. A deployment held at schema 3 or 4 has
+/// a complete, working `team_knowledge` table and must keep serving it exactly
+/// as it did (FR-415) — it simply has no revision to order by, and says so by
+/// sending none. Every place that reads or writes the column consults this
+/// first; nothing refuses because of it.
+pub(crate) const TEAM_REVISION_SCHEMA: i64 = 5;
+
+/// `revision`, or a typed `NULL` under the same name on a deployment held below
+/// [`TEAM_REVISION_SCHEMA`].
+///
+/// Interpolated into a `SELECT` list or a `RETURNING` list so one statement
+/// serves both schemas and the decode below is unconditional. `NULL::bigint` and
+/// not `0`: zero is a revision, and a client that received it would order
+/// against it. `NULL` is the wire's word for "this server has no revision to
+/// give", which is what the mirror's fallback path is written for.
+fn revision_or_null(schema_version: i64) -> &'static str {
+    if schema_version >= TEAM_REVISION_SCHEMA {
+        "revision"
+    } else {
+        "NULL::bigint AS revision"
+    }
+}
+
 /// Refuse, by capability name, on a deployment whose migration 3 has not run.
 ///
 /// Held-back deployments are a supported configuration, and this codebase has
@@ -638,9 +678,15 @@ fn require_capability(schema_version: i64, capability: &str) -> Result<(), ApiEr
 }
 
 /// One page of changes, and how far the cursor may advance after it.
-pub struct ChangePage {
+///
+/// Generic in the cursor because the two team feeds do not share one. The
+/// timestamp-keyed feeds resume from a `(changed_at, id)` [`PageCursor`]; the
+/// team pull feed resumes from a [`TeamCursor`], which is a revision. Both are
+/// opaque strings to a client, and the type is what stops one being handed to
+/// the decoder for the other.
+pub struct ChangePage<C = PageCursor> {
     pub items: Vec<Value>,
-    pub cursor: PageCursor,
+    pub cursor: C,
 }
 
 /// `GET /api/sync/changes/personal` — the caller's own personal knowledge
@@ -683,18 +729,38 @@ pub async fn sync_team_changes(
     Query(q): Query<GlobalChangesQuery>,
 ) -> ApiResult<Json<Value>> {
     require_capability(state.schema_version, TEAM_CAPABILITY)?;
-    let since = PageCursor::decode(q.since.as_deref());
-    let page = team_changes(
-        &state.pool,
-        user.id(),
-        user.role() == ServerRole::Admin,
-        since,
-        q.page(),
-    )
-    .await?;
+    // **Two feeds, two cursor vocabularies, and the schema decides which.** A
+    // deployment at `TEAM_REVISION_SCHEMA` or above pages on the monotonic
+    // revision, which is the only key a lifecycle write cannot fail to move;
+    // one held below it has no such column and keeps the `changed_at` feed it
+    // had (FR-415). The cursor is opaque to the client either way, and
+    // `TeamCursor::decode` reads a cursor from the other vocabulary as "start
+    // again" — so crossing the migration re-delivers this caller's team corpus
+    // once and then resumes normally.
+    let (items, cursor) = if state.schema_version >= TEAM_REVISION_SCHEMA {
+        let page = team_changes(
+            &state.pool,
+            user.id(),
+            user.role() == ServerRole::Admin,
+            TeamCursor::decode(q.since.as_deref()),
+            q.page(),
+        )
+        .await?;
+        (page.items, page.cursor.encode())
+    } else {
+        let page = team_changes_by_changed_at(
+            &state.pool,
+            user.id(),
+            user.role() == ServerRole::Admin,
+            PageCursor::decode(q.since.as_deref()),
+            q.page(),
+        )
+        .await?;
+        (page.items, page.cursor.encode())
+    };
     Ok(Json(json!({
-        "team": page.items,
-        "cursor": page.cursor.encode(),
+        "team": items,
+        "cursor": cursor,
         // Which caller's view of the team feed this page was computed for
         // (FR-592, `contracts/sync-namespaces.md` §1a).
         //
@@ -873,20 +939,36 @@ pub async fn team_knowledge_view(
     let limit = q.page();
     let (at, id) = PageCursor::descending_bound(PageCursor::decode_opt(q.cursor.as_deref()));
 
+    // **This listing keeps ordering on `changed_at`, and the pull feed does
+    // not.** The two readers page the same table in opposite directions for
+    // different audiences, and what a mis-ordering costs each of them is not
+    // the same thing.
+    //
+    // The pull feed's cursor is durable and monotonic: a change that fails to
+    // move the key is a change that device *never* receives, and nothing later
+    // contradicts it. That is why it moved to `revision`. This list's cursor
+    // lives inside one person's browsing session and is rebuilt from the newest
+    // row every time the screen is opened, so the worst a `changed_at`
+    // inversion does here is show two rows in the wrong order on one screen —
+    // visible, self-correcting on reload, and not a divergence.
+    //
+    // Against that, "most recently changed first" is the order a curator asked
+    // for, and `changed_at` is the only column that means it. `revision` is a
+    // write counter: it would sort a row that was merely re-saved above a row
+    // that was genuinely retired, and it would change this list's order for
+    // every reader the moment the schema moved. So it travels on each row here
+    // — a client that wants to order by it can — and it does not order the
+    // page.
     let rows = sqlx::query(&format!(
         "WITH visible AS (
-             SELECT id, knowledge_type, content, topic_key, value_key, state,
-                    proposed_by_user_id, ratified_by_user_id, ratified_at,
-                    writer_id, writer_seq, created_at, superseded_by_id,
-                    retired_by_user_id, retired_at,
-                    GREATEST(created_at, ratified_at, retired_at, superseded_at)
-                        AS changed_at
+             SELECT {TEAM_WIRE_COLUMNS}, {}
                FROM team_knowledge
               WHERE {}
          )
          SELECT * FROM visible
           WHERE ($3::timestamptz IS NULL OR (changed_at, id) < ($3, $4::uuid))
           ORDER BY changed_at DESC, id DESC LIMIT $5",
+        revision_or_null(state.schema_version),
         team_visibility_predicate("$1", "$2")
     ))
     .bind(user.role() == ServerRole::Admin)
@@ -897,43 +979,8 @@ pub async fn team_knowledge_view(
     .fetch_all(&state.pool)
     .await?;
 
-    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
-    let mut facts = applicability_by_id(&state.pool, TEAM_APPLICABILITY_READ, &ids).await?;
-    let items: Vec<Value> = rows
-        .iter()
-        .map(|row| {
-            let id: Uuid = row.get("id");
-            TeamWireRow {
-                id,
-                knowledge_type: row.get("knowledge_type"),
-                content: row.get("content"),
-                topic_key: row.try_get::<Option<String>, _>("topic_key").ok().flatten(),
-                value_key: row.try_get::<Option<String>, _>("value_key").ok().flatten(),
-                state: row.get("state"),
-                proposed_by_user_id: row.get("proposed_by_user_id"),
-                ratified_by_user_id: row.try_get("ratified_by_user_id").ok().flatten(),
-                ratified_at: row.try_get("ratified_at").ok().flatten(),
-                writer_id: row.get("writer_id"),
-                writer_seq: row.get("writer_seq"),
-                created_at: row.get("created_at"),
-                superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
-                retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
-                retired_at: row.try_get("retired_at").ok().flatten(),
-                // The alias this query already selected and ordered by.
-                // `GREATEST` ignores nulls and `created_at` is `NOT NULL`, so
-                // the column is always present; `created_at` is the fallback
-                // only so a decode failure cannot drop the whole page.
-                changed_at: row
-                    .try_get("changed_at")
-                    .unwrap_or_else(|_| row.get("created_at")),
-                applicability: facts.remove(&id).unwrap_or_default(),
-            }
-            .to_json()
-        })
-        .collect();
-
     Ok(Json(json!({
-        "items": items,
+        "items": team_items(&state.pool, &rows).await?,
         "cursor": crate::api::view_cursor(&rows, limit, "changed_at", "id"),
         "limit": limit,
         // Which caller's view this page reflects, for the reason
@@ -1050,6 +1097,61 @@ impl PageCursor {
     }
 }
 
+/// A resume position in the **team** pull feed: a revision, and nothing else.
+///
+/// **One column, no tie-break, because a revision cannot tie.** `PageCursor`
+/// needs its id half because a group of rows can share one `changed_at` and a
+/// page boundary inside that group is otherwise unresumable.
+/// `team_knowledge.revision` is assigned from a sequence and carries a `UNIQUE`
+/// index, so a strict `revision > $since` can never step over a row.
+///
+/// **A cursor this cannot read resumes at the beginning of the feed, and that
+/// is the upgrade path.** A cursor written before migration 5 is a
+/// `<rfc3339>|<uuid>` position in a differently-ordered feed; there is no
+/// revision it corresponds to, and no arithmetic that could invent one. So it
+/// reads as revision 0 and the next pull re-delivers the whole team corpus
+/// once. That is [`PageCursor::decode`]'s reasoning applied to a wider
+/// discontinuity: every importer of this feed is idempotent by id
+/// (`merge_synced_team` admits an equal revision precisely so a repeat costs
+/// nothing), a repeat is free, and a skip is a silent permanent divergence.
+/// The team corpus is server-wide policy, so "the whole corpus" is small.
+///
+/// The encoding is prefixed rather than a bare integer so the two cursor
+/// vocabularies cannot be confused for one another in either direction: a bare
+/// `"1234"` would parse as a revision *and* be a plausible truncation of
+/// something else, while `rev:1234` is unambiguous and a `PageCursor` string
+/// is unambiguously not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeamCursor {
+    pub revision: i64,
+}
+
+impl TeamCursor {
+    /// Before every row. A sequence with `MINVALUE 1` never issues 0.
+    pub(crate) fn start() -> Self {
+        Self { revision: 0 }
+    }
+
+    pub(crate) fn encode(&self) -> String {
+        format!("rev:{}", self.revision)
+    }
+
+    /// Parse `rev:<n>`; anything else — absent, a pre-migration-5
+    /// `PageCursor`, a truncated or garbled string — is [`Self::start`].
+    ///
+    /// Lenient for the reason `PageCursor::decode` is lenient and then some:
+    /// refusing would strand a client whose stored cursor was written by a
+    /// version that formatted it differently, and there is no answer other than
+    /// "start again" that is not a guess about how far this client had already
+    /// read.
+    pub(crate) fn decode(raw: Option<&str>) -> Self {
+        raw.and_then(|r| r.strip_prefix("rev:"))
+            .and_then(|n| n.parse::<i64>().ok())
+            .map(|revision| Self { revision })
+            .unwrap_or_else(Self::start)
+    }
+}
+
 /// One page of a user's personal knowledge changed after `since`.
 ///
 /// **Ordered by a derived `changed_at`, not by `created_at`.** This table has
@@ -1129,6 +1231,26 @@ pub async fn personal_changes(
     })
 }
 
+/// The `team_knowledge` columns that reach the wire, enumerated.
+///
+/// **`origin_digest` is not here and there is no column here to select.** It is
+/// local-only and must never reach the wire (D434, FR-551); the columns are
+/// enumerated rather than taken as `*` so that adding one to the table cannot
+/// put it on the wire by default.
+///
+/// `changed_at` is still computed and still travels, even now that it no longer
+/// orders the pull feed: it is what the human listing sorts by, it is honest
+/// provenance ("when did this last change"), and a mirror upgraded before its
+/// server has nothing else to compare two pages with. `revision` is appended by
+/// the caller through [`revision_or_null`], because whether that column exists
+/// depends on the schema this deployment actually applied.
+const TEAM_WIRE_COLUMNS: &str = "id, knowledge_type, content, topic_key, value_key, state,
+                    proposed_by_user_id, ratified_by_user_id, ratified_at,
+                    writer_id, writer_seq, created_at, superseded_by_id,
+                    retired_by_user_id, retired_at,
+                    GREATEST(created_at, ratified_at, retired_at, superseded_at)
+                        AS changed_at";
+
 /// One page of team knowledge changed after `since`, as this caller may see it
 /// (T129, FR-463, FR-464).
 ///
@@ -1151,19 +1273,88 @@ pub async fn personal_changes(
 /// withdrawn policy forever. Filtering it out would make the retire path a
 /// local-only act (FR-456, FR-457).
 ///
-/// **Ordered by a derived `changed_at`**, for a sharper version of the reason
-/// [`personal_changes`] is: ratification and retirement are *the* lifecycle
-/// events of this table, both happen long after `created_at`, and a
-/// `created_at` cursor makes both invisible to every device that already holds
-/// the row. `ratified_at` and `retired_at` are what move an entry back into a
-/// page, which is what makes the transition a change a peer receives rather
-/// than one it has to be told about out of band.
+/// **Ordered and paged on `revision`, which is the whole point of this feed
+/// having one** (FR-456, FR-457, FR-465). Ratification, retirement and
+/// supersession are *the* lifecycle events of this table and all three happen
+/// long after `created_at`, so the key has to be something those writes move —
+/// which is why this feed was keyed on
+/// `GREATEST(created_at, ratified_at, retired_at, superseded_at)` and not on
+/// `created_at`.
 ///
-/// **`origin_digest` is not selected, and there is no column here to select.**
-/// It is local-only and must never reach the wire (D434, FR-551); the columns
-/// are enumerated rather than taken as `*` so that adding one to the table
-/// cannot put it on the wire by default.
+/// That key was not enough, and the gap was not a tie. Those columns are
+/// stamped with `now()`, which is **transaction start** time, so a retirement
+/// whose transaction opened before an earlier-committing ratification writes a
+/// `retired_at` *older* than that `ratified_at` — and `GREATEST` then reads the
+/// same value after the retirement as before it. A cursor already at that value
+/// never sees the row again, so **no other device ever learns of the
+/// retirement**: guidance withdrawn server-wide keeps being served, and nothing
+/// later contradicts it because the feed is keyed by the value that failed to
+/// move. Measured against this repository's own PostgreSQL as a one-second
+/// inversion, with no lock contention required (migration 5 carries the trace).
+///
+/// `revision` comes from a sequence, is assigned at statement time by a trigger
+/// on every row write, and is therefore monotonic in the order the writes
+/// actually happened. No write can leave it where it was, so no change can fall
+/// behind a cursor.
+///
+/// Ordered on `revision` **alone**: it is `UNIQUE`, so unlike a timestamp it
+/// cannot tie, and a strict `>` cannot step over a row at a page boundary.
+///
+/// Callers must have established that this deployment is at
+/// [`TEAM_REVISION_SCHEMA`]; below it, [`team_changes_by_changed_at`] is the
+/// feed.
 pub async fn team_changes(
+    pool: &PgPool,
+    caller_user_id: Uuid,
+    caller_is_admin: bool,
+    since: TeamCursor,
+    limit: i64,
+) -> ApiResult<ChangePage<TeamCursor>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {TEAM_WIRE_COLUMNS}, revision
+           FROM team_knowledge
+          WHERE revision > $1
+            AND {}
+          ORDER BY revision ASC LIMIT $4",
+        team_visibility_predicate("$2", "$3")
+    ))
+    .bind(since.revision)
+    .bind(caller_is_admin)
+    .bind(caller_user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let cursor = rows
+        .last()
+        .and_then(|r| r.try_get::<i64, _>("revision").ok())
+        .map(|revision| TeamCursor { revision })
+        // An empty page leaves the cursor where the caller had it rather than
+        // moving it forward, for `page_cursor`'s reason: anything written
+        // between the query and the response must still be reachable.
+        .unwrap_or(since);
+    Ok(ChangePage {
+        items: team_items(pool, &rows).await?,
+        cursor,
+    })
+}
+
+/// [`team_changes`] as it was before migration 5, for a deployment held below
+/// it (FR-415).
+///
+/// **Kept, rather than refusing.** A server at schema 3 or 4 has a complete
+/// `team_knowledge` table and an operator may deliberately be holding it there
+/// while a current binary runs (see [`crate::db::connect`]); making the team
+/// feed 409 at that point would take a working corpus away as the price of a
+/// fix to how it is ordered. So such a deployment keeps the feed it had —
+/// including the defect above, which cannot be fixed without the column it does
+/// not have — and says on the wire that it has no revision to offer, which is
+/// what the mirror's fallback comparison is written for.
+///
+/// The predicate and the column list are the same ones [`team_changes`] uses,
+/// not copies of them: the thing these two readers must never differ in is
+/// *which rows a caller may see*.
+pub async fn team_changes_by_changed_at(
     pool: &PgPool,
     caller_user_id: Uuid,
     caller_is_admin: bool,
@@ -1172,12 +1363,7 @@ pub async fn team_changes(
 ) -> ApiResult<ChangePage> {
     let rows = sqlx::query(&format!(
         "WITH changed AS (
-             SELECT id, knowledge_type, content, topic_key, value_key, state,
-                    proposed_by_user_id, ratified_by_user_id, ratified_at,
-                    writer_id, writer_seq, created_at, superseded_by_id,
-                    retired_by_user_id, retired_at,
-                    GREATEST(created_at, ratified_at, retired_at, superseded_at)
-                        AS changed_at
+             SELECT {TEAM_WIRE_COLUMNS}, NULL::bigint AS revision
                FROM team_knowledge
          )
          SELECT * FROM changed
@@ -1194,45 +1380,61 @@ pub async fn team_changes(
     .fetch_all(pool)
     .await?;
 
-    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
-    let mut facts = applicability_by_id(pool, TEAM_APPLICABILITY_READ, &ids).await?;
-
-    let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let id: Uuid = row.get("id");
-        items.push(
-            TeamWireRow {
-                id,
-                knowledge_type: row.get("knowledge_type"),
-                content: row.get("content"),
-                topic_key: row.try_get::<Option<String>, _>("topic_key").ok().flatten(),
-                value_key: row.try_get::<Option<String>, _>("value_key").ok().flatten(),
-                state: row.get("state"),
-                proposed_by_user_id: row.get("proposed_by_user_id"),
-                ratified_by_user_id: row.try_get("ratified_by_user_id").ok().flatten(),
-                ratified_at: row.try_get("ratified_at").ok().flatten(),
-                writer_id: row.get("writer_id"),
-                writer_seq: row.get("writer_seq"),
-                created_at: row.get("created_at"),
-                superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
-                retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
-                retired_at: row.try_get("retired_at").ok().flatten(),
-                // The alias this query already selected and ordered by.
-                // `GREATEST` ignores nulls and `created_at` is `NOT NULL`, so
-                // the column is always present; `created_at` is the fallback
-                // only so a decode failure cannot drop the whole page.
-                changed_at: row
-                    .try_get("changed_at")
-                    .unwrap_or_else(|_| row.get("created_at")),
-                applicability: facts.remove(&id).unwrap_or_default(),
-            }
-            .to_json(),
-        );
-    }
     Ok(ChangePage {
         cursor: page_cursor(&rows, since),
-        items,
+        items: team_items(pool, &rows).await?,
     })
+}
+
+/// One page of `team_knowledge` rows, as JSON, with their applicability facts.
+///
+/// Shared by both feeds and by the control-plane listing so that "what a team
+/// row looks like on the wire" is decided in exactly one place. Every row must
+/// carry the columns in [`TEAM_WIRE_COLUMNS`] plus a `revision` (possibly
+/// `NULL`).
+async fn team_items(pool: &PgPool, rows: &[sqlx::postgres::PgRow]) -> ApiResult<Vec<Value>> {
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    let mut facts = applicability_by_id(pool, TEAM_APPLICABILITY_READ, &ids).await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.get("id");
+            team_wire_row(row, id, facts.remove(&id).unwrap_or_default()).to_json()
+        })
+        .collect())
+}
+
+/// Decode one queried row into the wire shape.
+fn team_wire_row(row: &sqlx::postgres::PgRow, id: Uuid, applicability: Vec<Value>) -> TeamWireRow {
+    TeamWireRow {
+        id,
+        knowledge_type: row.get("knowledge_type"),
+        content: row.get("content"),
+        topic_key: row.try_get::<Option<String>, _>("topic_key").ok().flatten(),
+        value_key: row.try_get::<Option<String>, _>("value_key").ok().flatten(),
+        state: row.get("state"),
+        proposed_by_user_id: row.get("proposed_by_user_id"),
+        ratified_by_user_id: row.try_get("ratified_by_user_id").ok().flatten(),
+        ratified_at: row.try_get("ratified_at").ok().flatten(),
+        writer_id: row.get("writer_id"),
+        writer_seq: row.get("writer_seq"),
+        created_at: row.get("created_at"),
+        superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
+        retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
+        retired_at: row.try_get("retired_at").ok().flatten(),
+        // The alias every one of these queries selects.
+        // `GREATEST` ignores nulls and `created_at` is `NOT NULL`, so the
+        // column is always present; `created_at` is the fallback only so a
+        // decode failure cannot drop the whole page.
+        changed_at: row
+            .try_get("changed_at")
+            .unwrap_or_else(|_| row.get("created_at")),
+        // `NULL` on a deployment below `TEAM_REVISION_SCHEMA`, which
+        // `revision_or_null` selected under this name precisely so this decode
+        // does not have to know which schema it is reading.
+        revision: row.try_get("revision").ok().flatten(),
+        applicability,
+    }
 }
 
 /// How far the cursor may advance after one page.
@@ -1400,6 +1602,32 @@ struct TeamWireRow {
     /// One clock, not two: the mirror stores this value and compares the next
     /// page's against *it*, never against a local timestamp.
     changed_at: chrono::DateTime<chrono::Utc>,
+    /// **The monotonic server revision, and the field that actually orders**
+    /// (FR-456, FR-457, FR-465). `changed_at` above is kept because it is
+    /// honest provenance and because a mirror that has only ever spoken to an
+    /// older server has nothing else — but it is not a row version, and the
+    /// paragraph above overstated what it can do.
+    ///
+    /// Those lifecycle columns are stamped with `now()`, which is *transaction
+    /// start* time. Two writes whose transactions open in one order and commit
+    /// in the other therefore record their timestamps in the wrong order, so a
+    /// retirement can leave `GREATEST(created_at, ratified_at, retired_at,
+    /// superseded_at)` exactly where the preceding ratification left it. Two
+    /// distinct states then share one "version": nothing can order them, and
+    /// the pull feed — keyed on the same value — never re-sends the row, so no
+    /// other device learns of the retirement at all.
+    ///
+    /// `revision` comes from `team_knowledge_revision_seq`, assigned at
+    /// statement time by a trigger on every row write. It is monotonic in the
+    /// order the writes happened, whatever their transactions' start times
+    /// were, and no write can leave it unchanged. Gaps mean nothing; only the
+    /// order does.
+    ///
+    /// `None` only on a deployment held below [`TEAM_REVISION_SCHEMA`], which
+    /// has no such column. It is **not** revision zero: the mirror reads
+    /// `None` as "this server cannot order pages for me" and falls back to
+    /// comparing `changed_at`, which is what it did before this field existed.
+    revision: Option<i64>,
     applicability: Vec<Value>,
 }
 
@@ -1423,6 +1651,11 @@ impl TeamWireRow {
             "retired_by_user_id": self.retired_by_user_id,
             "retired_at": self.retired_at.map(|t| t.to_rfc3339()),
             "changed_at": self.changed_at.to_rfc3339(),
+            // Alongside `changed_at`, never instead of it. A client below
+            // local schema 12 reads only `changed_at` and must keep working;
+            // one at or above it prefers `revision` and falls back to
+            // `changed_at` when this is `null` (`merge_synced_team`).
+            "revision": self.revision,
         })
     }
 }
@@ -1478,17 +1711,32 @@ pub async fn ratify_team(
     // the two would leave authoritative guidance whose replacement of the old
     // entry is recorded nowhere.
     let mut tx = state.pool.begin().await?;
-    let ratified: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+    // **The reply carries the revision this write produced** (FR-457). The
+    // acting device applies a transition the server has already made and no
+    // pulled page has carried it yet, so this reply is the only place the row's
+    // new version exists — and the local guard that stops a page fetched
+    // *before* this ratification from rolling the row back needs a version to
+    // decline it with. `changed_at` cannot serve: it is `GREATEST` over
+    // transaction-start timestamps and a concurrent retirement can leave it
+    // unmoved (see [`TeamWireRow::revision`]).
+    //
+    // Nothing here assigns the revision. `team_knowledge_revision_bump` does,
+    // at statement time, on every row write — so this `RETURNING` reads what
+    // the trigger just set rather than restating a rule a future statement
+    // could forget. `NULL` on a deployment below `TEAM_REVISION_SCHEMA`, which
+    // has no column to return.
+    let ratified: Option<(chrono::DateTime<chrono::Utc>, Option<i64>)> = sqlx::query_as(&format!(
         "UPDATE team_knowledge
             SET state = 'authoritative', ratified_by_user_id = $1, ratified_at = now()
           WHERE id = $2 AND state = 'proposed'
-        RETURNING ratified_at",
-    )
+        RETURNING ratified_at, {}",
+        revision_or_null(state.schema_version)
+    ))
     .bind(admin.id())
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(ratified_at) = ratified else {
+    let Some((ratified_at, revision)) = ratified else {
         return Err(state_refusal(&state.pool, id, TeamState::Proposed).await);
     };
 
@@ -1502,6 +1750,7 @@ pub async fn ratify_team(
         "state": TeamState::Authoritative.as_str(),
         "ratified_by_user_id": admin.id(),
         "ratified_at": ratified_at.to_rfc3339(),
+        "revision": revision,
         "supersedes": supersedes,
     })))
 }
@@ -1530,17 +1779,23 @@ pub async fn retire_team(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     require_capability(state.schema_version, TEAM_CAPABILITY)?;
-    let retired: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+    // As `ratify_team`: the revision this write produced is in the reply and
+    // nowhere else yet, and it is what the acting device's local guard declines
+    // a stale page with. `retired_at` is exactly the timestamp that can fail to
+    // move `changed_at`, which is what made this reply's version unusable
+    // before the revision existed.
+    let retired: Option<(chrono::DateTime<chrono::Utc>, Option<i64>)> = sqlx::query_as(&format!(
         "UPDATE team_knowledge
             SET state = 'retired', retired_at = now(), retired_by_user_id = $1
           WHERE id = $2 AND state = 'authoritative'
-        RETURNING retired_at",
-    )
+        RETURNING retired_at, {}",
+        revision_or_null(state.schema_version)
+    ))
     .bind(admin.id())
     .bind(id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some(retired_at) = retired else {
+    let Some((retired_at, revision)) = retired else {
         return Err(state_refusal(&state.pool, id, TeamState::Authoritative).await);
     };
 
@@ -1549,6 +1804,7 @@ pub async fn retire_team(
         "state": TeamState::Retired.as_str(),
         "retired_by_user_id": admin.id(),
         "retired_at": retired_at.to_rfc3339(),
+        "revision": revision,
     })))
 }
 
@@ -2018,6 +2274,7 @@ mod tests {
             retired_by_user_id: None,
             retired_at: None,
             changed_at: chrono::Utc::now(),
+            revision: Some(37),
             applicability: vec![json!({ "kind": "tool", "value": "git" })],
         }
     }
@@ -2066,6 +2323,19 @@ mod tests {
             // local transition from one fetched after, and the merge that
             // guesses wrong erases who acted.
             "changed_at",
+            // And the monotonic version that actually orders two pages
+            // (FR-456, FR-457, FR-465), stored on the mirror as
+            // `server_revision` — the second name in this list spelled
+            // differently there, for the same reason.
+            //
+            // `changed_at` stayed because it is still provenance and still what
+            // a mirror below local schema 12 compares with; it is here
+            // *alongside* this one, never instead of it. It could not order
+            // anything on its own: it is `GREATEST` over columns stamped with
+            // transaction-start `now()`, so a retirement can leave it byte-for-
+            // byte where the preceding ratification left it, and two different
+            // states then share one version.
+            "revision",
         ]
         .into_iter()
         .collect();

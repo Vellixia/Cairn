@@ -473,10 +473,9 @@ fn a_repository_actually_named_git_survives_suffix_trimming() {
 /// The command side and the synchronization side derive the same remote
 /// tokens.
 ///
-/// They may still select different project rows — that difference is a
-/// membership policy question this test deliberately does not touch. What it
-/// asserts is that for one active membership, both paths agree about what the
-/// remote says, in both directions.
+/// What it asserts is that for one active membership, both paths agree about
+/// what the remote says, in both directions. Which project *rows* each side
+/// selects is the separate question §6 settles.
 ///
 /// **Falsified by** either side keeping its own remote-splitting loop.
 #[test]
@@ -502,5 +501,217 @@ fn the_command_and_sync_entry_points_tokenize_one_remote_identically() {
             "the command path refused `{text}`"
         );
         assert_eq!(sync_push(&f, text), None, "the sync path refused `{text}`");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Which project rows each side screens against (FR-577a)
+// ---------------------------------------------------------------------------
+
+/// The deleted project's own name, which is an identity in its own right and
+/// not only a token of its remote.
+const DELETED_NAME: &str = "Kestrel Ledger";
+
+/// Tokens contributed by each of [`memberships`]'s three remotes, by the
+/// relationship the caller has to that project.
+const LIVE_TOKENS: [&str; 2] = ["acme", "widgets"];
+const DELETED_TOKENS: [&str; 2] = ["kestrelworks", "ledger"];
+const REMOVED_TOKENS: [&str; 2] = ["northwind", "atlas"];
+
+/// One account with three projects in three different relationships to it: a
+/// live membership, a membership whose project has since been deleted, and a
+/// membership that was removed. The returned fixture's project is the live one
+/// — the only one a push may declare, because a push must name a project the
+/// caller belongs to.
+///
+/// One fixture rather than three, because the claim is comparative: the same
+/// caller, in one request each, must be refused for two of these projects and
+/// accepted for the third. Three fixtures could each pass for the wrong reason
+/// — an empty identity set accepts everything — and only a case that must be
+/// *refused* beside it notices.
+fn memberships(server: Server) -> Fixture {
+    let (id, token) = server.new_user("membership-owner");
+    let owner = Account {
+        id,
+        email: String::new(),
+        token,
+    };
+    let live = Uuid::now_v7();
+    let deleted = Uuid::now_v7();
+    let removed = Uuid::now_v7();
+    for (project, name, remote) in [
+        (
+            live,
+            "Widgets Control Plane",
+            "git@github.com:acme/widgets.git",
+        ),
+        (
+            deleted,
+            DELETED_NAME,
+            "git@github.com:kestrelworks/ledger.git",
+        ),
+        (
+            removed,
+            "Northwind Atlas",
+            "git@github.com:northwind/atlas.git",
+        ),
+    ] {
+        server.execute(&format!(
+            "INSERT INTO projects (id, name, repository_remote)
+             VALUES ('{project}', '{name}', '{remote}')"
+        ));
+        server.execute(&format!(
+            "INSERT INTO project_members (project_id, user_id) VALUES ('{project}', '{}')",
+            owner.id
+        ));
+    }
+    // A soft delete, which is the only kind there is: `sync.rs::tombstone`
+    // stamps `deleted_at` and leaves `name` and `repository_remote` exactly
+    // where they were. The tokens are therefore still there to screen with —
+    // whether they still *do* is what this section settles.
+    server.execute(&format!(
+        "UPDATE projects SET deleted_at = now() WHERE id = '{deleted}'"
+    ));
+    // A membership removed the way an administrator removes one: the row goes,
+    // the project stays.
+    server.execute(&format!(
+        "DELETE FROM project_members WHERE project_id = '{removed}' AND user_id = '{}'",
+        owner.id
+    ));
+    Fixture {
+        server,
+        owner,
+        project: live,
+        name: "Widgets Control Plane".to_string(),
+    }
+}
+
+/// A deleted project still contributes its identities, at every entry point.
+///
+/// Deletion is soft, and the knowledge outlives it: a personal or team record
+/// promoted from a project is untouched by that project's deletion (FR-519),
+/// and it keeps reaching every device its owner has. So the name is still
+/// disclosable after the project has stopped existing, and the screen that
+/// exists to refuse that disclosure has to still reach it (FR-577a, FR-822).
+///
+/// **Falsified by** either side of the screen filtering `deleted_at IS NULL`:
+/// the command routes did not and the synchronization entry point did, and
+/// whichever one narrows makes this project's name ordinary prose.
+#[test]
+fn a_deleted_project_still_contributes_its_identities() {
+    let f = memberships(server!());
+    let mut identities: Vec<String> = DELETED_TOKENS.iter().map(|t| t.to_string()).collect();
+    identities.push(DELETED_NAME.to_string());
+    for (entry, call) in COMMANDS {
+        for identity in &identities {
+            let text = format!("the {identity} pipeline is slow");
+            assert_eq!(
+                call(&f, &text).as_deref(),
+                Some("project_identifying"),
+                "`{text}` was accepted at the {entry} entry point, though it names \
+                 a project this caller belongs to — deleted, and still named"
+            );
+        }
+    }
+    for identity in &identities {
+        let text = format!("the {identity} pipeline is slow");
+        assert_eq!(
+            sync_push(&f, &text).as_deref(),
+            Some("project_identifying"),
+            "`{text}` was accepted on the sync path, though it names a deleted \
+             project this caller belongs to"
+        );
+    }
+}
+
+/// A membership that was removed stops contributing identities — and the live
+/// one beside it keeps contributing.
+///
+/// The union is over *memberships* (FR-577). A project the caller has no
+/// standing in is not theirs to be caught naming, and a server that screened
+/// against every project it stores would refuse most English and tell every
+/// caller what every other team is called.
+///
+/// **Falsified by** a screen that stopped joining `project_members`, and — by
+/// the second half — by an identity set that came back empty, which would make
+/// the first half pass for a reason that has nothing to do with membership.
+#[test]
+fn a_removed_membership_stops_contributing_and_a_live_one_does_not() {
+    let f = memberships(server!());
+    for identity in REMOVED_TOKENS {
+        let text = format!("the {identity} pipeline is slow");
+        assert_eq!(
+            personal(&f, &text),
+            None,
+            "`{text}` was refused, though this caller's membership of that \
+             project was removed"
+        );
+        assert_eq!(
+            sync_push(&f, &text),
+            None,
+            "`{text}` was refused on the sync path, though this caller's \
+             membership of that project was removed"
+        );
+    }
+    for identity in LIVE_TOKENS {
+        let text = format!("the {identity} pipeline is slow");
+        assert_eq!(
+            personal(&f, &text).as_deref(),
+            Some("project_identifying"),
+            "`{text}` was accepted, so the identity set was not narrower — it \
+             was empty, and every case above passed for that reason"
+        );
+        assert_eq!(
+            sync_push(&f, &text).as_deref(),
+            Some("project_identifying"),
+            "`{text}` was accepted on the sync path, so that identity set was \
+             empty too"
+        );
+    }
+}
+
+/// Every membership contributes at once, and the project a push *declares*
+/// does not narrow what it is screened against.
+///
+/// This is the bypass the fifth entry point exists to close (D447): a client
+/// naming project X while declaring it was working in project Y. The screen is
+/// the union of the caller's memberships, so declaring the live project buys
+/// nothing — including for the deleted project's tokens, which is exactly where
+/// the two sides used to disagree.
+///
+/// **Falsified by** screening against the declared `project_id`, or by the
+/// ingest side selecting a different set of project rows than the command side.
+#[test]
+fn the_declared_project_does_not_narrow_the_screen_at_ingest() {
+    let f = memberships(server!());
+    // Declared: the live project. Named: the deleted one, and the live one.
+    for identity in LIVE_TOKENS.iter().chain(DELETED_TOKENS.iter()) {
+        let text = format!("the {identity} pipeline is slow");
+        assert_eq!(
+            sync_push(&f, &text).as_deref(),
+            Some("project_identifying"),
+            "a push declaring the live project accepted `{text}`, which names a \
+             project this caller belongs to"
+        );
+    }
+    // A refused item is not persisted (FR-581), so the owner's record count is
+    // the measure rather than the response alone.
+    assert_eq!(
+        f.server.count(&format!(
+            "SELECT count(*) FROM personal_knowledge WHERE owner_user_id = '{}'",
+            f.owner.id
+        )),
+        0,
+        "a refused push left a record behind"
+    );
+    // And prose naming none of the three is still accepted, so this is not
+    // passing because the ingest path refuses everything.
+    for text in PROSE {
+        assert_eq!(
+            sync_push(&f, text),
+            None,
+            "the ingest path refused `{text}`, which names none of the three \
+             projects"
+        );
     }
 }

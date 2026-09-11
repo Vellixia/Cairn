@@ -605,6 +605,59 @@ row is written and never re-decided.
 
 ---
 
+## 5c. A team row's version is a sequence, not a clock
+
+`team_knowledge` rows are mirrored locally and refreshed from the server's change
+feed, so both sides need to agree which of two pictures of one row is newer. The
+feed already computed a value that looked like the answer —
+`GREATEST(created_at, ratified_at, retired_at, superseded_at) AS changed_at` —
+and it is not one.
+
+**PostgreSQL `now()` is transaction start, not statement time.** A transaction
+that opens before another commits stamps the *earlier* time, whatever order the
+writes actually land in. Measured against this repository's own PostgreSQL, with
+no lock contention required:
+
+```text
+S2 opens its transaction   14:30:40.990401   -> later writes retired_at = 40.990401
+S1 ratifies (own tx)       14:30:41.992679   -> ratified_at = 41.992679
+final row: state = 'retired', GREATEST(...) = 41.992679, retired_at < ratified_at
+```
+
+The row went proposed → authoritative → retired, and `changed_at` after the
+retirement is **identical** to `changed_at` after the ratification. Two
+consequences, and the second is the worse one:
+
+- equality cannot order two states, so a stale page or a delayed transition reply
+  compares as "not older" and applies — putting retired guidance back in front of
+  a whole team (FR-456, FR-465);
+- the feed pages on the same value, so a change that does not advance it is never
+  re-sent past a cursor already there. Other devices never learn about that
+  retirement at all. Silent divergence, with nothing later to contradict it.
+
+So team rows carry `revision BIGINT NOT NULL UNIQUE`, assigned from
+`team_knowledge_revision_seq` by a `BEFORE INSERT OR UPDATE` trigger. The trigger
+rather than four call sites, because the defect being repaired is precisely a
+writer that forgot to advance the version, and a fifth writer added later would
+reintroduce it silently. Over-bumping is the safe direction: a revision that moved
+when nothing semantically changed re-delivers a row once, and every importer is
+idempotent by id; a revision that failed to move loses the change permanently.
+
+The change feed orders and pages on `revision` alone — unique, so a keyset scan
+needs no id tie-break. The local mirror stores it as `server_revision` (local
+schema v12) and both stale-rejection paths prefer it:
+
+| Comparison | Equality | Why |
+| --- | --- | --- |
+| `server_revision` | **admitted** | a revision comes from a sequence, so an equal revision is the same server change arriving again — idempotent redelivery, which is ordinary after a lost reply or a cursor reset |
+| `server_changed_at` (fallback) | **refused** on transition adoption | a tie there is two *different* states sharing a `GREATEST` over transaction-start stamps; nothing can order them, and the stored one is preferred because a wrongly declined adoption is repaired by the next pull while a wrongly applied resurrection is not self-correcting |
+
+A server too old to send a revision still synchronizes: the comparison falls back
+to the timestamp, which is exactly what it was before. A local row that has never
+been told a revision does the same, and tightens as soon as one arrives.
+
+---
+
 ## 6. Server schema v4 (PostgreSQL)
 
 ```sql

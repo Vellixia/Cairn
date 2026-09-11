@@ -254,7 +254,13 @@ fn the_fr_and_sc_inventories_are_unique_and_the_recorded_counts() {
     // precedence is stated rather than incidental), and SC-718a (the report is
     // correct across a daemon replacement, in both directions and when the
     // endpoint is unreachable). Four FRs, one SC: 272 → 276 and 63 → 64.
-    const EXPECTED_FR: usize = 276;
+    // FR-791a/FR-791b added with the team row revision: `changed_at` was being
+    // used as a row version, and PostgreSQL `now()` is transaction-start time —
+    // so `GREATEST(...)` can hold one value across two different states, and the
+    // feed keyed on it can drop a change entirely. Two FRs, no new SC: SC-718a
+    // already grades the report, and the divergence is graded by the server
+    // schema target rather than by a criterion of its own. 276 -> 278.
+    const EXPECTED_FR: usize = 278;
     const EXPECTED_SC: usize = 64;
     assert_eq!(
         fr_list.len(),
