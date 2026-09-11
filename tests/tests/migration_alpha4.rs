@@ -833,21 +833,58 @@ fn sandbox_on_migrated_alpha4() -> (Sandbox, Alpha4Store) {
     // them is where the fault is.
     //
     // So: absent is fine, held is not, and the swap says so itself.
+    //
+    // **Waited for, because `daemon stop` does not mean the file is free.**
+    // `stop_daemon` polls the socket — on Windows, the named pipe — and a daemon
+    // that has stopped answering can still hold `cairn.sqlite3` open for a
+    // moment while it closes its pool. Unix does not notice: `unlink` of an open
+    // file always succeeds. Windows refuses it with `os error 32`, and that is
+    // the failure this swap actually hits — observed on the Windows runner as
+    // `The process cannot access the file because it is being used by another
+    // process`, which is precisely the condition the assertion below exists to
+    // refuse.
+    //
+    // So the wait is on the real precondition — no process holds the store —
+    // rather than on a proxy for it. There is no other signal available: the
+    // daemon is started by the CLI, so the harness never learns its pid. A
+    // handle that is never released still fails, with the same message, once the
+    // deadline passes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     for suffix in ["", "-wal", "-shm"] {
         let path = s.sidecar(suffix);
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => panic!(
-                "the sandbox's own store could not be cleared before the swap \
-                 ({}): {e}. Something still holds it open, so the migrated \
-                 database would be installed underneath a stale write-ahead log \
-                 and every assertion below would describe the empty store",
-                path.display()
-            ),
+        loop {
+            match std::fs::remove_file(&path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    let _ = e;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => panic!(
+                    "the sandbox's own store could not be cleared before the swap \
+                     ({}): {e}. Something still holds it open after waiting for it \
+                     to be released, so the migrated database would be installed \
+                     underneath a stale write-ahead log and every assertion below \
+                     would describe the empty store",
+                    path.display()
+                ),
+            }
         }
     }
-    std::fs::copy(fixture.db_path(), s.db_path()).expect("install the migrated store");
+    // The copy is the same story from the other side: on Windows a destination
+    // another process still holds is refused rather than overwritten, and a
+    // swap that silently did not happen is what this whole passage exists to
+    // make impossible.
+    loop {
+        match std::fs::copy(fixture.db_path(), s.db_path()) {
+            Ok(_) => break,
+            Err(e) if std::time::Instant::now() < deadline => {
+                let _ = e;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("install the migrated store: {e}"),
+        }
+    }
     assert!(
         !s.sidecar("-wal").exists() && !s.sidecar("-shm").exists(),
         "a sidecar reappeared beside the migrated database before it was opened; \
