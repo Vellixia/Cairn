@@ -346,6 +346,30 @@ impl Sandbox {
         event: &str,
         payload: serde_json::Value,
     ) -> CliResult {
+        self.hook_in_with_env(dir, agent, event, payload, &[])
+    }
+
+    /// A hook with extra environment, which is how a test makes one capture
+    /// **undeliverable** without touching the daemon that has to observe it
+    /// afterwards.
+    ///
+    /// The override that matters is `CAIRND_BIN`. A hook that finds no daemon
+    /// starts one and then succeeds, so a stopped daemon alone does not produce
+    /// a drop; pointing this one invocation at a daemon binary that does not
+    /// exist makes the start fail outright, on both transports, with no deadline
+    /// and no socket semantics involved. Every other way of forcing this has a
+    /// platform in which it is a race: an unbindable address depends on how two
+    /// different transports fail, and an exhausted deadline depends on whether
+    /// the transport checks the budget before it writes — Unix does, the named
+    /// pipe does not.
+    pub fn hook_in_with_env(
+        &self,
+        dir: &std::path::Path,
+        agent: &str,
+        event: &str,
+        payload: serde_json::Value,
+        env: &[(&str, &str)],
+    ) -> CliResult {
         use std::io::Write;
         use std::process::Stdio;
 
@@ -354,14 +378,19 @@ impl Sandbox {
             args.push("--agent".into());
             args.push(agent.into());
         }
-        let mut child = Command::new(binary("cairn"))
+        let mut command = Command::new(binary("cairn"));
+        command
             .args(&args)
             .current_dir(dir)
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
             .env("HOME", self.fake_home())
-            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

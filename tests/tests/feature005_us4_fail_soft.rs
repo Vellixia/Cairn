@@ -419,22 +419,6 @@ fn an_outage_mid_session_costs_freshness_and_never_authority() {
 #[test]
 fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
     let s = Sandbox::new();
-    // **The deadline itself, spent before the write.** A budget of zero is
-    // missed by construction: both transports compute what is left of it and
-    // refuse when that is nothing, so the drop happens on every platform and
-    // every run with no dependence on how a socket fails, no second daemon
-    // spawned at a bogus address, and nothing about the daemon disturbed — it
-    // is still there to collect the journal afterwards.
-    //
-    // The first attempt pointed one hook at an address nothing could bind. That
-    // works on Unix and was wrong to rely on: it made the trigger a property of
-    // two transports' failure modes rather than of the deadline the requirement
-    // is about, and it failed on Windows for a reason that was never the thing
-    // under test.
-    //
-    // The context deadline is left generous, because nothing here is a boundary
-    // event and a capture deadline is the only budget this test is about.
-    s.set_deadlines(0, 15_000);
 
     // A project to count against. `resolve` creates it from the repository, so
     // no server and no link are involved: this is entirely a local-honesty
@@ -452,7 +436,26 @@ fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
          would not be about this one"
     );
 
-    let out = s.hook(
+    // **An undeliverable capture, made so without any timing.**
+    //
+    // Two earlier constructions were wrong in the same way — each made the
+    // trigger a property of a transport rather than of the requirement. An
+    // address nothing can bind depends on how two different transports report a
+    // failed connect. An exhausted deadline depends on whether the transport
+    // consults the budget before it writes: the Unix path does, and the named
+    // pipe polls the write first and can deliver the event anyway. Both passed
+    // on Unix and neither was testing FR-749c.
+    //
+    // The daemon is stopped so the hook cannot hand the event over, and this one
+    // invocation is pointed at a daemon binary that does not exist so it cannot
+    // start one either. Spawning a missing executable fails on every platform,
+    // immediately, with no deadline and no socket involved. Then the daemon is
+    // brought back, because the thing under test is that *it* counts what the
+    // hook lost.
+    s.stop_daemon();
+    let out = s.hook_in_with_env(
+        &s.repo_dir(),
+        "claude-code",
         "PostToolUse",
         json!({
             "session_id": "faildrop-1",
@@ -460,6 +463,14 @@ fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
             "tool_input": { "file_path": "src/widget/parser.rs" },
             "tool_response": { "exit_code": 0 },
         }),
+        &[(
+            "CAIRND_BIN",
+            s.cairn_home()
+                .join("no-such-daemon-binary")
+                .display()
+                .to_string()
+                .as_str(),
+        )],
     );
 
     // FR-749b: the agent sees success.
@@ -470,7 +481,14 @@ fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
         out.stdout, out.stderr
     );
 
-    // FR-749c: and Cairn knows it lost the event.
+    // FR-749c: and Cairn knows it lost the event, once a daemon is there to say
+    // so. The journal outlived the process that could not be reached, which is
+    // the whole point of writing it to a file.
+    assert!(
+        cairn_e2e::journal_exists(&s),
+        "the hook did not record the capture it could not deliver"
+    );
+    s.restart_daemon();
     s.settle_within(
         "the daemon to count the capture-class event this machine dropped",
         Duration::from_secs(30),
