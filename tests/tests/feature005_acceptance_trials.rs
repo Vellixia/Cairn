@@ -480,6 +480,8 @@ struct AgentReport {
     /// every trial when the sessions were closed. Only read by the SC-701
     /// assertions, and only when one fails.
     trials_without_record: Vec<usize>,
+    /// For each of those, what consolidation decided about its proposals.
+    verdicts_without_record: Vec<String>,
     evidence_at_close: Vec<String>,
     /// Capture-class events this machine dropped during the run (FR-749c).
     ///
@@ -495,9 +497,11 @@ impl AgentReport {
     fn shortfall(&self) -> String {
         format!(
             "\n  trials without a record: {:?}\n  capture-class events Cairn itself dropped: {}\n  \
+             what consolidation decided for them:\n    {}\n  \
              evidence held when the sessions were closed:\n    {}",
             self.trials_without_record,
             self.dropped_by_cairn,
+            self.verdicts_without_record.join("\n    "),
             self.evidence_at_close.join("\n    ")
         )
     }
@@ -705,6 +709,7 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
     );
 
     let mut trials_without_record: Vec<usize> = Vec::new();
+    let mut verdicts_without_record: Vec<String> = Vec::new();
     let mut trials_with_record = 0usize;
     let mut criterion_counts: [(usize, usize); 4] = [(0, 0); 4];
     // Index: 0 kind_is_one_of_five, 1 claim_is_non_empty, 2 keys_are_canonical,
@@ -721,6 +726,36 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         ));
         if records.is_empty() {
             trials_without_record.push(trial);
+            // **What consolidation decided, for the one trial that produced
+            // nothing.** A complete stream next to a missing record says the
+            // fault is in consolidation rather than in capture or
+            // synchronization — which the evidence above can now establish —
+            // and the very next question is which verdict this session's
+            // proposals received. `duplicate` and `refused` are the two that
+            // leave `result_knowledge_id` NULL, and they are different findings:
+            // one says the claim was already held, the other names a gate.
+            // Without this the answer is another round of CI away.
+            let verdicts = server.query_column(&format!(
+                "SELECT coalesce(kc.proposed_kind, '?')
+                        || ' ' || coalesce(kc.topic_key, '-')
+                        || '/' || coalesce(kc.value_key, '-')
+                        || ' -> ' || kc.decision
+                        || coalesce(' (' || kc.refusal_reason || ')', '')
+                   FROM knowledge_candidates kc
+                   JOIN consolidation_runs cr ON cr.run_id = kc.run_id
+                  WHERE cr.session_id = '{session}'
+                  ORDER BY 1"
+            ));
+            let counts = server
+                .query_column(&format!(
+                    "SELECT 'proposed=' || coalesce(candidates_proposed::text, '?')
+                            || ' accepted=' || coalesce(candidates_accepted::text, '?')
+                            || ' refused=' || coalesce(candidates_refused::text, '?')
+                            || ' extractor=' || coalesce(extractor_kind, '?')
+                       FROM consolidation_runs WHERE session_id = '{session}'"
+                ))
+                .join(",");
+            verdicts_without_record.push(format!("trial {trial}: {counts} candidates{verdicts:?}"));
         }
         if !records.is_empty() {
             trials_with_record += 1;
@@ -869,6 +904,7 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         nothing_asked_for_it_held: explicit == 0 && superseded == 0,
         review_records,
         trials_without_record,
+        verdicts_without_record,
         evidence_at_close,
         dropped_by_cairn: dropped,
     })

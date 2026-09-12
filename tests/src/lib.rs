@@ -346,25 +346,6 @@ impl Sandbox {
         event: &str,
         payload: serde_json::Value,
     ) -> CliResult {
-        self.hook_in_with_env(dir, agent, event, payload, &[])
-    }
-
-    /// A hook with extra environment, which is how a test makes the daemon
-    /// genuinely unreachable *for one hook* without stopping it.
-    ///
-    /// Overriding `CAIRN_SOCKET` for a single invocation is the only way to
-    /// exercise the drop path deterministically: stopping the daemon does not
-    /// do it, because a hook that finds no socket starts one and then succeeds.
-    /// Pointing this hook at an address nothing can bind makes the delivery fail
-    /// every time, in the same shape a loaded machine produces by accident.
-    pub fn hook_in_with_env(
-        &self,
-        dir: &std::path::Path,
-        agent: &str,
-        event: &str,
-        payload: serde_json::Value,
-        env: &[(&str, &str)],
-    ) -> CliResult {
         use std::io::Write;
         use std::process::Stdio;
 
@@ -373,19 +354,14 @@ impl Sandbox {
             args.push("--agent".into());
             args.push(agent.into());
         }
-        let mut command = Command::new(binary("cairn"));
-        command
+        let mut child = Command::new(binary("cairn"))
             .args(&args)
             .current_dir(dir)
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
             .env("HOME", self.fake_home())
-            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"));
-        for (key, value) in env {
-            command.env(key, value);
-        }
-        let mut child = command
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
