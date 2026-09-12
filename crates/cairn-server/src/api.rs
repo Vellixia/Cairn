@@ -3,14 +3,16 @@
 use crate::auth::{self, AdminUser, CurrentUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use cairn_core::domain::KnowledgeDomain;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{PgPool, Postgres, Row, Transaction};
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub fn routes() -> Router<AppState> {
@@ -71,6 +73,12 @@ pub fn routes() -> Router<AppState> {
         // Same `410 Gone` treatment, for the same reason (FR-587).
         .route("/api/projects/{id}/join", post(join_removed))
         // Sync
+        // Safe-event ingest. A boundary of its own, not `/api/sync/batch`:
+        // that one carries whole entities a client already decided to store,
+        // this one carries typed observations the server decides about. Merged
+        // rather than routed inline so its body limit stays its own — see
+        // `event_ingest_route`.
+        .merge(event_ingest_route())
         .route("/api/sync/batch", post(sync_batch))
         .route("/api/sync/changes", get(sync_changes))
         // Read-back for the two non-project domains (T101, T129).
@@ -88,24 +96,507 @@ pub fn routes() -> Router<AppState> {
         // pull to a project the personal domain does not belong to.
         .route("/api/sync/changes/personal", get(sync_personal_changes))
         .route("/api/sync/changes/team", get(sync_team_changes))
+        // The third of the same shape (T085). A pattern is a personal-domain
+        // record, so this feed is owner-scoped exactly as `changes/personal`
+        // is, and for the same reason a namespace parameter is not used to
+        // reach it: a parameter that selects a namespace is one edit away from
+        // selecting an owner.
+        //
+        // Unlike the two above, this one carries **tombstones**. A cache that
+        // already holds a pattern only learns it was forgotten from the row
+        // itself, so a forgotten pattern travels once more with its
+        // `forgotten_at` and no content.
+        .route(
+            "/api/sync/changes/patterns",
+            get(crate::commands::pattern_changes),
+        )
         // The team lifecycle. `AdminUser` on both handlers, so a member reaching
         // either is refused before the handler runs — an agent has no tool
         // action shaped like ratification and must not gain one through a route
         // (FR-455, FR-515).
+        // The post-cutover command boundary (T026). Every one of these
+        // replaces a shape the `memory` upsert used to allow, and the
+        // difference is that a command states an intent the server acts on
+        // rather than a row the server stores.
+        .route(
+            "/api/projects/{id}/memories",
+            get(project_memories).post(crate::commands::create_memory),
+        )
+        .route(
+            "/api/projects/{id}/memory-relations",
+            post(crate::commands::record_relation),
+        )
+        .route(
+            "/api/memories/{id}/supersede",
+            post(crate::commands::supersede_memory),
+        )
+        .route(
+            "/api/memories/{id}/reinforce",
+            post(crate::commands::reinforce_memory),
+        )
+        .route("/api/memories/{id}/pin", post(crate::commands::pin_memory))
+        // Personal knowledge: one route, a write and a read, both bound to the
+        // credential. The read is US5's Domains panel (T110) and takes no
+        // parameter that could name an owner — see
+        // `global::personal_knowledge_view` for why that is the guarantee
+        // rather than a check.
+        .route(
+            "/api/personal/knowledge",
+            get(crate::global::personal_knowledge_view).post(crate::commands::create_personal),
+        )
+        .route(
+            "/api/personal/knowledge/{id}/forget",
+            post(crate::commands::forget_personal),
+        )
+        // Team knowledge: propose, and read back what the caller may see. The
+        // read is a list in front of `ratify`/`retire` and adds no mutation of
+        // its own — `web-control-plane.md` §8 is explicit that a web-specific
+        // curation handler would reopen the double-ratification race the
+        // existing compare-and-swap statements close (FR-889a).
+        .route(
+            "/api/team/knowledge",
+            get(crate::global::team_knowledge_view).post(crate::commands::propose_team),
+        )
+        .route(
+            "/api/memories/{id}/forget",
+            post(crate::commands::forget_memory),
+        )
+        // One authenticated route for every queued command, dispatching
+        // internally to the handlers above. Not a second implementation of
+        // command semantics: a second *way in* to the same ones, carrying the
+        // deterministic `command_id` the per-command paths have nowhere to put.
+        .route("/api/commands", post(crate::commands::command_envelope))
+        // The pattern lifecycle (T085). Promotion is an upsert on
+        // `(owner_user_id, content_key)`, so posting the same pattern twice is
+        // one record; the list is the owner's own and takes no parameter
+        // through which another account could be named.
+        //
+        // There is no route here that widens a pattern to a team. Widening is a
+        // separate, explicit act with its own governance — the owner proposes
+        // the content through `POST /api/team/knowledge` and a human
+        // administrator ratifies it — and the personal pattern stays owner-only
+        // and stays in the personal domain (FR-708e, Constitution V).
+        .route(
+            "/api/patterns",
+            get(crate::commands::list_patterns).post(crate::commands::promote_pattern),
+        )
+        .route(
+            "/api/patterns/{id}/forget",
+            post(crate::commands::forget_pattern),
+        )
+        // Ratify and retire already exist and are reused unchanged: each is one
+        // compare-and-swap statement, `AdminUser`-gated, and re-implementing
+        // them would be a second place for the transition rule to live.
         .route("/api/team/{id}/ratify", post(ratify_team))
         .route("/api/team/{id}/retire", post(retire_team))
+        // Migration and cutover (`contracts/migration-cutover.md`). The first
+        // four are the client's own migration path (§4-§9) and stay reachable
+        // whatever `server_authority.mode` says — a store migrating *after*
+        // cutover is exactly what FR-876d requires. The fifth is the server's
+        // one-way switch and takes `AdminUser` for the same reason ratify and
+        // retire do: this is not a tool action an agent has, ever.
+        .route("/api/migration/register", post(migration_register))
+        .route("/api/migration/drain", post(migration_drain))
+        .route("/api/migration/possession", post(migration_possession))
+        .route("/api/migration/complete", post(migration_complete))
+        .route("/api/admin/cutover", post(admin_cutover))
         // Read API for the web UI
         .route("/api/projects/{id}", get(project_overview))
         .route("/api/projects/{id}/tasks", get(project_tasks))
         .route("/api/projects/{id}/sessions", get(project_sessions))
-        .route("/api/projects/{id}/memories", get(project_memories))
         .route("/api/projects/{id}/sync-status", get(project_sync_status))
+        // Health and the capture funnel. One write path and one read path per
+        // report, shared by US5's dashboard and US6's status (T035).
+        .route(
+            "/api/projects/{id}/health",
+            get(read_health).post(report_health),
+        )
+        .route("/api/projects/{id}/dispositions", post(report_dispositions))
+        // The web control plane's project-scoped reads (T108, T109). Every one
+        // of them calls `require_member` before its query, so a non-member is
+        // refused rather than handed an empty list — an empty list would tell a
+        // non-member the project exists and would make a missing guard
+        // undetectable (FR-894a).
+        //
+        // `integration-health` is a second path onto `read_health`'s own query
+        // and not a second implementation of it: the agents screen and US6's
+        // status ask the same question, and the only thing that differed was the
+        // envelope key each audience already depends on.
+        .route("/api/projects/{id}/funnel", get(project_funnel))
+        .route("/api/projects/{id}/activity", get(project_activity))
+        .route(
+            "/api/projects/{id}/consolidation-runs",
+            get(project_consolidation_runs),
+        )
+        .route(
+            "/api/projects/{id}/retrieval-traces",
+            get(project_retrieval_traces),
+        )
+        .route(
+            "/api/projects/{id}/integration-health",
+            get(project_integration_health),
+        )
+        // Deployment-wide rather than project-scoped, so the gate is the role
+        // and not a membership. `AdminUser` in the parameter list is the
+        // authorization: a member reaching this route would be reading across
+        // every project on the server (FR-891).
+        // **Two routes, one authority** (`verification-summary.md` §4). The
+        // names describe the shape of the check being reported; neither is a
+        // stronger trust boundary than the other, because a URL is caller-
+        // selected input and bearer authentication establishes who is reporting
+        // rather than what ran. Both assign `remote_attested`, and `cairn` is
+        // reachable from neither.
+        .route(
+            "/api/verification/runs",
+            post(crate::verifysummary::report_run),
+        )
+        .route(
+            "/api/verification/attestations",
+            post(crate::verifysummary::report_attestation),
+        )
+        .route("/api/system/health", get(system_health))
+        // Consolidation's own backlog, readable while a pass is running and
+        // immediately after a restart, because every field behind it is a
+        // committed row rather than worker state (SC-748, FR-793c).
+        .route("/api/consolidation/health", get(consolidation_health))
+        // Retrieval, its trace, and the outcome of actually transmitting it.
+        // Three routes and not one: generating a briefing, reading back what
+        // was selected, and reporting what reached the agent are three
+        // different claims, and collapsing them would let the first stand in
+        // for the third (FR-843, FR-854).
+        .route("/api/retrieve", post(retrieve_context))
+        .route("/api/retrieval-traces/{trace_id}", get(retrieval_trace))
+        .route(
+            "/api/retrieval-traces/{trace_id}/transmission",
+            post(retrieval_transmission),
+        )
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
         .route(
             "/api/memories/{id}",
             get(memory_detail).delete(delete_memory),
         )
+}
+
+// ---------------------------------------------------------------------------
+// Health and disposition reporting (T035, FR-851-FR-860)
+// ---------------------------------------------------------------------------
+
+/// How many rows one health or disposition report may carry.
+///
+/// A report is a *summary* — one row per agent, capability and stage, or per
+/// kind and day. A complete matrix for three agents is seventy-five rows, and a
+/// day's dispositions across three agents and twenty-one kinds is a few
+/// hundred. A thousand is comfortably above any honest report and well below
+/// what an unbounded one could do to a request handler.
+const REPORT_MAX_ROWS: usize = 1000;
+
+/// Validate a reported health matrix and seed the rows a read API returns.
+///
+/// **Shared, because US5 and US6 ask the same two questions of the same rows**
+/// and two implementations would be two places for "what counts as a healthy
+/// cell" to drift. The write side validates; the read side is a plain select
+/// over what the write side accepted.
+///
+/// Three rules the validation enforces, each of which is a way the matrix could
+/// otherwise claim more than Cairn established:
+///
+/// - **Attribution is per machine** (FR-857). `writer_id` comes from the report
+///   because it names the machine that observed the behaviour, but the project
+///   and the account come from the credential — a client that could name those
+///   could file health for somebody else's project.
+/// - **A behavioural status needs an observation** (FR-852). Configuration
+///   read-back is `introspection` and does not establish that anything ran.
+/// - **The vocabulary is closed.** An unrecognized status is refused rather
+///   than stored, because a matrix cell rendering as an unknown string is a
+///   blank cell wearing a value.
+async fn report_health(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+
+    let rows = body
+        .get("cells")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::invalid("`cells` must be an array"))?;
+    if rows.len() > REPORT_MAX_ROWS {
+        return Err(ApiError::invalid(format!(
+            "a health report carries at most {REPORT_MAX_ROWS} cells"
+        )));
+    }
+
+    let writer_id = body
+        .get("writer_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::invalid("`writer_id` is required: a capability is observed on a machine")
+        })?
+        .to_string();
+
+    let mut accepted = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for row in rows {
+        let cell: cairn_integrate::capability::MatrixCell = serde_json::from_value(row.clone())
+            .map_err(|_| ApiError::invalid("a cell is not a health cell"))?;
+        if cairn_integrate::capability::MatrixCapability::parse(&cell.capability).is_none() {
+            return Err(ApiError::invalid(format!(
+                "`{}` is not a capability this matrix has a cell for",
+                cell.capability
+            )));
+        }
+        // **The stage is a closed vocabulary too, and it was not being checked.**
+        //
+        // A stage matters most exactly when something failed: "capture is
+        // broken" and "the server refused what capture produced" call for
+        // different actions, and the stage is what tells them apart (FR-853). A
+        // cell carrying an unrecognized stage — an empty string, most easily —
+        // renders as a failure at nowhere in particular, which is the conflation
+        // the vocabulary exists to prevent. It is also part of the row's primary
+        // key, so an unconstrained value silently forks the cell it should have
+        // replaced.
+        if cairn_core::event::PipelineStage::from_str(&cell.stage).is_err() {
+            return Err(ApiError::invalid(format!(
+                "`{}` is not a pipeline stage; a failure has to name where it \
+                 failed, and a stage nobody declared names nowhere",
+                cell.stage
+            )));
+        }
+        if !cell.is_coherent() {
+            // Named rather than silently downgraded: a client reporting
+            // `supported` on configuration evidence has a bug worth knowing
+            // about, and storing a weaker status would hide it.
+            return Err(ApiError::invalid(format!(
+                "`{}` reports {} without the evidence that status requires",
+                cell.capability, cell.status
+            )));
+        }
+
+        sqlx::query(
+            "INSERT INTO integration_health
+                 (project_id, account_id, writer_id, agent, capability, stage, status,
+                  evidence_kind, observed_at, degraded)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (project_id, account_id, writer_id, agent, capability, stage)
+             DO UPDATE SET status = EXCLUDED.status,
+                           evidence_kind = EXCLUDED.evidence_kind,
+                           observed_at = EXCLUDED.observed_at,
+                           degraded = EXCLUDED.degraded",
+        )
+        .bind(project_id)
+        .bind(user.id)
+        .bind(&writer_id)
+        .bind(&cell.agent)
+        .bind(&cell.capability)
+        .bind(&cell.stage)
+        .bind(cell.status.as_str())
+        .bind(cell.evidence_kind.map(|k| k.as_str()))
+        .bind(
+            cell.observed_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc)),
+        )
+        .bind(cell.degraded)
+        .execute(&mut *tx)
+        .await?;
+        accepted += 1;
+    }
+    tx.commit().await?;
+    Ok(Json(json!({ "accepted": accepted })))
+}
+
+/// The matrix as it stands, for one project.
+///
+/// A plain read over what the write side accepted. It does **not** synthesize
+/// missing cells: a matrix with a cell absent is a real state — nothing has
+/// ever reported it — and filling it in here would make "no report arrived"
+/// indistinguishable from "reported as no evidence" (FR-855).
+async fn read_health(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+    let cells = integration_health_rows(&state.pool, project_id).await?;
+    Ok(Json(json!({ "cells": cells })))
+}
+
+/// The matrix rows for one project — the single read both health surfaces use.
+///
+/// Extracted rather than copied because US5's agents screen and US6's status
+/// output ask the *same* question of the same table, and a second query is a
+/// second place for "which columns a matrix cell has" to drift. What kept them
+/// apart was only the envelope key their two audiences already depend on
+/// (`cells` on `/health`, `rows` on `/integration-health`), and an envelope is
+/// not a reason to have two queries.
+///
+/// It synthesizes nothing. A capability with no row has never been reported,
+/// which is a different state from a capability reported as `no_evidence`, and
+/// filling the gap here would erase the distinction FR-855 draws.
+async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiResult<Vec<Value>> {
+    let rows = sqlx::query(
+        "SELECT account_id, writer_id, agent, capability, stage, status, evidence_kind,
+                observed_at, degraded
+           FROM integration_health
+          WHERE project_id = $1
+          ORDER BY agent, capability, stage, writer_id, account_id",
+    )
+    .bind(project_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                // **Attribution needs both halves.** `writer_id` names the
+                // machine and is supplied by the reporting client, so two
+                // accounts can pick the same label — a shared CI name is the
+                // obvious case. The row is already keyed on the account, so the
+                // two are stored apart; without the account in the *read* a
+                // reader sees two contradictory cells for one machine and no way
+                // to tell whose observation is whose, which is FR-857 satisfied
+                // in the table and lost on the way out.
+                "account_id": r.get::<Uuid, _>("account_id"),
+                "writer_id": r.get::<String, _>("writer_id"),
+                "agent": r.get::<String, _>("agent"),
+                "capability": r.get::<String, _>("capability"),
+                "stage": r.get::<String, _>("stage"),
+                "status": r.get::<String, _>("status"),
+                "evidence_kind": r.get::<Option<String>, _>("evidence_kind"),
+                "observed_at": r
+                    .get::<Option<chrono::DateTime<chrono::Utc>>, _>("observed_at")
+                    .map(|t| t.to_rfc3339()),
+                "degraded": r.get::<Option<bool>, _>("degraded"),
+            })
+        })
+        .collect())
+}
+
+/// `GET /api/projects/{id}/integration-health` — the agents screen (FR-887).
+///
+/// Reads through [`integration_health_rows`], which is `read_health`'s own
+/// query: the path is new because `web-control-plane.md` §2 names it, and the
+/// implementation is not, because a second one would be a second answer to
+/// "which capabilities are working".
+///
+/// `stale` is deliberately absent from the row. §5 computes it client-side from
+/// `observed_at` against a per-capability freshness window, and a server that
+/// baked one window in would be asserting that every capability goes stale at
+/// the same rate. What the row owes the view is the observation time and the
+/// machine it came from (FR-857, FR-860); the judgement is the view's.
+async fn project_integration_health(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    Ok(Json(json!({
+        "rows": integration_health_rows(&state.pool, project_id).await?,
+    })))
+}
+
+/// Record capture dispositions — the funnel's client-reported half.
+///
+/// Counts, not records. A disposition carries no payload content (FR-749d,
+/// FR-741), so there is nothing to keep beyond how often it happened, and the
+/// vocabulary is closed by the column's own CHECK.
+async fn report_dispositions(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+    let rows = body
+        .get("counts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::invalid("`counts` must be an array"))?;
+    if rows.len() > REPORT_MAX_ROWS {
+        return Err(ApiError::invalid(format!(
+            "a disposition report carries at most {REPORT_MAX_ROWS} rows"
+        )));
+    }
+
+    let mut accepted = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for row in rows {
+        let agent = row
+            .get("agent")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`agent` is required"))?;
+        let kind = row
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`kind` is required"))?;
+        let disposition = row
+            .get("disposition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`disposition` is required"))?;
+        // Parsed rather than passed through, so an unrecognized disposition is
+        // refused here with a name rather than by a constraint violation.
+        if cairn_core::event::Disposition::from_str(disposition).is_err() {
+            return Err(ApiError::invalid(format!(
+                "`{disposition}` is not a capture disposition"
+            )));
+        }
+        let day = row
+            .get("day")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`day` is required"))?;
+        let n = row.get("n").and_then(Value::as_i64).unwrap_or(0);
+        if n < 0 {
+            return Err(ApiError::invalid("a count cannot be negative"));
+        }
+
+        // Counts accumulate: a client reports what it saw since last time, and
+        // two reports of the same day are two batches of the same funnel rather
+        // than a correction of it.
+        sqlx::query(
+            "INSERT INTO capture_dispositions
+                 (project_id, account_id, agent, kind, disposition, day, n)
+             VALUES ($1, $2, $3, $4, $5, $6::date, $7)
+             ON CONFLICT (project_id, account_id, agent, kind, disposition, day)
+             DO UPDATE SET n = capture_dispositions.n + EXCLUDED.n",
+        )
+        .bind(project_id)
+        .bind(user.id)
+        .bind(agent)
+        .bind(kind)
+        .bind(disposition)
+        .bind(day)
+        .bind(n)
+        .execute(&mut *tx)
+        .await?;
+        accepted += 1;
+    }
+    tx.commit().await?;
+    Ok(Json(json!({ "accepted": accepted })))
+}
+
+/// `/api/events/batch`, carrying its own request-body limit.
+///
+/// The bound is `BODY_MAX_BYTES` — 1 MiB, stated as a number in
+/// `contracts/safe-events.md` §5 so SC-743 has something to fail against — and
+/// it is enforced by the body boundary rather than by counting after the fact.
+/// A batch is bounded twice, at two different layers, and both are needed: 256
+/// events is a bound on *how many* an honest client sends, and 1 MiB is a bound
+/// on how many bytes a hostile one can make the server buffer before anything
+/// has been parsed or authenticated. Checking the length inside the handler is
+/// too late — the body is already in memory by then.
+///
+/// A router of its own, merged in, so the limit applies to **this route only**.
+/// Axum's `DefaultBodyLimit` is a layer, and putting it on the main router would
+/// silently retighten every other endpoint from the 2 MB default to 1 MiB —
+/// including `/api/sync/batch`, which is a different boundary with its own
+/// bounds and no requirement asking for this one.
+fn event_ingest_route() -> Router<AppState> {
+    Router::new()
+        .route("/api/events/batch", post(crate::events::ingest_batch))
+        .layer(DefaultBodyLimit::max(cairn_core::event::BODY_MAX_BYTES))
 }
 
 /// The two routes the security prerequisite removed answer here (FR-587).
@@ -149,9 +640,13 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
+    // Read fresh rather than from the application state: an administrator can
+    // cut this deployment over while it is running, and a client polls here to
+    // learn that they did.
+    let authority = crate::version::authority_for(&state.pool, state.schema_version).await;
     let payload = state
         .releases
-        .payload(state.schema_version, state.server_instance_id)
+        .payload(state.schema_version, state.server_instance_id, authority)
         .await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
@@ -255,6 +750,78 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .map_err(|_| ApiError::internal("bad cookie"))?,
     );
     Ok((out, Json(json!({ "ok": true }))))
+}
+
+/// Generate a briefing for one session, and trace it.
+///
+/// The account comes from the credential and the project from the session; the
+/// body names neither, and a caller that could name them could retrieve against
+/// a project it has nothing to do with (FR-769, Principle XI).
+async fn retrieve_context(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<crate::retrieve::RetrieveRequest>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    let config = cairn_core::CairnConfig::default();
+    let answer = crate::retrieve::retrieve(
+        &state.pool,
+        &reader,
+        &body,
+        config.context_budget_tokens,
+        config.context_deadline_ms as u128,
+    )
+    .await?;
+    Ok(Json(
+        serde_json::to_value(answer).unwrap_or_else(|_| json!({})),
+    ))
+}
+
+/// What a retrieval considered and selected, filtered to this reader.
+async fn retrieval_trace(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(trace_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    Ok(Json(
+        crate::retrieve::trace_detail(&state.pool, &reader, trace_id).await?,
+    ))
+}
+
+/// What actually happened to a generated briefing.
+///
+/// The smallest boundary that can carry the fact: a server-issued `trace_id` in
+/// the path and a bounded outcome in the body. Nothing else is accepted,
+/// because everything else the server already holds and everything beyond that
+/// is authority a caller must not assert.
+async fn retrieval_transmission(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(trace_id): Path<Uuid>,
+    Json(body): Json<crate::retrieve::TransmissionReport>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    Ok(Json(
+        crate::retrieve::report_transmission(&state.pool, &reader, trace_id, &body).await?,
+    ))
+}
+
+/// How far behind consolidation is, for any authenticated caller.
+///
+/// Not project-scoped, and deliberately: the backlog is a property of the
+/// deployment's single consolidation task, not of any one project, and every
+/// field it reports is a count or a timestamp — no content, no keys, nothing
+/// that names what any project knows. Scoping it per project would suggest a
+/// per-project worker that does not exist.
+async fn consolidation_health(
+    State(state): State<AppState>,
+    _user: SettledUser,
+) -> ApiResult<Json<Value>> {
+    let health = crate::consolidate::health(&state.pool).await?;
+    Ok(Json(
+        serde_json::to_value(health).unwrap_or_else(|_| json!({})),
+    ))
 }
 
 async fn me(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
@@ -991,6 +1558,829 @@ pub use crate::global::{ratify_team, retire_team, sync_personal_changes, sync_te
 pub use crate::sync::{sync_batch, sync_changes};
 
 // ---------------------------------------------------------------------------
+// Migration and cutover (`contracts/migration-cutover.md`)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/migration/register` — open or reopen this store's migration
+/// (`migration-cutover.md` §4, §12.1).
+///
+/// **One statement decides it**, the same compare-and-swap shape `ratify_team`
+/// and `retire_team` already establish. `ON CONFLICT (account_id, writer_id) DO
+/// UPDATE SET completed_at = NULL` covers every case in the contract at once:
+/// a fresh `(account_id, writer_id)` inserts a new token; re-registering while
+/// still open touches nothing but reports the same row back; and re-registering
+/// after completion clears `completed_at` and reopens it — which is exactly
+/// what `--retry-retained` running after completion needs (FR-876d). What the
+/// `DO UPDATE` clause never names is `migration_token` itself, so an existing
+/// row's token survives untouched in every branch; only a genuine insert uses
+/// the freshly generated one.
+///
+/// Deliberately **not** gated by `server_authority.mode`: a client migrating
+/// after its server has already cut over must still be able to register
+/// (FR-876d), and this route is the mechanism, not a bypass of it — see
+/// [`migration_drain`].
+#[derive(Debug, Deserialize)]
+struct MigrationRegisterBody {
+    writer_id: String,
+}
+
+async fn migration_register(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<MigrationRegisterBody>,
+) -> ApiResult<Json<Value>> {
+    if body.writer_id.trim().is_empty() {
+        return Err(ApiError::invalid("`writer_id` is required"));
+    }
+    let token = auth::random_token();
+    let row: (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "INSERT INTO client_migrations
+            (migration_token, account_id, writer_id, registered_at, completed_at)
+         VALUES ($1, $2, $3, now(), NULL)
+         ON CONFLICT (account_id, writer_id) DO UPDATE SET completed_at = NULL
+         RETURNING migration_token, registered_at",
+    )
+    .bind(&token)
+    .bind(user.id())
+    .bind(&body.writer_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "migration_token": row.0,
+        "registered_at": row.1.to_rfc3339(),
+    })))
+}
+
+/// Refuse a drain call whose token is unknown, belongs to another account, or
+/// has already completed (`migration-cutover.md` §12.1).
+///
+/// **One answer for all three**, deliberately: distinguishing "unknown token"
+/// from "somebody else's token" would let a caller enumerate other accounts'
+/// migrations one guess at a time, and distinguishing "completed" from
+/// "unknown" tells an attacker nothing they could not learn by trying to
+/// register their own token and comparing (FR-894a's enumeration-oracle
+/// reasoning, applied here to a token rather than a record id).
+async fn require_registered_migration(
+    pool: &PgPool,
+    user_id: Uuid,
+    migration_token: &str,
+) -> ApiResult<()> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT migration_token FROM client_migrations
+          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL",
+    )
+    .bind(migration_token)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if row.is_some() {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "migration_not_registered",
+            "this migration token is unknown, belongs to another account, or has \
+             already completed; register before draining",
+        ))
+    }
+}
+
+/// One drained record, in the migration-scoped wire shape (`migration-cutover.md`
+/// §4.2). Distinct from `sync::SyncItem`: a drain item carries no
+/// `idempotency_key` of its own — every entity type this route accepts is
+/// already idempotent on redelivery by its own natural key, which is the same
+/// property `sync::SyncItem`'s upsert functions already have and exactly why
+/// they are reused rather than reimplemented.
+#[derive(Debug, Deserialize, Clone)]
+struct DrainItem {
+    entity_type: String,
+    /// A **string**, because not every drained record is named by a UUID: a
+    /// relation has no id of its own and travels as its `from|to|kind` natural
+    /// key (`migration-cutover.md` §4.2). Typing this as a `Uuid` rejected the
+    /// whole request body with a `422` and no error object, so a client
+    /// draining a relation could not tell a malformed request from an
+    /// unreachable server.
+    entity_id: String,
+    operation: String,
+    #[serde(default)]
+    payload: Value,
+}
+
+impl DrainItem {
+    /// The item's id, for the four record types that have one.
+    fn uuid(&self) -> ApiResult<Uuid> {
+        self.entity_id.parse().map_err(|_| {
+            ApiError::invalid(format!(
+                "`{}` is not an id a {} can be named by",
+                self.entity_id, self.entity_type
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DrainBody {
+    migration_token: String,
+    #[serde(default)]
+    items: Vec<DrainItem>,
+}
+
+/// The entity types the drain route accepts (`migration-cutover.md` §4.2,
+/// §12.0). The authoritative list, and it is deliberately the same five rows
+/// that table names — anything else answers `entity_type_not_drained` rather
+/// than being silently ignored, so a client can tell "this record type will
+/// never drain through this route" from "this one did, but was refused".
+const DRAINED_ENTITY_TYPES: &[&str] = &[
+    "memory",
+    "memory_relation",
+    "personal_knowledge",
+    "team_knowledge",
+    "pattern",
+];
+
+/// Matches `possession`'s own bound and `safe-events.md` §7's batch-bounding
+/// discipline — one number for "how big is one call allowed to be" rather than
+/// a fresh limit invented per route.
+const MAX_DRAIN_ITEMS: usize = 500;
+
+fn uuid_field(payload: &Value, key: &str) -> Option<Uuid> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// `POST /api/migration/drain` — the migration-scoped ingest route
+/// (`migration-cutover.md` §12.1, FR-864, FR-864a).
+///
+/// **Exempt from the cutover refusal, by construction rather than by a
+/// bypass flag.** This handler never calls `sync::sync_batch` or consults
+/// `server_authority.mode` at all — it is a wholly separate route, gated only
+/// by an open migration registration, which is what keeps it from being a
+/// general escape hatch around `upgrade_required` (§12.1: "refused for a store
+/// that has not registered a migration").
+///
+/// **Reuses the same upserts `sync.rs` already has for project memory and
+/// relations** (`sync::upsert_memory`, `sync::upsert_relation`), by
+/// constructing the same `sync::SyncItem` those functions already take. A
+/// drained `memory`/`memory_relation` item carries its own `project_id` in the
+/// payload — unlike a `sync/batch` item, this request has no batch-level
+/// project — and membership is checked before the reused upsert runs, so a
+/// migrating store cannot deliver a record into a project it does not belong
+/// to merely by naming one in the payload.
+///
+/// Personal and team knowledge reuse `global::upsert_personal` /
+/// `global::upsert_team` **and** the same `global::screen_global_item` privacy
+/// screen `sync/batch` runs before them: the module doc on `global.rs` is
+/// explicit that this boundary must hold "wherever the client chooses to
+/// enforce it" or not at all, and a migration ingest path is exactly the kind
+/// of second entry point that guarantee has to cover.
+///
+/// A `pattern` item is not upserted through any existing function: its
+/// identity was already decided client-side, before delivery, by the local
+/// `legacy_pattern_claims` row this drain call has no visibility into
+/// (§4.1a) — `pattern_id` is the item's own `entity_id`, taken verbatim, and
+/// `owner_user_id` is the credential. Recomputing either here would be a
+/// second, possibly different, answer to a question migration already
+/// answered once.
+async fn migration_drain(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<DrainBody>,
+) -> ApiResult<Json<Value>> {
+    if body.items.len() > MAX_DRAIN_ITEMS {
+        return Err(ApiError::invalid(format!(
+            "a drain call carries at most {MAX_DRAIN_ITEMS} items"
+        )));
+    }
+    require_registered_migration(&state.pool, user.id(), &body.migration_token).await?;
+
+    // Computed once for the whole call rather than once per item: the
+    // identity set depends only on the caller, not on any one record
+    // (`global::identities_for`).
+    let identities = crate::global::identities_for(&state.pool, user.id()).await?;
+
+    let mut results = Vec::with_capacity(body.items.len());
+    for it in &body.items {
+        match drain_one(&state, user.id(), &identities, it).await {
+            Ok(()) => results.push(json!({
+                "entity_id": it.entity_id,
+                "entity_type": it.entity_type,
+                "accepted": true,
+            })),
+            // Every item is answered, never failed as a batch: one record this
+            // store cannot deliver must not strand the rest (§4.3's
+            // blocked-row reporting is what a client does with this per item).
+            Err(e) => results.push(json!({
+                "entity_id": it.entity_id,
+                "entity_type": it.entity_type,
+                "accepted": false,
+                "reason": e.message,
+            })),
+        }
+    }
+    Ok(Json(json!({ "results": results })))
+}
+
+async fn drain_one(
+    state: &AppState,
+    user_id: Uuid,
+    identities: &[cairn_core::validate::ProjectIdentity],
+    it: &DrainItem,
+) -> ApiResult<()> {
+    if !DRAINED_ENTITY_TYPES.contains(&it.entity_type.as_str()) {
+        return Err(ApiError::invalid("entity_type_not_drained"));
+    }
+    if it.operation != "upsert" {
+        return Err(ApiError::invalid(format!(
+            "`{}` is not a drained operation; drain transfers records, it does not delete them",
+            it.operation
+        )));
+    }
+
+    // One transaction per item. A failure partway through — an unmet
+    // membership check, a privacy refusal — drops `tx` without committing, and
+    // a dropped `sqlx::Transaction` rolls back on its own; there is no path on
+    // which a partially-applied item is left committed.
+    let mut tx = state.pool.begin().await?;
+    match it.entity_type.as_str() {
+        "memory" => {
+            let project_id = uuid_field(&it.payload, "project_id")
+                .ok_or_else(|| ApiError::invalid("a drained memory must carry its `project_id`"))?;
+            auth::require_member(&state.pool, project_id, user_id).await?;
+            let sync_item = crate::sync::SyncItem {
+                idempotency_key: String::new(),
+                entity_type: it.entity_type.clone(),
+                entity_id: it.uuid()?,
+                operation: it.operation.clone(),
+                payload: it.payload.clone(),
+            };
+            crate::sync::upsert_memory(&mut tx, state.schema_version, project_id, &sync_item)
+                .await?;
+        }
+        "memory_relation" => {
+            let project_id = uuid_field(&it.payload, "project_id").ok_or_else(|| {
+                ApiError::invalid("a drained relation must carry its `project_id`")
+            })?;
+            auth::require_member(&state.pool, project_id, user_id).await?;
+            let sync_item = crate::sync::SyncItem {
+                idempotency_key: String::new(),
+                entity_type: it.entity_type.clone(),
+                // `upsert_relation` reads the triple out of the payload and
+                // never looks at this field, because a relation *is* its
+                // triple. Nil rather than a parsed endpoint id, so nothing
+                // downstream can start treating one endpoint as the edge's id.
+                entity_id: Uuid::nil(),
+                operation: it.operation.clone(),
+                payload: it.payload.clone(),
+            };
+            crate::sync::upsert_relation(&mut tx, project_id, &sync_item).await?;
+        }
+        "personal_knowledge" => {
+            crate::global::screen_global_item(&it.payload, identities)
+                .map_err(|refusal| refusal.into_api_error())?;
+            crate::global::upsert_personal(&mut tx, user_id, it.uuid()?, &it.payload).await?;
+        }
+        "team_knowledge" => {
+            crate::global::screen_global_item(&it.payload, identities)
+                .map_err(|refusal| refusal.into_api_error())?;
+            crate::global::upsert_team(&mut tx, user_id, it.uuid()?, &it.payload).await?;
+        }
+        "pattern" => drain_pattern(&mut tx, user_id, it).await?,
+        _ => unreachable!("checked by DRAINED_ENTITY_TYPES above"),
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Promote one legacy pattern into `shared_patterns`, keyed exactly as
+/// `migration-cutover.md` §4.1a and §4.2 describe: `pattern_id` is the item's
+/// own `entity_id`, and `owner_user_id` is the credential — never recomputed,
+/// never anyone but the caller.
+///
+/// Conflict target is `(owner_user_id, content_key)` — the identity migration
+/// actually claimed — rather than `pattern_id`, so a redelivery is recognized
+/// by the same key its ownership claim was made against; `DO NOTHING` because a
+/// drained pattern is transferred once, not edited through this path.
+async fn drain_pattern(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_user_id: Uuid,
+    it: &DrainItem,
+) -> ApiResult<()> {
+    let title = it
+        .payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let problem = it
+        .payload
+        .get("problem")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let root_cause = it
+        .payload
+        .get("root_cause")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let approach = it
+        .payload
+        .get("approach")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if title.is_empty() || problem.is_empty() || root_cause.is_empty() || approach.is_empty() {
+        return Err(ApiError::invalid(
+            "a drained pattern must carry title, problem, root_cause and approach",
+        ));
+    }
+    let content_key = it
+        .payload
+        .get("content_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("a drained pattern must carry its `content_key`"))?;
+    let constraints = it
+        .payload
+        .get("constraints")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let applicability = it
+        .payload
+        .get("applicability")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    sqlx::query(
+        "INSERT INTO shared_patterns
+            (pattern_id, domain, owner_user_id, title, problem, root_cause, approach,
+             constraints, applicability, trust, content_key)
+         VALUES ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, 'sanitized', $9)
+         ON CONFLICT (owner_user_id, content_key) DO NOTHING",
+    )
+    .bind(it.uuid()?)
+    .bind(owner_user_id)
+    .bind(title)
+    .bind(problem)
+    .bind(root_cause)
+    .bind(approach)
+    .bind(&constraints)
+    .bind(&applicability)
+    .bind(content_key)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One record `POST /api/migration/possession` was asked about, resolved from
+/// its own reference shape (`migration-cutover.md` §5, §12.5) rather than
+/// coerced into another domain's.
+#[derive(Debug, Clone)]
+enum PossessionRef {
+    Knowledge { domain: KnowledgeDomain, id: Uuid },
+    Pattern { id: Uuid },
+    Relation { from: Uuid, to: Uuid, kind: String },
+}
+
+/// Parse one possession record, or refuse the whole call (§5, §12.5).
+///
+/// **A malformed record is a `400` for the call, not a per-record answer** —
+/// unlike drain's per-item reporting, `held`/`missing`/`indeterminate` are the
+/// only three things this route says about a record it understood, and a
+/// malformed one is not one of those three. A `knowledge` record with no
+/// `domain` is malformed for the same reason `verifysummary.rs`'s
+/// `Reference::parse` refuses one: a bare id names a project memory, a
+/// personal note and a team entry at once, so on its own it names none of
+/// them.
+fn parse_possession_record(v: &Value) -> ApiResult<PossessionRef> {
+    let ref_kind = v
+        .get("ref_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("a possession record must name its `ref_kind`"))?;
+    match ref_kind {
+        "knowledge" => {
+            let named = v.get("domain").and_then(Value::as_str).ok_or_else(|| {
+                ApiError::invalid(
+                    "a knowledge record needs its `domain`: the same id can name a \
+                         project memory, a personal note and a team entry at once",
+                )
+            })?;
+            let domain = KnowledgeDomain::from_str(named)
+                .map_err(|_| ApiError::invalid(format!("`{named}` is not a domain")))?;
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a knowledge record needs a uuid `id`"))?;
+            Ok(PossessionRef::Knowledge { domain, id })
+        }
+        "pattern" => {
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a pattern record needs a uuid `id`"))?;
+            Ok(PossessionRef::Pattern { id })
+        }
+        "relation" => {
+            let from = v
+                .get("from")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `from`"))?;
+            let to = v
+                .get("to")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `to`"))?;
+            let kind = v
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::invalid("a relation record needs its `kind`"))?
+                .to_string();
+            Ok(PossessionRef::Relation { from, to, kind })
+        }
+        other => Err(ApiError::invalid(format!("`{other}` is not a ref_kind"))),
+    }
+}
+
+/// The three answers `migration-cutover.md` §5 allows, and no fourth.
+enum Possession {
+    Held,
+    Missing,
+    Indeterminate,
+}
+
+/// Resolve one record's possession, per the table in §5 and §12.5.
+///
+/// **`indeterminate` exists only for team knowledge.** Every other domain's
+/// visibility question collapses cleanly into "held" or "missing" — a personal
+/// or pattern record either belongs to the caller or it does not, a project
+/// record either sits in a project the caller is a member of or it does not —
+/// and the contract's own table names no `indeterminate` condition for any of
+/// them. Team is different because a `proposed` row is visible to its author
+/// and to an administrator and to nobody else (`sync-namespaces.md` §1a): a
+/// caller who is neither must not be told `missing`, which the caller could
+/// act on by retaining a writable copy of a record the server may actually
+/// hold (§12.5).
+async fn classify_possession(
+    pool: &PgPool,
+    user_id: Uuid,
+    is_admin: bool,
+    r: &PossessionRef,
+) -> ApiResult<Possession> {
+    match r {
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Personal,
+            id,
+        } => {
+            let owner: Option<(Uuid,)> =
+                sqlx::query_as("SELECT owner_user_id FROM personal_knowledge WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+            Ok(match owner {
+                Some((owner,)) if owner == user_id => Possession::Held,
+                _ => Possession::Missing,
+            })
+        }
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Project,
+            id,
+        } => {
+            let row: Option<(Uuid,)> =
+                sqlx::query_as("SELECT project_id FROM memories WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+            match row {
+                None => Ok(Possession::Missing),
+                Some((project_id,)) => {
+                    let member: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT user_id FROM project_members
+                          WHERE project_id = $1 AND user_id = $2",
+                    )
+                    .bind(project_id)
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    Ok(if member.is_some() {
+                        Possession::Held
+                    } else {
+                        Possession::Missing
+                    })
+                }
+            }
+        }
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Team,
+            id,
+        } => {
+            let row: Option<(String, Uuid)> = sqlx::query_as(
+                "SELECT state, proposed_by_user_id FROM team_knowledge WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(match row {
+                None => Possession::Missing,
+                Some((state, _)) if state != "proposed" => Possession::Held,
+                Some((_, proposer)) if proposer == user_id || is_admin => Possession::Held,
+                Some(_) => Possession::Indeterminate,
+            })
+        }
+        PossessionRef::Pattern { id } => {
+            let owner: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT owner_user_id FROM shared_patterns
+                  WHERE pattern_id = $1 AND forgotten_at IS NULL",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(match owner {
+                Some((owner,)) if owner == user_id => Possession::Held,
+                _ => Possession::Missing,
+            })
+        }
+        PossessionRef::Relation { from, to, kind } => {
+            // `memory_relations` carries its own `project_id`, stamped at
+            // `upsert_relation` time from a call that already checked both
+            // endpoints belonged to it (`sync::all_in_project`) — so this one
+            // membership check is equivalent to checking both endpoints
+            // separately, without a second join to restate that guarantee.
+            let row: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT project_id FROM memory_relations
+                  WHERE from_memory_id = $1 AND to_memory_id = $2 AND kind = $3",
+            )
+            .bind(from)
+            .bind(to)
+            .bind(kind)
+            .fetch_optional(pool)
+            .await?;
+            match row {
+                None => Ok(Possession::Missing),
+                Some((project_id,)) => {
+                    let member: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT user_id FROM project_members
+                          WHERE project_id = $1 AND user_id = $2",
+                    )
+                    .bind(project_id)
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    Ok(if member.is_some() {
+                        Possession::Held
+                    } else {
+                        Possession::Missing
+                    })
+                }
+            }
+        }
+    }
+}
+
+const MAX_POSSESSION_RECORDS: usize = 500;
+
+#[derive(Debug, Deserialize)]
+struct PossessionBody {
+    #[serde(default)]
+    records: Vec<Value>,
+}
+
+/// `POST /api/migration/possession` — "delivered" and "durably held" are
+/// different facts, and only the second authorizes demotion (`migration-cutover.md`
+/// §5, FR-865).
+///
+/// Registration is **not** required here, unlike `migration_drain`: a store
+/// may verify possession of records it already believed canonical, independent
+/// of whether it is mid-migration right now (§5's own wording).
+async fn migration_possession(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<PossessionBody>,
+) -> ApiResult<Json<Value>> {
+    if body.records.is_empty() {
+        return Err(ApiError::invalid("`records` must name at least one record"));
+    }
+    if body.records.len() > MAX_POSSESSION_RECORDS {
+        return Err(ApiError::invalid(format!(
+            "a possession call carries at most {MAX_POSSESSION_RECORDS} records"
+        )));
+    }
+    // Parsed up front, entirely: one malformed record refuses the whole call
+    // rather than leaving a partially-answered response (see
+    // `parse_possession_record`).
+    let parsed: Vec<(Value, PossessionRef)> = body
+        .records
+        .iter()
+        .map(|v| parse_possession_record(v).map(|r| (v.clone(), r)))
+        .collect::<ApiResult<Vec<_>>>()?;
+
+    let is_admin = user.role() == cairn_core::domain::ServerRole::Admin;
+    let mut held = Vec::new();
+    let mut missing = Vec::new();
+    let mut indeterminate = Vec::new();
+    for (raw, r) in &parsed {
+        // The same reference object that was sent is what comes back — never
+        // reconstructed from the parsed fields — so a caller's own request
+        // shape round-trips exactly (§5).
+        match classify_possession(&state.pool, user.id(), is_admin, r).await? {
+            Possession::Held => held.push(raw.clone()),
+            Possession::Missing => missing.push(raw.clone()),
+            Possession::Indeterminate => indeterminate.push(raw.clone()),
+        }
+    }
+    Ok(Json(json!({
+        "held": held,
+        "missing": missing,
+        "indeterminate": indeterminate,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MigrationTokenBody {
+    migration_token: String,
+}
+
+/// `POST /api/migration/complete` — closes a migration token (`migration-cutover.md`
+/// §12.1: "closes when the migration completes, so a migrated store cannot
+/// keep using it").
+///
+/// Idempotent: completing an already-completed token answers with the
+/// `completed_at` already on record rather than refusing a caller that is
+/// simply retrying a response it never saw.
+async fn migration_complete(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<MigrationTokenBody>,
+) -> ApiResult<Json<Value>> {
+    let completed: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "UPDATE client_migrations SET completed_at = now()
+          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL
+        RETURNING completed_at",
+    )
+    .bind(&body.migration_token)
+    .bind(user.id())
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let completed_at = match completed {
+        Some((at,)) => at,
+        None => {
+            let existing: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+                "SELECT completed_at FROM client_migrations
+                  WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NOT NULL",
+            )
+            .bind(&body.migration_token)
+            .bind(user.id())
+            .fetch_optional(&state.pool)
+            .await?;
+            match existing {
+                Some((at,)) => at,
+                None => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "migration_not_registered",
+                        "this migration token is unknown or belongs to another account",
+                    ))
+                }
+            }
+        }
+    };
+    Ok(Json(json!({ "completed_at": completed_at.to_rfc3339() })))
+}
+
+/// Every `memories` row whose asserted verification the new authority model
+/// cannot substantiate, audited then demoted in one statement
+/// (`migration-cutover.md` §2 steps 2-3).
+///
+/// The audit insert and the demotion read the **same** `orphaned` CTE, which
+/// is what makes them agree on exactly which rows: the demotion cannot drift
+/// from what was audited, because there is only one computation of "orphaned"
+/// in this statement, not two that could disagree after being edited
+/// separately.
+const CUTOVER_DEMOTE_MEMORIES_SQL: &str = "
+WITH orphaned AS (
+    SELECT id, verification, verification_authority, last_verified_at
+      FROM memories
+     WHERE verification <> 'unverified'
+       AND NOT EXISTS (
+             SELECT 1 FROM verification_reports vr
+              WHERE vr.reference_key = 'knowledge:project:' || memories.id::text
+           )
+),
+audited AS (
+    INSERT INTO legacy_verification_audit
+        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
+    SELECT 'project', id, verification, verification_authority, last_verified_at
+      FROM orphaned
+    ON CONFLICT (domain, knowledge_id) DO NOTHING
+    RETURNING knowledge_id
+),
+demoted AS (
+    UPDATE memories
+       SET verification = 'unverified', verification_authority = NULL,
+           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
+           last_verified_at = NULL
+     WHERE id IN (SELECT id FROM orphaned)
+    RETURNING id
+)
+SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
+";
+
+/// The same operation as [`CUTOVER_DEMOTE_MEMORIES_SQL`], over
+/// `knowledge_verification` (`migration-cutover.md` §2 step 4).
+///
+/// `ref_kind = 'knowledge'` excludes pattern rows on purpose: `shared_patterns`
+/// is new in this same schema (server schema v4), so no pattern verification
+/// predates the cutover for there to be anything "legacy" about — and
+/// `legacy_verification_audit.domain` is `NOT NULL`, which a pattern row's
+/// null domain slot could never satisfy in the first place.
+const CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL: &str = "
+WITH orphaned AS (
+    SELECT reference_key, domain, knowledge_id, verification,
+           verification_authority, last_verified_at
+      FROM knowledge_verification
+     WHERE ref_kind = 'knowledge'
+       AND verification <> 'unverified'
+       AND NOT EXISTS (
+             SELECT 1 FROM verification_reports vr
+              WHERE vr.reference_key = knowledge_verification.reference_key
+           )
+),
+audited AS (
+    INSERT INTO legacy_verification_audit
+        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
+    SELECT domain, knowledge_id, verification, verification_authority, last_verified_at
+      FROM orphaned
+    ON CONFLICT (domain, knowledge_id) DO NOTHING
+    RETURNING knowledge_id
+),
+demoted AS (
+    UPDATE knowledge_verification
+       SET verification = 'unverified', verification_authority = NULL,
+           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
+           last_verified_at = NULL
+     WHERE reference_key IN (SELECT reference_key FROM orphaned)
+    RETURNING reference_key
+)
+SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
+";
+
+/// `POST /api/admin/cutover` — the one-way switch (`migration-cutover.md` §2,
+/// FR-876).
+///
+/// **One transaction, the compare-and-swap first.** Same shape as `ratify_team`
+/// / `retire_team`: the `UPDATE ... WHERE mode = 'pre_cutover'` decides whether
+/// this call is the one that flips the switch before anything else runs, so
+/// two concurrent calls race inside PostgreSQL rather than in this handler.
+/// Zero rows means already cut over — FR-876 gives no route back, so that is
+/// the existing decision restated, not an error, and steps 2-4 do not run at
+/// all: nothing is re-audited and nothing is re-demoted on a repeat call.
+async fn admin_cutover(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    let mut tx = state.pool.begin().await?;
+    let cas: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "UPDATE server_authority SET mode = 'server_authoritative', cutover_at = now()
+          WHERE id = 1 AND mode = 'pre_cutover'
+        RETURNING cutover_at",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((cutover_at,)) = cas else {
+        // Nothing was written by the failed CAS, so there is nothing to
+        // commit — the transaction is simply dropped.
+        drop(tx);
+        let existing: (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as("SELECT cutover_at FROM server_authority WHERE id = 1")
+                .fetch_one(&state.pool)
+                .await?;
+        return Ok(Json(json!({
+            "mode": "server_authoritative",
+            "cutover_at": existing.0.map(|t| t.to_rfc3339()),
+            "already": true,
+            "demoted": 0,
+            "audited": 0,
+        })));
+    };
+
+    let (memories_audited, memories_demoted): (i64, i64) =
+        sqlx::query_as(CUTOVER_DEMOTE_MEMORIES_SQL)
+            .fetch_one(&mut *tx)
+            .await?;
+    let (kv_audited, kv_demoted): (i64, i64) =
+        sqlx::query_as(CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "mode": "server_authoritative",
+        "cutover_at": cutover_at.to_rfc3339(),
+        "already": false,
+        "demoted": memories_demoted + kv_demoted,
+        "audited": memories_audited + kv_audited,
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // Read API for the web UI
 // ---------------------------------------------------------------------------
 
@@ -1239,6 +2629,18 @@ struct MemoryQueryParams {
     state: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
+    /// Accepted so the Domains screen can say which panel it is asking for, and
+    /// refused for any value but `project`.
+    ///
+    /// **Refused rather than ignored.** Before this field existed the parameter
+    /// was silently dropped, which meant `?domain=personal` returned this
+    /// project's memories and read to the caller exactly like a personal feed.
+    /// A route that answers a question it was not asked is worse than one that
+    /// refuses: personal and team knowledge are not project-scoped and are
+    /// reached at their own routes, and there is deliberately no value of this
+    /// parameter that reaches them from here.
+    #[serde(default)]
+    domain: Option<String>,
 }
 
 /// Same scope-first ranking as the local path, so a query behaves the same in
@@ -1250,26 +2652,42 @@ async fn project_memories(
     Query(q): Query<MemoryQueryParams>,
 ) -> ApiResult<Json<Value>> {
     auth::require_member(&state.pool, id, user.id()).await?;
-    let limit = q.limit.unwrap_or(25).clamp(1, 100);
+    if let Some(domain) = q.domain.as_deref() {
+        if domain != "project" {
+            return Err(ApiError::invalid(format!(
+                "`{domain}` is not a domain this route can answer for; a project's \
+                 memories are the project domain, and personal and team knowledge \
+                 are read at `/api/personal/knowledge` and `/api/team/knowledge`"
+            )));
+        }
+    }
+    let limit = q
+        .limit
+        .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
+        .clamp(1, crate::global::VIEW_PAGE_MAX);
     let want_state = q.state.unwrap_or_else(|| "active".to_string());
 
     let rows = sqlx::query(
-        "SELECT *,
-                CASE scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1
-                           WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket,
+        "SELECT m.*,
+                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1
+                             WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket,
                 CASE WHEN $2::text IS NULL OR $2 = '' THEN 0
-                     ELSE ts_rank(to_tsvector('english', content),
-                                  plainto_tsquery('english', $2)) END AS relevance
-         FROM memories
-         WHERE project_id = $1
-           AND deleted_at IS NULL
-           AND state = $3
+                     ELSE ts_rank(to_tsvector('english', m.content),
+                                  plainto_tsquery('english', $2)) END AS relevance,
+                (SELECT COUNT(*) FROM memory_relations rel
+                  WHERE rel.deleted_at IS NULL
+                    AND (rel.from_memory_id = m.id OR rel.to_memory_id = m.id))
+                  AS relation_count
+         FROM memories m
+         WHERE m.project_id = $1
+           AND m.deleted_at IS NULL
+           AND m.state = $3
            AND ($2::text IS NULL OR $2 = ''
-                OR to_tsvector('english', content) @@ plainto_tsquery('english', $2))
-           AND ($4::text IS NULL OR scope = $4)
-           AND ($5::text IS NULL OR scope_key = $5)
-           AND ($6::text IS NULL OR type = $6)
-         ORDER BY scope_bucket ASC, relevance DESC, created_at DESC
+                OR to_tsvector('english', m.content) @@ plainto_tsquery('english', $2))
+           AND ($4::text IS NULL OR m.scope = $4)
+           AND ($5::text IS NULL OR m.scope_key = $5)
+           AND ($6::text IS NULL OR m.type = $6)
+         ORDER BY scope_bucket ASC, relevance DESC, m.created_at DESC
          LIMIT $7",
     )
     .bind(id)
@@ -1283,11 +2701,29 @@ async fn project_memories(
     .await?;
 
     let memories: Vec<Value> = rows.iter().map(memory_json).collect();
-    Ok(Json(
-        json!({ "memories": memories, "total": memories.len() }),
-    ))
+    Ok(Json(json!({
+        "memories": memories,
+        "total": memories.len(),
+        // The bound this page was actually taken under. `total` is how many
+        // came back, which is the same number for a full page and for a project
+        // with exactly that many memories — a client cannot tell "there is more"
+        // from it, and `limit` is what makes the two distinguishable (FR-895).
+        "limit": limit,
+    })))
 }
 
+/// One memory as both the explorer and the detail view start from.
+///
+/// The six fields below `superseded_by_id` are what FR-883 asks the explorer to
+/// filter and sort on, and they are added here rather than only on the detail
+/// route because an explorer that had to open every record to learn its
+/// verification state is not an explorer.
+///
+/// `relation_count` is a computed column and not one of `memories`, so it is
+/// read leniently: the two queries that call this both provide it, and a third
+/// that forgot should report "no relations counted" rather than fail the whole
+/// page. That is the one field here where absence is a defensible answer —
+/// everything else is a column the table guarantees.
 fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": r.get::<Uuid, _>("id"),
@@ -1297,6 +2733,17 @@ fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
         "content": r.get::<String, _>("content"),
         "state": r.get::<String, _>("state"),
         "superseded_by_id": r.get::<Option<Uuid>, _>("superseded_by_id"),
+        "importance": r.get::<String, _>("importance"),
+        "pinned": r.get::<bool, _>("pinned"),
+        "verification": r.get::<Option<String>, _>("verification"),
+        "verification_authority": r.get::<Option<String>, _>("verification_authority"),
+        // FR-885: whether somebody asked for this record or consolidation
+        // produced it. Nullable because rows written before migration 4 have no
+        // answer, and inventing `explicit` for them would assert an origin
+        // nobody recorded.
+        "origin_kind": r.get::<Option<String>, _>("origin_kind"),
+        "reinforcement_count": r.get::<i32, _>("reinforcement_count"),
+        "relation_count": r.try_get::<i64, _>("relation_count").unwrap_or(0),
         "provenance": {
             "session_id": r.get::<Uuid, _>("origin_session_id"),
             "observation_ids": r.get::<Value, _>("observation_ids"),
@@ -1307,24 +2754,200 @@ fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
     })
 }
 
+/// How many retrievals a memory's detail view carries inline (§7).
+///
+/// Twenty, with no further pagination on the embed, because the full history is
+/// reachable through the traces list filtered by this memory's reference. An
+/// unbounded embed would make one record's detail page grow with how often the
+/// project retrieves it, which is exactly backwards — the more useful a memory
+/// is, the slower its page would load (FR-895).
+const RETRIEVAL_USAGE_LIMIT: i64 = 20;
+
+/// `GET /api/memories/{id}` — everything FR-884 asks a reader to be able to
+/// determine about one record (T109).
+///
+/// Seven questions, and each is answered by a field rather than by inference:
+/// what it says, where it came from, what evidence supports it, whether it is
+/// verified, what it supersedes, what conflicts with or reinforces it, and where
+/// it has been retrieved.
+///
+/// **The evidence summary carries no evidence.** Counts, the session that holds
+/// the material, and the verifier *kinds* that have looked at it — never
+/// content, never a path, never command output. That is not a redaction applied
+/// here: the server has never held any of it (FR-055, FR-061, FR-893). The view
+/// states the material is local rather than rendering an empty section, which is
+/// why `local_to_session` travels beside `content_available: false`.
 async fn memory_detail(
     State(state): State<AppState>,
     user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    let row = sqlx::query("SELECT * FROM memories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("no such memory"))?;
+    let row = sqlx::query(
+        "SELECT m.*,
+                (SELECT COUNT(*) FROM memory_relations rel
+                  WHERE rel.deleted_at IS NULL
+                    AND (rel.from_memory_id = m.id OR rel.to_memory_id = m.id))
+                  AS relation_count
+           FROM memories m WHERE m.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("no such memory"))?;
+
+    // **One answer to both questions**, and `require_member` was the wrong
+    // guard here (found while building US5's reads).
+    //
+    // This route is *record-addressed*: the caller names a memory, and whether
+    // it exists is precisely what must not leak. `require_member` refuses with
+    // `403`, and a missing row with `404` — so anyone with an account could sort
+    // memory ids into "real" and "not real", one guess at a time, without being
+    // a member of anything. That is the enumeration oracle FR-894a closes and
+    // that `feature005_authorization_audit` already states as a rule; the audit
+    // enforces it by scanning `commands.rs`, and this route sat outside the
+    // scan.
+    //
+    // `project_of_record` funnels both cases through one `404`, exactly as the
+    // record-addressed commands do. The asymmetry with the project-addressed
+    // reads is deliberate rather than an inconsistency: there the caller *named*
+    // the project, so a `403` discloses nothing they did not already supply.
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id()).await?;
+    crate::commands::project_of_record(&state.pool, "memories", id, user.id()).await?;
 
     // Provenance is references; evidence content is local to the machine that
     // captured it and does not exist here (FR-055, FR-061).
     let mut value = memory_json(&row);
     value["provenance"]["evidence_content_available"] = json!(false);
+
+    let origin_session: Uuid = row.get("origin_session_id");
+    value["evidence_summary"] = json!({
+        "observation_count": row
+            .get::<Value, _>("observation_ids")
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0),
+        "evidence_count": row.get::<i32, _>("evidence_count"),
+        "evidence_fact_count": row.get::<i32, _>("evidence_fact_count"),
+        // Verifier *kinds*, which is what the basis column holds: a name for
+        // the sort of check that ran, never the subject it ran against or what
+        // it observed (FR-502, D66).
+        "verifier_kinds": row.get::<Value, _>("verification_basis"),
+        "content_available": false,
+        "local_to_session": origin_session,
+    });
+
+    // FR-884's "whether it is verified", as a state with the authority that
+    // established it. `stale` is the record's own expiry having passed, or its
+    // state having been moved to `stale` — a verification that was true last
+    // quarter is not a verification now, and reporting only the state would say
+    // it is (FR-860's rule, applied to knowledge rather than to a capability).
+    let stale_at = row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("stale_at");
+    value["verification"] = json!({
+        "state": row.get::<Option<String>, _>("verification"),
+        "authority": row.get::<Option<String>, _>("verification_authority"),
+        "last_verified_at": row
+            .get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_verified_at")
+            .map(|t| t.to_rfc3339()),
+        "stale": row.get::<String, _>("state") == "stale"
+            || stale_at.is_some_and(|t| t <= chrono::Utc::now()),
+    });
+
+    value["relations"] = json!(memory_relations(&state.pool, id).await?);
+    value["retrieval_usage"] = json!(retrieval_usage(&state.pool, project_id, id).await?);
     Ok(Json(json!({ "memory": value })))
+}
+
+/// Both halves of the relation graph around one memory (FR-884).
+///
+/// **Both directions, and the direction is stated.** FR-884 asks two different
+/// questions — what this record supersedes, and what reinforces it — and a list
+/// of only the outgoing edges answers one of them. Which end of the edge this
+/// memory is on decides which question the row answers, so it travels as a
+/// field rather than being left for a reader to work out from the ids.
+///
+/// The other end is a complete `KnowledgeRef`, never a bare UUID. A relation
+/// always joins two project memories (`memory_relations` has a `project_id` and
+/// both endpoints are `memories` rows), so the domain is known — and writing it
+/// out is what makes the reference resolvable by a client that holds nothing
+/// else (SC-766).
+async fn memory_relations(pool: &sqlx::PgPool, id: Uuid) -> ApiResult<Vec<Value>> {
+    use cairn_core::domain::{KnowledgeRef, Reference};
+    let rows = sqlx::query(
+        "SELECT CASE WHEN from_memory_id = $1 THEN 'outgoing' ELSE 'incoming' END AS direction,
+                CASE WHEN from_memory_id = $1 THEN to_memory_id ELSE from_memory_id END AS other,
+                kind, basis, decided_by_session, decided_at
+           FROM memory_relations
+          WHERE deleted_at IS NULL AND (from_memory_id = $1 OR to_memory_id = $1)
+          ORDER BY decided_at DESC, kind",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "direction": r.get::<String, _>("direction"),
+                "kind": r.get::<String, _>("kind"),
+                "basis": r.get::<String, _>("basis"),
+                "decided_by_session": r.get::<Uuid, _>("decided_by_session"),
+                "decided_at": r
+                    .get::<chrono::DateTime<chrono::Utc>, _>("decided_at")
+                    .to_rfc3339(),
+                "other": reference_json(Reference::Knowledge(KnowledgeRef::project(
+                    r.get::<Uuid, _>("other"),
+                ))),
+            })
+        })
+        .collect())
+}
+
+/// Where and when this memory has actually been retrieved (FR-884).
+///
+/// Bounded at [`RETRIEVAL_USAGE_LIMIT`] and scoped to the project the memory
+/// belongs to. The project scope is not redundant with the caller's membership:
+/// the caller was already checked against *this* memory's project, and a trace
+/// in some other project that happened to reference the same id would be a row
+/// the caller has no standing over. Filtering here is what stops the embed from
+/// widening the guard the route already applied.
+///
+/// The reference is matched on `reference_key`, the generated column, so a
+/// personal or team record that happens to share this UUID cannot match — which
+/// is precisely the collision `reference_key` exists to prevent (SC-766).
+async fn retrieval_usage(pool: &sqlx::PgPool, project_id: Uuid, id: Uuid) -> ApiResult<Vec<Value>> {
+    use cairn_core::domain::{KnowledgeRef, Reference};
+    let key = Reference::Knowledge(KnowledgeRef::project(id)).reference_key();
+    let rows = sqlx::query(
+        "SELECT t.trace_id, t.trigger, t.delivery_point, t.delivery_state,
+                t.session_id, t.created_at, i.status, i.rank
+           FROM retrieval_trace_items i
+           JOIN retrieval_traces t ON t.trace_id = i.trace_id
+          WHERE i.reference_key = $1 AND t.project_id = $2
+          ORDER BY t.created_at DESC, t.trace_id DESC
+          LIMIT $3",
+    )
+    .bind(&key)
+    .bind(project_id)
+    .bind(RETRIEVAL_USAGE_LIMIT)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "trace_id": r.get::<Uuid, _>("trace_id"),
+                "session_id": r.get::<Uuid, _>("session_id"),
+                "trigger": r.get::<String, _>("trigger"),
+                "delivery_point": r.get::<String, _>("delivery_point"),
+                "delivery_state": r.get::<String, _>("delivery_state"),
+                "status": r.get::<String, _>("status"),
+                "rank": r.get::<Option<i32>, _>("rank"),
+                "at": r
+                    .get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .to_rfc3339(),
+            })
+        })
+        .collect())
 }
 
 async fn delete_memory(
@@ -1363,5 +2986,839 @@ async fn project_sync_status(
     Ok(Json(json!({
         "applied_items": row.get::<i64, _>("applied"),
         "last_applied_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_applied"),
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// The web control plane's read API (T108, T109,
+// `contracts/web-control-plane.md`, FR-879-FR-895)
+// ---------------------------------------------------------------------------
+
+/// The server schema at which the autonomous-memory tables exist.
+///
+/// Named rather than written as `4` at each use, because what the number means
+/// is "the migration that created `safe_events`, `consolidation_runs`,
+/// `knowledge_candidates`, `retrieval_traces` and `capture_dispositions`" — and
+/// that is the fact the funnel below is deciding on, not a version.
+const AUTONOMOUS_MEMORY_SCHEMA: i64 = 4;
+
+/// The widest window a caller may ask the funnel for, in days.
+///
+/// A ceiling rather than a refusal, matching every other bound in this
+/// contract. Without one, `?days=100000000` is an unindexed scan of every table
+/// the funnel touches, asked for by anybody with an account.
+const FUNNEL_MAX_DAYS: i64 = 365;
+
+/// FR-879's twelve stages, in FR-879's order.
+///
+/// **The order is part of the contract, not a rendering preference.** The
+/// funnel is read as a funnel: events arrive before candidates exist, and
+/// candidates before knowledge does, so a stage appearing out of sequence
+/// misreads as a stage that lost fewer records than it did. The array is the
+/// single statement of both the names and the order (SC-728).
+const FUNNEL_STAGES: [&str; 12] = [
+    "active_agents",
+    "sessions",
+    "safe_events_received",
+    "capture_failures",
+    "consolidation_runs",
+    "candidates_produced",
+    "knowledge_accepted",
+    "candidates_rejected_or_duplicate",
+    "reinforcements",
+    "conflicts",
+    "retrievals",
+    "delivery_failures",
+];
+
+/// The eleven stages the autonomous-memory migration is what makes countable.
+///
+/// `sessions` is not among them: it predates this feature, so it is a real
+/// count on every deployment that can answer the route at all. Everything else
+/// reads a table migration 4 created, and on a deployment below it the honest
+/// answer is that the count cannot be established — never zero (FR-880).
+const SCHEMA_4_STAGES: [&str; 11] = [
+    "active_agents",
+    "safe_events_received",
+    "capture_failures",
+    "consolidation_runs",
+    "candidates_produced",
+    "knowledge_accepted",
+    "candidates_rejected_or_duplicate",
+    "reinforcements",
+    "conflicts",
+    "retrievals",
+    "delivery_failures",
+];
+
+/// Every schema-4 stage in one statement.
+///
+/// One round trip rather than eleven: a dashboard's first paint asks for all of
+/// them at once, and eleven sequential counts against one project is eleven
+/// times the latency for the same answer. Written out per stage rather than
+/// generated, because each line is a *definition* — `knowledge_accepted` counts
+/// `'accepted'` and deliberately not `'reinforced'` (FR-798a), and a generated
+/// query would hide that decision behind a loop.
+///
+/// `knowledge_candidates` has no timestamp of its own, so the window is applied
+/// to the run that produced it. That is the honest reading: a candidate happened
+/// when its consolidation pass ran.
+const FUNNEL_SQL: &str = "\
+SELECT
+  (SELECT COUNT(DISTINCT agent) FROM safe_events
+    WHERE project_id = $1
+      AND ($2::int IS NULL OR received_at >= now() - make_interval(days => $2)))
+    AS active_agents,
+  (SELECT COUNT(*) FROM safe_events
+    WHERE project_id = $1
+      AND ($2::int IS NULL OR received_at >= now() - make_interval(days => $2)))
+    AS safe_events_received,
+  (SELECT COALESCE(SUM(n), 0)::bigint FROM capture_dispositions
+    WHERE project_id = $1 AND disposition = 'capture_deadline_exceeded'
+      AND ($2::int IS NULL OR day >= (now() - make_interval(days => $2))::date))
+    AS capture_failures,
+  (SELECT COUNT(*) FROM consolidation_runs
+    WHERE project_id = $1
+      AND ($2::int IS NULL OR started_at >= now() - make_interval(days => $2)))
+    AS consolidation_runs,
+  (SELECT COUNT(*) FROM knowledge_candidates c JOIN consolidation_runs r ON r.run_id = c.run_id
+    WHERE c.project_id = $1
+      AND ($2::int IS NULL OR r.started_at >= now() - make_interval(days => $2)))
+    AS candidates_produced,
+  (SELECT COUNT(*) FROM knowledge_candidates c JOIN consolidation_runs r ON r.run_id = c.run_id
+    WHERE c.project_id = $1 AND c.decision = 'accepted'
+      AND ($2::int IS NULL OR r.started_at >= now() - make_interval(days => $2)))
+    AS knowledge_accepted,
+  (SELECT COUNT(*) FROM knowledge_candidates c JOIN consolidation_runs r ON r.run_id = c.run_id
+    WHERE c.project_id = $1 AND c.decision IN ('refused', 'duplicate')
+      AND ($2::int IS NULL OR r.started_at >= now() - make_interval(days => $2)))
+    AS candidates_rejected_or_duplicate,
+  (SELECT COUNT(*) FROM knowledge_candidates c JOIN consolidation_runs r ON r.run_id = c.run_id
+    WHERE c.project_id = $1 AND c.decision = 'reinforced'
+      AND ($2::int IS NULL OR r.started_at >= now() - make_interval(days => $2)))
+    AS reinforcements,
+  (SELECT COUNT(*) FROM knowledge_candidates c JOIN consolidation_runs r ON r.run_id = c.run_id
+    WHERE c.project_id = $1 AND c.decision = 'conflicted'
+      AND ($2::int IS NULL OR r.started_at >= now() - make_interval(days => $2)))
+    AS conflicts,
+  (SELECT COUNT(*) FROM retrieval_traces
+    WHERE project_id = $1
+      AND ($2::int IS NULL OR created_at >= now() - make_interval(days => $2)))
+    AS retrievals,
+  (SELECT COUNT(*) FROM retrieval_traces
+    WHERE project_id = $1 AND delivery_state = 'failed'
+      AND ($2::int IS NULL OR created_at >= now() - make_interval(days => $2)))
+    AS delivery_failures";
+
+#[derive(Deserialize)]
+struct FunnelQuery {
+    /// How far back to count. Absent means the project's whole history, which
+    /// is what a dashboard shows before anybody narrows it.
+    #[serde(default)]
+    days: Option<i64>,
+}
+
+/// `GET /api/projects/{id}/funnel` — the dashboard's twelve stages (FR-879,
+/// FR-880, SC-728).
+///
+/// **`count` is nullable, and the two answers it distinguishes are not
+/// cosmetic.** `0` means the query ran against the mechanism and found nothing
+/// happened. `null` means the mechanism does not exist on this deployment, so
+/// nothing can be said either way. Collapsing them reports "nothing happened"
+/// where the truth is "nobody looked", and an operator acts differently on
+/// those two: one is a quiet project, the other is a deployment that has not
+/// been migrated. The dashboard renders `0` as the number and `null` as an
+/// em dash (FR-880).
+///
+/// The distinction is decided from `state.schema_version` before any statement
+/// is built, rather than from a query that errored. A caught error would make
+/// "unavailable" indistinguishable from "the database was briefly unreachable",
+/// which is the same conflation one level down.
+///
+/// What would falsify this: a deployment below schema 4 reporting `0` for a
+/// stage whose table does not exist, or a project with no events reporting
+/// `null` for `safe_events_received`.
+async fn project_funnel(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Query(q): Query<FunnelQuery>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let window = q.days.map(|d| d.clamp(1, FUNNEL_MAX_DAYS) as i32);
+
+    let mut counts: std::collections::BTreeMap<&str, Option<i64>> =
+        FUNNEL_STAGES.iter().map(|s| (*s, None)).collect();
+
+    // `sessions` is answerable on every schema this route can be reached on.
+    let sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions
+          WHERE project_id = $1 AND deleted_at IS NULL
+            AND ($2::int IS NULL OR started_at >= now() - make_interval(days => $2))",
+    )
+    .bind(project_id)
+    .bind(window)
+    .fetch_one(&state.pool)
+    .await?;
+    counts.insert("sessions", Some(sessions));
+
+    if state.schema_version >= AUTONOMOUS_MEMORY_SCHEMA {
+        let row = sqlx::query(FUNNEL_SQL)
+            .bind(project_id)
+            .bind(window)
+            .fetch_one(&state.pool)
+            .await?;
+        for stage in SCHEMA_4_STAGES {
+            counts.insert(stage, Some(row.get::<i64, _>(stage)));
+        }
+    }
+
+    let stages: Vec<Value> = FUNNEL_STAGES
+        .iter()
+        .map(|stage| json!({ "stage": stage, "count": counts[stage] }))
+        .collect();
+    Ok(Json(json!({
+        "window_days": window,
+        "stages": stages,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// The activity feed (FR-881, FR-882)
+// ---------------------------------------------------------------------------
+
+/// The default page for the activity feed. Wider than the other lists because
+/// the feed is read by scrolling rather than by picking a row (§7).
+const ACTIVITY_PAGE_DEFAULT: i64 = 50;
+
+/// The seven event kinds the feed shows without being asked (§4).
+///
+/// **Declared here rather than derived from a rule**, because FR-882 forbids
+/// leaving "low-value" to the implementation. Each of these marks a session
+/// boundary, a durable artifact change, a test outcome, an explicit decision or
+/// a capture failure — one meaningful thing each. The fourteen excluded kinds
+/// fire once per tool call or internal transition and would make the feed a
+/// record of Cairn's own bookkeeping rather than of what it is learning. They
+/// are one query parameter away, never gone.
+const DEFAULT_EVENT_KINDS: [&str; 7] = [
+    "session_opened",
+    "session_resumed",
+    "session_closed",
+    "file_changed",
+    "test_result",
+    "decision_signal",
+    "capture_failed",
+];
+
+/// The candidate decisions the feed shows without being asked (§4).
+///
+/// `reinforced`, `duplicate` and `refused` are excluded for the same reason the
+/// firehose event kinds are: reinforcement already has its own funnel stage, and
+/// a duplicate is the pipeline working rather than something happening.
+const DEFAULT_DECISIONS: [&str; 2] = ["accepted", "conflicted"];
+
+/// The closed vocabulary `knowledge_candidates.decision` is CHECKed to.
+///
+/// Restated here so a `kinds` parameter naming a decision is validated against
+/// the same list the column enforces, and an unrecognized one is refused by
+/// name rather than by silently matching nothing.
+const CANDIDATE_DECISIONS: [&str; 5] = [
+    "accepted",
+    "reinforced",
+    "duplicate",
+    "conflicted",
+    "refused",
+];
+
+#[derive(Deserialize)]
+struct ActivityQuery {
+    /// A comma-separated subset of the twenty-one event kinds and the five
+    /// candidate decisions. Absent is the declared default above; the UI's
+    /// "show everything" control sends the full set explicitly.
+    #[serde(default)]
+    kinds: Option<String>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Split a `kinds` parameter into the two families it can name.
+///
+/// **Refused rather than ignored.** A name that matches neither an event kind
+/// nor a decision is a 400 with the name in it, because a parameter the server
+/// silently drops reads to the caller exactly like one it honoured — the client
+/// would render "no matching activity" for what is actually a typo.
+///
+/// The event half is validated through `EventKind::from_str`, so the accepted
+/// set is the canonical twenty-one and stays that way when a twenty-second is
+/// added. A hand-written list here would be a second vocabulary.
+fn split_activity_kinds(raw: Option<&str>) -> ApiResult<(Vec<String>, Vec<String>)> {
+    let Some(raw) = raw else {
+        return Ok((
+            DEFAULT_EVENT_KINDS.iter().map(|k| k.to_string()).collect(),
+            DEFAULT_DECISIONS.iter().map(|k| k.to_string()).collect(),
+        ));
+    };
+    let mut events = Vec::new();
+    let mut decisions = Vec::new();
+    for token in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        if cairn_core::event::EventKind::from_str(token).is_ok() {
+            events.push(token.to_string());
+        } else if CANDIDATE_DECISIONS.contains(&token) {
+            decisions.push(token.to_string());
+        } else {
+            return Err(ApiError::invalid(format!(
+                "`{token}` is neither an event kind nor a candidate decision"
+            )));
+        }
+    }
+    if events.is_empty() && decisions.is_empty() {
+        return Err(ApiError::invalid(
+            "`kinds` names nothing; omit it for the default subset",
+        ));
+    }
+    Ok((events, decisions))
+}
+
+/// Both families, interleaved by time, newest first.
+///
+/// **A `UNION ALL` over one keyset rather than two lists merged in Rust.** The
+/// page bound has to apply to the interleaved result: taking fifty of each and
+/// merging would return a hundred rows for a page of fifty, and dropping half
+/// of them would leave a cursor that skips whatever was dropped.
+///
+/// A candidate decision has no timestamp of its own — `knowledge_candidates`
+/// records what was decided, not when — so it is placed at its run's finish, or
+/// at its start if the run never finished. That is when the decision happened.
+///
+/// `content` travels for safe events and is `NULL` for decisions. The event's
+/// content is the approved per-kind structure and nothing else — `safe_events`
+/// has no column a transcript could land in, and every free-text field the
+/// structure does have was put through `events::screen_event_text` before the
+/// row existed. So this hands a project member exactly what the server accepted
+/// for their project, and a feed that said `file_changed` without saying which
+/// file would be withholding the only part that is actually semantic. A candidate's `content` is a *claim*, which is the memory
+/// explorer's business and carries a domain this feed would have to authorize
+/// per row; the reference to it travels instead.
+const ACTIVITY_SQL: &str = "\
+WITH arrivals AS (
+    SELECT 'safe_event'::text          AS family,
+           event_id                    AS id,
+           received_at                 AS at,
+           kind                        AS kind,
+           agent                       AS agent,
+           session_id                  AS session_id,
+           content                     AS content,
+           NULL::text                  AS refusal_reason,
+           NULL::text                  AS ref_kind,
+           NULL::text                  AS ref_domain,
+           NULL::uuid                  AS ref_id
+      FROM safe_events
+     WHERE project_id = $1 AND kind = ANY($2)
+), decisions AS (
+    SELECT 'candidate_decision'::text  AS family,
+           c.candidate_id              AS id,
+           COALESCE(r.finished_at, r.started_at) AS at,
+           c.decision                  AS kind,
+           NULL::text                  AS agent,
+           r.session_id                AS session_id,
+           NULL::jsonb                 AS content,
+           c.refusal_reason            AS refusal_reason,
+           c.result_ref_kind           AS ref_kind,
+           c.result_domain             AS ref_domain,
+           c.result_knowledge_id       AS ref_id
+      FROM knowledge_candidates c
+      JOIN consolidation_runs r ON r.run_id = c.run_id
+     WHERE c.project_id = $1 AND c.decision = ANY($3)
+)
+SELECT * FROM (SELECT * FROM arrivals UNION ALL SELECT * FROM decisions) feed
+ WHERE ($4::timestamptz IS NULL OR (feed.at, feed.id) < ($4, $5::uuid))
+ ORDER BY feed.at DESC, feed.id DESC
+ LIMIT $6";
+
+/// `GET /api/projects/{id}/activity` — recent activity at a semantic level
+/// (FR-881, FR-882).
+async fn project_activity(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Query(q): Query<ActivityQuery>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let (events, decisions) = split_activity_kinds(q.kinds.as_deref())?;
+    let limit = q
+        .limit
+        .unwrap_or(ACTIVITY_PAGE_DEFAULT)
+        .clamp(1, crate::global::VIEW_PAGE_MAX);
+    let (at, id) = crate::global::PageCursor::descending_bound(
+        crate::global::PageCursor::decode_opt(q.cursor.as_deref()),
+    );
+
+    let rows = sqlx::query(ACTIVITY_SQL)
+        .bind(project_id)
+        .bind(&events)
+        .bind(&decisions)
+        .bind(at)
+        .bind(id)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?;
+
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    let mut items = Vec::with_capacity(rows.len());
+    for row in &rows {
+        // The reference a decision produced, resolved to a *complete* one or to
+        // nothing. A consolidation pass in a project can produce a personal
+        // record, and that record's audience is its owner, not this project's
+        // members — so the reference is withheld exactly as a retrieval trace
+        // withholds one (FR-846a). The decision itself still travels: that a
+        // pass accepted something is a project fact.
+        let reference = match reference_from_columns(
+            row.get::<Option<String>, _>("ref_kind").as_deref(),
+            row.get::<Option<String>, _>("ref_domain").as_deref(),
+            row.get::<Option<Uuid>, _>("ref_id"),
+        ) {
+            Some(reference)
+                if auth::reference_visibility(&state.pool, &reader, reference).await?
+                    == auth::Visibility::Visible =>
+            {
+                reference_json(reference)
+            }
+            _ => Value::Null,
+        };
+        items.push(json!({
+            "family": row.get::<String, _>("family"),
+            "id": row.get::<Uuid, _>("id"),
+            "at": row.get::<chrono::DateTime<chrono::Utc>, _>("at").to_rfc3339(),
+            "kind": row.get::<String, _>("kind"),
+            "agent": row.get::<Option<String>, _>("agent"),
+            "session_id": row.get::<Option<Uuid>, _>("session_id"),
+            "content": row.get::<Option<Value>, _>("content"),
+            "refusal_reason": row.get::<Option<String>, _>("refusal_reason"),
+            "reference": reference,
+        }));
+    }
+
+    Ok(Json(json!({
+        "items": items,
+        "cursor": view_cursor(&rows, limit, "at", "id"),
+        "limit": limit,
+        // What the feed actually applied. FR-882 wants the default *declared*,
+        // and a client that had to infer it from what arrived could not tell an
+        // excluded kind from a kind nothing has produced yet.
+        "kinds": events.iter().chain(decisions.iter()).collect::<Vec<_>>(),
+    })))
+}
+
+/// The three columns a stored reference occupies, back to one value.
+///
+/// Returns `None` for a combination the reference grammar has no name for,
+/// which is also what the table's own CHECK refuses — a `knowledge` row with no
+/// domain, or a `pattern` row with one. Nothing is guessed: a reference that
+/// cannot say which domain it means is not a reference, and emitting the bare
+/// id would hand a reader something two domains could answer to (SC-766).
+fn reference_from_columns(
+    ref_kind: Option<&str>,
+    domain: Option<&str>,
+    id: Option<Uuid>,
+) -> Option<cairn_core::domain::Reference> {
+    use cairn_core::domain::{KnowledgeRef, PatternRef, Reference};
+    let id = id?;
+    match (ref_kind?, domain) {
+        ("pattern", None) => Some(Reference::Pattern(PatternRef(id))),
+        ("knowledge", Some("project")) => Some(Reference::Knowledge(KnowledgeRef::project(id))),
+        ("knowledge", Some("personal")) => Some(Reference::Knowledge(KnowledgeRef::personal(id))),
+        ("knowledge", Some("team")) => Some(Reference::Knowledge(KnowledgeRef::team(id))),
+        _ => None,
+    }
+}
+
+/// One reference, in the discriminated form every control-plane response uses.
+///
+/// All four fields, including the `reference_key` the database already computes
+/// as a generated column. The three parts are what a client filters and routes
+/// on; the key is what it compares, and shipping only the parts would make
+/// every consumer re-derive a string the server already has — and get the
+/// pattern case wrong, which omits the domain component rather than writing
+/// `personal` into it.
+fn reference_json(reference: cairn_core::domain::Reference) -> Value {
+    use cairn_core::domain::Reference;
+    let (ref_kind, domain, id) = match reference {
+        Reference::Knowledge(k) => ("knowledge", Some(k.domain.as_str()), k.id),
+        Reference::Pattern(p) => ("pattern", None, p.0),
+    };
+    json!({
+        "ref_kind": ref_kind,
+        "domain": domain,
+        "knowledge_id": id,
+        "reference_key": reference.reference_key(),
+    })
+}
+
+/// The cursor a descending page hands back, or `None` at the end of the feed.
+/// Takes the two column names because these lists order on `(at, id)`,
+/// `(started_at, run_id)`, `(created_at, trace_id)` and `(changed_at, id)` —
+/// four spellings of one convention, which is a reason to pass the names rather
+/// than to write the function four times. The encoding is
+/// `global::PageCursor`'s own, so a cursor from any of these lists is read back
+/// by the same parser.
+///
+/// A short page ends the feed. Handing a position back on one would make every
+/// list appear to have one more page that turns out to be empty.
+pub(crate) fn view_cursor(
+    rows: &[sqlx::postgres::PgRow],
+    limit: i64,
+    at: &str,
+    id: &str,
+) -> Option<String> {
+    if (rows.len() as i64) < limit {
+        return None;
+    }
+    let last = rows.last()?;
+    Some(format!(
+        "{}|{}",
+        last.try_get::<chrono::DateTime<chrono::Utc>, _>(at)
+            .ok()?
+            .to_rfc3339(),
+        last.try_get::<Uuid, _>(id).ok()?
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Consolidation runs (§10, FR-894a)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct PageQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+impl PageQuery {
+    fn page(&self) -> i64 {
+        self.limit
+            .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
+            .clamp(1, crate::global::VIEW_PAGE_MAX)
+    }
+}
+
+/// `GET /api/projects/{id}/consolidation-runs` — what each pass did (§10).
+///
+/// A run with zero candidates is still a run and is still listed: the
+/// difference between "consolidation found nothing" and "consolidation never
+/// happened" is exactly what this list exists to show, and it is the same
+/// distinction the funnel makes one level up.
+///
+/// Refusal reasons are counted rather than listed per candidate. A pass that
+/// turned away forty candidates for one reason is one fact with a count, and
+/// forty rows would bury it — and the reasons are a closed vocabulary
+/// (`consolidation.md` §9, FR-804a), so grouping loses nothing.
+async fn project_consolidation_runs(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Query(q): Query<PageQuery>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let limit = q.page();
+    let (at, id) = crate::global::PageCursor::descending_bound(
+        crate::global::PageCursor::decode_opt(q.cursor.as_deref()),
+    );
+
+    let rows = sqlx::query(
+        "SELECT run_id, session_id, started_at, finished_at, events_claimed,
+                candidates_proposed, candidates_accepted, candidates_refused,
+                extractor_kind, state
+           FROM consolidation_runs
+          WHERE project_id = $1
+            AND ($2::timestamptz IS NULL OR (started_at, run_id) < ($2, $3::uuid))
+          ORDER BY started_at DESC, run_id DESC
+          LIMIT $4",
+    )
+    .bind(project_id)
+    .bind(at)
+    .bind(id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // One grouped statement for the whole page rather than one per run: a page
+    // of a hundred runs would otherwise be a hundred round trips to answer one
+    // request.
+    let run_ids: Vec<Uuid> = rows.iter().map(|r| r.get("run_id")).collect();
+    let mut reasons: std::collections::HashMap<Uuid, Vec<Value>> = std::collections::HashMap::new();
+    if !run_ids.is_empty() {
+        let grouped = sqlx::query(
+            "SELECT run_id, refusal_reason, COUNT(*) AS n
+               FROM knowledge_candidates
+              WHERE run_id = ANY($1) AND refusal_reason IS NOT NULL
+              GROUP BY run_id, refusal_reason
+              ORDER BY run_id, refusal_reason",
+        )
+        .bind(&run_ids)
+        .fetch_all(&state.pool)
+        .await?;
+        for row in &grouped {
+            reasons.entry(row.get("run_id")).or_default().push(json!({
+                "reason": row.get::<String, _>("refusal_reason"),
+                "n": row.get::<i64, _>("n"),
+            }));
+        }
+    }
+
+    let runs: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let run_id: Uuid = r.get("run_id");
+            json!({
+                "run_id": run_id,
+                "session_id": r.get::<Option<Uuid>, _>("session_id"),
+                "started_at": r.get::<chrono::DateTime<chrono::Utc>, _>("started_at").to_rfc3339(),
+                "finished_at": r
+                    .get::<Option<chrono::DateTime<chrono::Utc>>, _>("finished_at")
+                    .map(|t| t.to_rfc3339()),
+                "state": r.get::<String, _>("state"),
+                "events_claimed": r.get::<Option<i32>, _>("events_claimed"),
+                "candidates_proposed": r.get::<Option<i32>, _>("candidates_proposed"),
+                "candidates_accepted": r.get::<Option<i32>, _>("candidates_accepted"),
+                "candidates_refused": r.get::<Option<i32>, _>("candidates_refused"),
+                "refusal_reasons": reasons.remove(&run_id).unwrap_or_default(),
+                "extractor_kind": r.get::<String, _>("extractor_kind"),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "runs": runs,
+        "cursor": view_cursor(&rows, limit, "started_at", "run_id"),
+        "limit": limit,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// The retrieval trace list (FR-886)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TraceListQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    /// Only traces that considered or selected this reference — the target of
+    /// memory detail's "view all" link (§7).
+    #[serde(default)]
+    reference_key: Option<String>,
+    /// Only traces for one session, so the path from a session to what it was
+    /// given is walkable through the API alone (SC-727).
+    #[serde(default)]
+    session_id: Option<Uuid>,
+}
+
+/// `GET /api/projects/{id}/retrieval-traces` — the traces list (FR-886).
+///
+/// **The `reference_key` filter is authorized before it is applied.** Filtering
+/// is a question about a record, and asking it about a record the caller may
+/// not see would answer "does this exist and was it retrieved here" for another
+/// account's personal knowledge or pattern. So a reference the reader cannot
+/// see produces the same empty page a reference nothing ever retrieved produces
+/// — the two answers are deliberately identical, which is what stops the filter
+/// being an existence oracle (FR-846a).
+///
+/// The rows themselves carry no budget and no latency. Those are scoped to the
+/// account that made the retrieval (`retrieve::trace_detail`), and a list that
+/// carried them would hand every project member a per-retrieval cost breakdown
+/// the detail view withholds.
+async fn project_retrieval_traces(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Query(q): Query<TraceListQuery>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let limit = q
+        .limit
+        .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
+        .clamp(1, crate::global::VIEW_PAGE_MAX);
+    let (at, id) = crate::global::PageCursor::descending_bound(
+        crate::global::PageCursor::decode_opt(q.cursor.as_deref()),
+    );
+
+    let mut filter_key: Option<String> = None;
+    if let Some(raw) = q.reference_key.as_deref() {
+        // Parsed through the canonical grammar rather than matched as a string:
+        // `knowledge:<domain>:<uuid>` and `pattern:<uuid>` are the only two
+        // shapes, and anything else names nothing.
+        let reference = cairn_core::domain::Reference::parse_key(raw)
+            .map_err(|_| ApiError::invalid("`reference_key` is not a canonical reference"))?;
+        let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+        if auth::reference_visibility(&state.pool, &reader, reference).await?
+            == auth::Visibility::Visible
+        {
+            filter_key = Some(reference.reference_key());
+        } else {
+            // Deliberately not a refusal. A refusal here would say "that
+            // reference exists and is not yours", which is the fact being
+            // protected. An empty page is what a reference nobody retrieved
+            // also produces.
+            return Ok(Json(json!({
+                "traces": [], "cursor": Value::Null, "limit": limit,
+            })));
+        }
+    }
+
+    let rows = sqlx::query(
+        "SELECT t.trace_id, t.session_id, t.trigger, t.delivery_point,
+                t.degradation_level, t.delivery_state, t.acknowledgement_state,
+                t.failure_reason, t.created_at
+           FROM retrieval_traces t
+          WHERE t.project_id = $1
+            AND ($2::timestamptz IS NULL OR (t.created_at, t.trace_id) < ($2, $3::uuid))
+            AND ($4::text IS NULL OR EXISTS (
+                    SELECT 1 FROM retrieval_trace_items i
+                     WHERE i.trace_id = t.trace_id AND i.reference_key = $4))
+            AND ($5::uuid IS NULL OR t.session_id = $5)
+          ORDER BY t.created_at DESC, t.trace_id DESC
+          LIMIT $6",
+    )
+    .bind(project_id)
+    .bind(at)
+    .bind(id)
+    .bind(&filter_key)
+    .bind(q.session_id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let traces: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "trace_id": r.get::<Uuid, _>("trace_id"),
+                "session_id": r.get::<Uuid, _>("session_id"),
+                "trigger": r.get::<String, _>("trigger"),
+                "delivery_point": r.get::<String, _>("delivery_point"),
+                "degradation_level": r.get::<Option<String>, _>("degradation_level"),
+                "delivery_state": r.get::<String, _>("delivery_state"),
+                "acknowledgement_state": r.get::<String, _>("acknowledgement_state"),
+                "failure_reason": r.get::<Option<String>, _>("failure_reason"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "traces": traces,
+        "cursor": view_cursor(&rows, limit, "created_at", "trace_id"),
+        "limit": limit,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// System health (FR-891)
+// ---------------------------------------------------------------------------
+
+/// The dispositions that mean an observation did not survive the trip.
+///
+/// `captured`, `spooled`, `transmitted`, `accepted` and `persisted` are the
+/// funnel working and are deliberately absent. `declined_by_policy` is absent
+/// too: a decline is Cairn choosing not to keep something, which is not a
+/// failure and must not be reported as one (FR-856's distinction, one level up).
+const INGEST_FAILURE_DISPOSITIONS: &str =
+    "('capture_deadline_exceeded','redaction_failed','privacy_refused',\
+      'no_safe_semantic_mapping','spool_overflow_dropped','spool_saturated_dropped',\
+      'rejected_by_server')";
+
+/// `GET /api/system/health` — ingest, consolidation and retrieval (FR-891).
+///
+/// **`AdminUser`, not `require_member`, and the difference is the subject.**
+/// Every other read in this contract answers a question about one project and
+/// is gated on belonging to it. This one answers a question about the
+/// deployment: how far behind the single consolidation task is, how many events
+/// the server has taken, how many retrievals failed. There is no project to be
+/// a member of, so membership is the wrong gate and the right one is the role.
+/// A member reaching it would be reading across every project on the server.
+///
+/// The consolidation section is [`crate::consolidate::health`] verbatim — the
+/// read `/api/consolidation/health` already serves. A second query would be a
+/// second answer to "how far behind is consolidation", and the two would
+/// disagree the first time either changed.
+///
+/// Below schema 4 each section is `null` rather than zeroed, for the reason the
+/// funnel gives: a deployment without the tables has not observed nothing, it
+/// has observed nothing *yet knowable* (FR-880).
+async fn system_health(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    if state.schema_version < AUTONOMOUS_MEMORY_SCHEMA {
+        return Ok(Json(json!({
+            "ingest": Value::Null,
+            "consolidation": Value::Null,
+            "retrieval": Value::Null,
+        })));
+    }
+
+    let ingest = sqlx::query(&format!(
+        "SELECT
+           (SELECT COUNT(*) FROM safe_events) AS events_received,
+           (SELECT MAX(received_at) FROM safe_events) AS last_received_at,
+           (SELECT COALESCE(SUM(n), 0)::bigint FROM capture_dispositions
+             WHERE disposition IN {INGEST_FAILURE_DISPOSITIONS}) AS capture_failures"
+    ))
+    .fetch_one(&state.pool)
+    .await?;
+
+    let by_disposition = sqlx::query(&format!(
+        "SELECT disposition, COALESCE(SUM(n), 0)::bigint AS n
+           FROM capture_dispositions
+          WHERE disposition IN {INGEST_FAILURE_DISPOSITIONS}
+          GROUP BY disposition
+          ORDER BY disposition"
+    ))
+    .fetch_all(&state.pool)
+    .await?;
+
+    let retrieval = sqlx::query(
+        "SELECT COUNT(*) AS traces,
+                COUNT(*) FILTER (WHERE delivery_state = 'failed') AS failed,
+                COUNT(*) FILTER (WHERE delivery_state = 'requested') AS never_generated,
+                COUNT(*) FILTER (WHERE delivery_state = 'generated') AS never_transmitted,
+                COUNT(*) FILTER (WHERE delivery_state = 'transmitted') AS transmitted,
+                MAX(created_at) AS last_trace_at
+           FROM retrieval_traces",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+
+    let consolidation = crate::consolidate::health(&state.pool).await?;
+
+    Ok(Json(json!({
+        "ingest": {
+            "events_received": ingest.get::<i64, _>("events_received"),
+            "last_received_at": ingest
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_received_at")
+                .map(|t| t.to_rfc3339()),
+            "capture_failures": ingest.get::<i64, _>("capture_failures"),
+            "failures_by_disposition": by_disposition.iter().map(|r| json!({
+                "disposition": r.get::<String, _>("disposition"),
+                "n": r.get::<i64, _>("n"),
+            })).collect::<Vec<_>>(),
+        },
+        "consolidation": serde_json::to_value(consolidation).unwrap_or_else(|_| json!({})),
+        "retrieval": {
+            "traces": retrieval.get::<i64, _>("traces"),
+            "failed": retrieval.get::<i64, _>("failed"),
+            // A trace still `requested` was never generated, and one still
+            // `generated` was never reported transmitted. Two different
+            // backlogs: the first is retrieval not finishing, the second is a
+            // briefing nobody confirmed reached an agent (Principle X).
+            "never_generated": retrieval.get::<i64, _>("never_generated"),
+            "never_transmitted": retrieval.get::<i64, _>("never_transmitted"),
+            "transmitted": retrieval.get::<i64, _>("transmitted"),
+            "last_trace_at": retrieval
+                .get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_trace_at")
+                .map(|t| t.to_rfc3339()),
+        },
     })))
 }

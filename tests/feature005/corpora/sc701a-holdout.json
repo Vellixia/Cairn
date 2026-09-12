@@ -1,0 +1,447 @@
+{
+  "_comment": [
+    "The frozen SC-701a holdout corpus.",
+    "",
+    "SC-701a is a claim about a population, and a population assembled after",
+    "the run it grades is a description of what the code already does. This",
+    "file is that population, frozen in its own commit before the acceptance",
+    "run that grades it and before any production change made in response to",
+    "it. `frozen_at_commit` names that commit once it exists.",
+    "",
+    "Every entry is a QUALIFYING session: a decision or a standing instruction",
+    "that is expressed and THEN acted on. Adversarial decline cases are",
+    "deliberately absent \u2014 they live in feature005_semantic_signals.rs and",
+    "must never occupy a slot in this denominator, because a scenario that is",
+    "supposed to produce nothing cannot be evidence that something is",
+    "produced.",
+    "",
+    "Each entry carries four things in order: a vocabulary path touched",
+    "BEFORE the turn under test (which is what justifies the signal's two",
+    "tokens), the real vendor field carrying the semantic text, the expected",
+    "durable identity, and a post-signal action proving the decision or",
+    "instruction was then acted on. The vocabulary seed and the action are",
+    "different roles and are not interchangeable.",
+    "",
+    "The six instruction entries are three repeated (kind, subject, object)",
+    "pairs across two sessions each, because R8 makes a standing convention",
+    "rest on repetition. That is R8's existing rule, matched by the corpus",
+    "rather than weakened to fit it.",
+    "",
+    "A vocabulary path is repository-relative and carries no `src/` prefix: the directory component is what ranks as the module and therefore as the subject, so a prefix would make every subject `src`."
+  ],
+  "version": 1,
+  "criterion": "SC-701a, SC-701b",
+  "frozen_at_commit": "recorded by the commit that adds this file; see git log",
+  "frozen_on": "2026-09-06",
+  "qualifying_sessions": 20,
+  "minimum_durable_matches": 14,
+  "population": "claude_code and codex only (FR-727e); OpenCode emits no semantic signals",
+  "scenarios": [
+    {
+      "id": "d01-storage-postgresql",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "storage/postgresql.rs",
+      "transient_text": "we should use postgresql for storage",
+      "expected": {
+        "signal": "decision",
+        "subject": "storage",
+        "object": "postgresql",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.storage",
+        "value_key": "postgresql"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p postgresql"
+      }
+    },
+    {
+      "id": "d02-caching-redis",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "caching/redis.rs",
+      "transient_text": "let's adopt redis for caching",
+      "expected": {
+        "signal": "decision",
+        "subject": "caching",
+        "object": "redis",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.caching",
+        "value_key": "redis"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p redis"
+      }
+    },
+    {
+      "id": "d03-logging-syslog",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "logging/syslog.rs",
+      "transient_text": "let's drop syslog for logging",
+      "expected": {
+        "signal": "decision",
+        "subject": "logging",
+        "object": "syslog",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.logging",
+        "value_key": "syslog"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p syslog"
+      }
+    },
+    {
+      "id": "d04-transport-grpc",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "transport/grpc.rs",
+      "transient_text": "we reject grpc for transport",
+      "expected": {
+        "signal": "decision",
+        "subject": "transport",
+        "object": "grpc",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.transport",
+        "value_key": "grpc"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p grpc"
+      }
+    },
+    {
+      "id": "d05-auth-oauth",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "auth/oauth.rs",
+      "transient_text": "we should use oauth for auth",
+      "expected": {
+        "signal": "decision",
+        "subject": "auth",
+        "object": "oauth",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.auth",
+        "value_key": "oauth"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p oauth"
+      }
+    },
+    {
+      "id": "d06-queue-kafka",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "queue/kafka.rs",
+      "transient_text": "let's adopt kafka for queue",
+      "expected": {
+        "signal": "decision",
+        "subject": "queue",
+        "object": "kafka",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.queue",
+        "value_key": "kafka"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p kafka"
+      }
+    },
+    {
+      "id": "d07-templates-handlebars",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "templates/handlebars.rs",
+      "transient_text": "let's drop handlebars for templates",
+      "expected": {
+        "signal": "decision",
+        "subject": "templates",
+        "object": "handlebars",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.templates",
+        "value_key": "handlebars"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p handlebars"
+      }
+    },
+    {
+      "id": "d08-metrics-statsd",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "metrics/statsd.rs",
+      "transient_text": "we reject statsd for metrics",
+      "expected": {
+        "signal": "decision",
+        "subject": "metrics",
+        "object": "statsd",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.metrics",
+        "value_key": "statsd"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p statsd"
+      }
+    },
+    {
+      "id": "d09-search-tantivy",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "search/tantivy.rs",
+      "transient_text": "we should use tantivy for search",
+      "expected": {
+        "signal": "decision",
+        "subject": "search",
+        "object": "tantivy",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.search",
+        "value_key": "tantivy"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p tantivy"
+      }
+    },
+    {
+      "id": "d10-billing-stripe",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "billing/stripe.rs",
+      "transient_text": "let's adopt stripe for billing",
+      "expected": {
+        "signal": "decision",
+        "subject": "billing",
+        "object": "stripe",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.billing",
+        "value_key": "stripe"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p stripe"
+      }
+    },
+    {
+      "id": "d11-mailer-sendgrid",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "mailer/sendgrid.rs",
+      "transient_text": "let's drop sendgrid for mailer",
+      "expected": {
+        "signal": "decision",
+        "subject": "mailer",
+        "object": "sendgrid",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.mailer",
+        "value_key": "sendgrid"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p sendgrid"
+      }
+    },
+    {
+      "id": "d12-imaging-webp",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "imaging/webp.rs",
+      "transient_text": "let's adopt webp for imaging",
+      "expected": {
+        "signal": "decision",
+        "subject": "imaging",
+        "object": "webp",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.imaging",
+        "value_key": "webp"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p webp"
+      }
+    },
+    {
+      "id": "d13-scheduler-cron",
+      "vendor": "claude_code",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "scheduler/cron.rs",
+      "transient_text": "we should use cron for scheduler",
+      "expected": {
+        "signal": "decision",
+        "subject": "scheduler",
+        "object": "cron",
+        "verb": "adopt",
+        "durable_type": "decision",
+        "topic_key": "decision.scheduler",
+        "value_key": "cron"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p cron"
+      }
+    },
+    {
+      "id": "d14-archive-zstd",
+      "vendor": "codex",
+      "semantic_role": "assistant_message",
+      "vocabulary_path": "archive/zstd.rs",
+      "transient_text": "we reject zstd for archive",
+      "expected": {
+        "signal": "decision",
+        "subject": "archive",
+        "object": "zstd",
+        "verb": "reject",
+        "durable_type": "decision",
+        "topic_key": "decision.archive",
+        "value_key": "zstd"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p zstd"
+      }
+    },
+    {
+      "id": "i01-routing-middleware",
+      "pair": "A",
+      "vendor": "claude_code",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "routing/middleware.rs",
+      "transient_text": "please require middleware for routing",
+      "expected": {
+        "signal": "instruction",
+        "subject": "routing",
+        "object": "middleware",
+        "verb": "required",
+        "durable_type": "convention",
+        "topic_key": "instruction.routing",
+        "value_key": "middleware"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p middleware"
+      }
+    },
+    {
+      "id": "i02-routing-middleware",
+      "pair": "A",
+      "vendor": "codex",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "routing/middleware.rs",
+      "transient_text": "please require middleware for routing",
+      "expected": {
+        "signal": "instruction",
+        "subject": "routing",
+        "object": "middleware",
+        "verb": "required",
+        "durable_type": "convention",
+        "topic_key": "instruction.routing",
+        "value_key": "middleware"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p middleware"
+      }
+    },
+    {
+      "id": "i03-encryption-keys",
+      "pair": "B",
+      "vendor": "claude_code",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "encryption/keys.rs",
+      "transient_text": "please forbid keys for encryption",
+      "expected": {
+        "signal": "instruction",
+        "subject": "encryption",
+        "object": "keys",
+        "verb": "forbidden",
+        "durable_type": "convention",
+        "topic_key": "instruction.encryption",
+        "value_key": "keys"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p keys"
+      }
+    },
+    {
+      "id": "i04-encryption-keys",
+      "pair": "B",
+      "vendor": "codex",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "encryption/keys.rs",
+      "transient_text": "please forbid keys for encryption",
+      "expected": {
+        "signal": "instruction",
+        "subject": "encryption",
+        "object": "keys",
+        "verb": "forbidden",
+        "durable_type": "convention",
+        "topic_key": "instruction.encryption",
+        "value_key": "keys"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p keys"
+      }
+    },
+    {
+      "id": "i05-monitoring-metrics",
+      "pair": "C",
+      "vendor": "claude_code",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "monitoring/metrics.rs",
+      "transient_text": "please enforce metrics for monitoring",
+      "expected": {
+        "signal": "instruction",
+        "subject": "monitoring",
+        "object": "metrics",
+        "verb": "required",
+        "durable_type": "convention",
+        "topic_key": "instruction.monitoring",
+        "value_key": "metrics"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p metrics"
+      }
+    },
+    {
+      "id": "i06-monitoring-metrics",
+      "pair": "C",
+      "vendor": "codex",
+      "semantic_role": "user_prompt",
+      "vocabulary_path": "monitoring/metrics.rs",
+      "transient_text": "please enforce metrics for monitoring",
+      "expected": {
+        "signal": "instruction",
+        "subject": "monitoring",
+        "object": "metrics",
+        "verb": "required",
+        "durable_type": "convention",
+        "topic_key": "instruction.monitoring",
+        "value_key": "metrics"
+      },
+      "post_signal_action": {
+        "tool": "shell",
+        "command": "cargo test -p metrics"
+      }
+    }
+  ]
+}

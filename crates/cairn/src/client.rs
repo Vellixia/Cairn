@@ -493,6 +493,81 @@ pub async fn daemon_running() -> bool {
 // Blocking fast path (SC-007)
 // ---------------------------------------------------------------------------
 
+/// Send one request and read its reply, with blocking I/O and no async runtime.
+///
+/// The capture fast path needs an answer exactly once per prompt and once per
+/// turn — never per tool call — so the round trip is affordable where
+/// `send_oneway_blocking` would not be. It exists because the §13.7 mapping
+/// needs the session vocabulary, and the vocabulary lives in the daemon while
+/// the transient text lives here: sending the text the other way would put a
+/// prompt fragment across the process boundary FR-730 closes.
+///
+/// Bounded end to end by `deadline`. A hook that cannot get an answer in time
+/// proceeds without one, which declines the signal rather than delaying the
+/// agent.
+#[cfg(unix)]
+pub fn send_blocking(
+    request: &Request,
+    deadline: Duration,
+) -> Result<serde_json::Value, WireError> {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixStream as StdUnixStream;
+
+    let started = std::time::Instant::now();
+    let mut stream = StdUnixStream::connect(socket_path())
+        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+
+    let remaining = deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(WireError::new(
+            codes::DAEMON_UNAVAILABLE,
+            "capture deadline exceeded",
+        ));
+    }
+    stream
+        .set_write_timeout(Some(remaining))
+        .and_then(|()| stream.set_read_timeout(Some(remaining)))
+        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+
+    let mut line = serde_json::to_string(request)
+        .map_err(|e| WireError::invalid(format!("unencodable request: {e}")))?;
+    line.push('\n');
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+
+    let mut reply = String::new();
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+    let envelope: cairn_core::wire::Envelope = serde_json::from_str(reply.trim())
+        .map_err(|e| WireError::invalid(format!("unreadable reply: {e}")))?;
+    envelope.into_result()
+}
+
+/// The same round trip on Windows, where `std` has no named-pipe support.
+///
+/// A single-threaded runtime, far cheaper than the multi-threaded one
+/// `#[tokio::main]` builds elsewhere in this binary, running the same bounded
+/// send.
+#[cfg(windows)]
+pub fn send_blocking(
+    request: &Request,
+    deadline: Duration,
+) -> Result<serde_json::Value, WireError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            WireError::new(
+                codes::DAEMON_UNAVAILABLE,
+                format!("could not start a runtime: {e}"),
+            )
+        })?;
+    runtime.block_on(send_with_deadline(request, deadline))
+}
+
 /// Write one request with blocking I/O and no async runtime.
 ///
 /// A capture hook runs once per tool call, so the cost of building a Tokio

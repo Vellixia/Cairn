@@ -1,0 +1,1231 @@
+# Data Model — Feature 005
+
+**Local schema**: v7 → v8 → v9 → **v10**  |  **Server schema**: v3 → **v4**
+
+Naming rule, binding everywhere below: **no field name may collide with a name the existing
+synchronization boundary refuses** (`crates/cairn-server/src/sync.rs:27-61`, refused
+recursively at any depth). The refused set is `summary`, `path`, `command`, `details`,
+`exit_code`, `observations`, `observed_value`, `source_locator`, `value_digest`, `fingerprint`,
+`relevant_paths`, `criteria_snapshot`, `sanitization_report`, `origin_ref`, `alternative_cause`,
+`signal_digest`, `pin_reason`, `rationale`, `basis_evidence_id`, `path_fingerprints`,
+`task_snapshot_at_bind`, `detail`, `prior_value`, `new_value`, `content_norm_digest`,
+`local_revision`, plus `outcome` at top level. The **session** refusals apply equally
+(`FORBIDDEN_SESSION_FIELDS`): `worktree_path`, `agent_session_key`, `daemon_run_id`,
+`last_event_at`, `last_turn_ended_at`. Every substitute chosen below is listed in
+`contracts/safe-events.md` §2.
+
+---
+
+## 1. SafeCanonicalEvent
+
+The single record that crosses the machine boundary. Envelope plus a closed per-kind content
+union. Nothing else is transmitted from capture.
+
+### 1.1 Envelope
+
+| Field | Type | Notes |
+|---|---|---|
+| `event_id` | UUID | Deterministic. §1.4. |
+| `contract_version` | u16 | Starts at 1. FR-742. |
+| `kind` | enum | One of §1.2. |
+| `agent` | enum | `claude_code` \| `codex` \| `opencode`. |
+| `vendor_event` | string ≤64 | The vendor's own event name, sanitized. Provenance only (FR-724). |
+| `session_id` | UUID | The **synced** Cairn session id, which the server already holds. |
+| `session_seq` | u64 | Per-session monotonic ordinal, daemon-assigned. §1.4. |
+| `occurred_at` | RFC3339 | Client clock. **Advisory only** — never used for ordering or identity (FR-780). |
+| `content` | union | Per-kind, §1.3. Absent for kinds that carry none. |
+
+`project_id` and `account_id` are **not** envelope fields. They are bound server-side from the
+authenticated credential and the verified session (FR-769, FR-769a). A client cannot assert
+them.
+
+`agent_session_key` is **not** an envelope field and must not become one: it is on
+`FORBIDDEN_SESSION_FIELDS`, the server has deliberately never had a column for it
+(`crates/cairn-server/migrations/0001_init.sql:68-70`), and putting it on this boundary would
+weaken a standing refusal and breach FR-777a/SC-751. The daemon holds the synced session UUID;
+that is what travels.
+
+### 1.2 Event kinds (21)
+
+`session_opened`, `session_closed`, `context_compacting`, `context_compacted`,
+`subagent_started`, `subagent_completed`, `tool_started`, `tool_succeeded`, `tool_failed`,
+`file_read`, `file_changed`, `command_executed`, `test_executed`, `test_result`,
+`research_activity`, `user_instruction_signal`, `decision_signal`, `capture_declined`,
+`capture_failed`, `session_resumed`, `agent_quiesced`.
+
+The seven Feature 001–003 lifecycle events map onto this set without loss, so handoff
+generation, checkpointing and context delivery keep working (FR-744).
+
+### 1.3 Per-kind content
+
+| Kind | Fields |
+|---|---|
+| `session_opened`, `session_resumed` | `open_trigger` ∈ {`startup`,`resume`,`clear`,`compact`,`fork`} |
+| `session_closed` | `close_reason` ≤64 |
+| `context_compacting`, `context_compacted` | `compaction_trigger` ∈ {`manual`,`auto`} |
+| `subagent_started`, `subagent_completed` | `subagent_ref` ≤128, `subagent_kind` ≤64, `parent_session_seq` u64 |
+| `tool_started`, `tool_succeeded` | `vendor_tool` ≤64, `tool_class` enum |
+| `tool_failed` | `vendor_tool`, `tool_class`, `failure_kind` enum, `failure_note` ≤512 (redacted), `exit_status` i32? |
+| `file_read`, `file_changed` | `repo_file` (§2), `change_kind` ∈ {`created`,`modified`,`deleted`,`renamed`}, `repo_file_from` (renames), `file_identity` ∈ {`present`,`out_of_repository`,`unavailable_from_vendor`} |
+| `command_executed` | `command_line` ≤512 (redacted), `exit_status` i32? |
+| `test_executed` | `test_command` ≤512 (redacted) |
+| `test_result` | `test_outcome` ∈ {`passed`,`failed`,`unknown`}, `exit_status` i32?, `tests_total` u32?, `tests_failed` u32? |
+| `research_activity` | `resource_kind` ∈ {`docs`,`web`,`repository`,`other`} |
+| `user_instruction_signal` | `instruction_kind` ∈ {`require`,`forbid`,`prefer`,`scope`,`correct`}, `subject_token`, `object_token`, `justified_by_seq` u64?, `lexicon_version` u16 |
+| `decision_signal` | `decision_kind` ∈ {`adopt`,`reject`,`defer`,`constrain`,`prefer`,`revert`}, `subject_token`, `object_token`, `justified_by_seq` u64?, `lexicon_version` u16 |
+| `capture_declined`, `capture_failed` | `disposition` enum (§4), `stage` enum, `decline_reason` enum ∈ {`no_safe_semantic_mapping`,`ambiguous_classification`,`insufficient_vocabulary`,`vendor_unavailable`,`policy_excluded`} |
+| `agent_quiesced` | *(none)* |
+
+**No free text derived from user or assistant messages appears anywhere in this table.**
+`failure_note`, `command_line` and `test_command` are tool-level strings that pass redaction
+first, and are the only free-text fields in the model.
+
+`subject_token` and `object_token` are **not** free text. They are vocabulary-justified tokens:
+key-shaped (`[a-z0-9_]`, dot-segmented, ≤128 / ≤64 chars) **and** required to appear in the
+session's derived vocabulary — the file and module tokens, command verbs, test identifiers and
+established project keys visible in that session's own events. A token outside that set is
+refused, by the client when constructing and by the server independently
+(`contracts/extraction.md` §13). This is what lets a decision survive the boundary without a
+prompt fragment surviving with it: a sentence's words are not in the vocabulary, and neither is
+a credential.
+
+### 1.4 Identity — stable across hook invocations and retries
+
+Each hook run is a separate short-lived process and cannot share a counter. The daemon can.
+
+```
+hook (stateless)  ──canonical event──▶  daemon
+                                         │  one SQLite transaction:
+                                         │    session_seq = next_seq++ from session_event_seq
+                                         │    event_id    = UUIDv5(CAIRN_EVENT_NS,
+                                         │                    session_id ‖ session_seq)
+                                         │    INSERT INTO event_spool
+                                         ▼
+                                    spooled, identity fixed forever
+```
+
+Two properties this depends on, both deliberate:
+
+- **The counter is durable and independent of the spool.** It lives in `session_event_seq`
+  and is never derived from `MAX(session_seq)` over `event_spool`. The spool drains, and sheds
+  rows under the capacity policy; a counter read from it would reset, re-derive an already-used
+  `event_id`, and the server would answer `duplicate` — silently discarding a real event.
+- **Identity keys on `session_id`, not the vendor key.** A session id is never reused. Shipped
+  code frees the vendor key on deletion so it *can* be reused
+  (`crates/cairn-store/src/repo.rs:1610-1616`), so keying on it would collapse a resumed
+  session's events onto an earlier session's ids.
+
+Consequences: identity is assigned once and never recomputed, so any number of delivery
+retries carry the same `event_id`; the server's primary key makes a redelivery a `duplicate`
+rather than a second event (FR-770); a genuinely repeated act gets a new ordinal and is a
+distinct event (FR-738); and nothing depends on a clock (FR-780).
+
+**The server re-derives and verifies.** `event_id` travels on the wire, but the server
+recomputes `UUIDv5(CAIRN_EVENT_NS, session_id ‖ session_seq)` and refuses a mismatch
+(`event_id_mismatch`). Without this, idempotency would be client-controlled: a buggy or hostile
+client could submit a colliding id, be answered `duplicate`, and suppress a genuine event, or
+pre-claim ids it can guess.
+
+---
+
+## 2. `repo_file`
+
+Repository-relative file identity. **Maximum 1024 bytes UTF-8, maximum 64 path segments.**
+
+Validation, applied identically on the client when constructing and on the server when
+accepting (FR-777d):
+
+1. non-empty; 2. no leading `/`; 3. no `..` segment; 4. no drive-letter prefix (`C:`);
+5. no UNC prefix (`\\`); 6. separators normalized to `/`; 7. no empty interior segment;
+8. within both bounds.
+
+Four dispositions, matching FR-777e–g:
+
+| Vendor supplies | `file_identity` | `repo_file` |
+|---|---|---|
+| absolute path inside the repo | `present` | relativized locally against the repository root |
+| path outside the repo | `out_of_repository` | absent |
+| nothing | `unavailable_from_vendor` | absent |
+| absolute value arriving on the wire | *(refused)* | server rejects the event |
+
+The repository root is machine configuration and is never transmitted (FR-753).
+
+---
+
+## 3. Numeric bounds
+
+| Bound | Value |
+|---|---|
+| `repo_file` | 1024 bytes, 64 segments |
+| Free-text event field (`command_line`, `test_command`, `failure_note`) | 512 bytes |
+| `vendor_event`, `vendor_tool`, `subagent_kind` | 64 chars |
+| Serialized event content | 8 KiB |
+| Serialized whole event | 16 KiB |
+| Events per ingest batch | 256 |
+| Ingest request body | 1 MiB |
+| Spool capacity | 50,000 rows **or** 256 MiB, whichever binds first |
+| Spool delivery attempts | 2,016 per row |
+| Spool retry backoff | 1 s doubling to a 5 min ceiling |
+| Spool deferral probe interval | 5 min, flat |
+| Consolidation batch | 200 events |
+| Consolidation eligibility — volume | 200 pending events |
+| Consolidation eligibility — age | oldest pending event 10 min old |
+| Consolidation lease | 5 min |
+| Consolidation attempts | 5 per event |
+| Extraction input | 200 events / 256 KiB |
+| `topic_key` | 128 chars, 6 segments (unchanged) |
+| `value_key` | 64 chars (unchanged) |
+| Retrieval trace items | 200 per trace |
+
+**Spool capacity governs both spools, and their terminal behaviour differs.**
+`event_spool` sheds its oldest capture-class rows first and saturates only once nothing
+capture-class remains; `command_spool` has no shedding step at all — it carries no
+`boundary_class` column because no explicit command is droppable — so reaching the bound
+refuses new commands visibly and discards nothing already queued (FR-785,
+`contracts/knowledge-commands.md` §4: *"not silently dropped"*). The byte bound is measured
+on `event_spool` only: a command payload is intent, not a serialized event.
+
+**The attempt budget is counted in attempts, not elapsed time.** Nothing reads a clock to
+expire a spooled row, so a device that was switched off has spent none of its budget — being
+off is not the server refusing (FR-783). 2,016 attempts is what a week of continuous,
+actively-retried failure approximates once backoff reaches its ceiling; that is the reasoning
+behind the size, not a guarantee about wall-clock time.
+
+**Spool status is reported as a partition.** A queued row is in exactly one of five
+conditions, and they cover every row the spool still holds:
+
+| Condition | Predicate |
+|---|---|
+| `waiting` | `pending`, not deferred, and due — or `in_flight` with an expired lease |
+| `in_flight` | `in_flight` under a lease that has not expired |
+| `retrying` | `failed`, or `pending` and not yet due — in both cases **not** deferred |
+| `deferred` | **resting** — `pending` or `failed` — and carrying `last_error_kind = 'awaiting_capability'` |
+| `terminal` | `refused`, whether the server refused it or its budget ran out |
+
+Mutually exclusive because the underlying states are not: a deferred row rests as `pending` with
+a future `next_attempt_at`, which is indistinguishable from a row waiting out a transient backoff
+unless the deferral marker is tested first and excluded from the others. Counting each condition
+independently put every deferred row under `retrying` as well, so the five summed to more than
+the table and an old server read as a failing one.
+
+**`deferred` is a resting condition, and `last_error_kind` is why a row is in the state it is
+*now*.** A claim therefore clears the marker: once a new send begins the row is in flight, and
+the previous attempt's reason is history. Without that reset, re-claiming a due deferred row
+produced a row that was `in_flight` and `deferred` at once — and `waiting` and `deferred` at once
+if the claim later went stale. The reset belongs in the claim rather than in the status query,
+because a query taught to ignore a live claim's marker would be working around a row that says
+something untrue about itself.
+
+Nothing is lost by clearing it. Whatever happens next establishes its own reason: another
+deferral sets `awaiting_capability` again, a transport failure sets its own kind, a permanent
+refusal sets its refusal kind, and success needs none. Identity is never touched by a claim.
+
+`undelivered` is the four non-terminal conditions — a row waiting for a capability has not
+reached the server either — and is derived from them rather than counted separately, so it
+cannot disagree with them. `terminal_retry_exhausted` is deliberately a *subset* of `terminal`
+rather than a sixth condition, and is bounded by it rather than summed with it.
+
+**A deferral spends no budget at all** and probes at a flat interval rather than an
+exponential one. A capability appears when somebody upgrades a server, which will not happen
+sooner because Cairn asked twice, so the claim's attempt increment is refunded and the row
+waits (`contracts/knowledge-commands.md` §4.3).
+
+---
+
+## 4. Capture dispositions
+
+`captured`, `declined_by_policy`, `capture_deadline_exceeded`, `redaction_failed`,
+`privacy_refused`, `no_safe_semantic_mapping`, `spooled`, `spool_overflow_dropped`,
+`spool_saturated_dropped`,
+`transmitted`, `accepted`,
+`rejected_by_server`, `persisted`.
+
+`capture_deadline_exceeded` is the FR-749c disposition: the agent sees success, Cairn counts a
+drop. A disposition record carries no payload content (FR-749d, FR-741).
+
+---
+
+## 5. Local schema v8 (SQLite)
+
+Additive. No existing table changes meaning.
+
+Feature 005 ships **two** local migrations. v8 is the Foundation one described in this
+section and is what every phase from Foundations through US2 is built on. v9 is US3's, and
+is documented separately in §5a — it adds one table and changes nothing here.
+
+```sql
+CREATE TABLE event_spool (
+  event_id        TEXT PRIMARY KEY,
+  session_id      TEXT NOT NULL REFERENCES sessions(id),
+  project_id      TEXT NOT NULL REFERENCES projects(id),
+  account_id      TEXT NOT NULL,          -- authored-by; exact match on claim, never NULL-open
+  session_seq     INTEGER NOT NULL,
+  kind            TEXT NOT NULL,
+  payload         TEXT NOT NULL,          -- the approved SafeCanonicalEvent
+  payload_bytes   INTEGER NOT NULL,
+  boundary_class  INTEGER NOT NULL,       -- 1 = never dropped on overflow
+  state           TEXT NOT NULL CHECK (state IN
+                    ('pending','in_flight','delivered','failed','refused')),
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  claimed_at      TEXT,
+  next_attempt_at TEXT,
+  last_error_kind TEXT,
+  created_at      TEXT NOT NULL,
+  UNIQUE (session_id, session_seq)
+);
+CREATE INDEX event_spool_claim ON event_spool (state, account_id, next_attempt_at);
+
+CREATE TABLE capture_disposition_counts (
+  project_id TEXT NOT NULL, agent TEXT NOT NULL, kind TEXT NOT NULL,
+  disposition TEXT NOT NULL, day TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, agent, kind, disposition, day)
+);
+
+CREATE TABLE session_event_seq (           -- durable ordinal; survives spool drain
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+  next_seq   INTEGER NOT NULL DEFAULT 1
+);   -- commands use `command_seq` (below), which also covers sessionless scopes
+
+CREATE TABLE command_seq (                 -- durable counters; one row per scope
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session','store')),
+  scope_key  TEXT NOT NULL,                -- session id, or the store's writer_id
+  next_seq   INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (scope_kind, scope_key)
+);
+
+CREATE TABLE command_spool (               -- knowledge commands awaiting the server
+  command_id  TEXT PRIMARY KEY,            -- UUIDv5(scope_kind ‖ scope_key ‖ command_seq)
+  scope_kind  TEXT NOT NULL CHECK (scope_kind IN ('session','store')),
+  scope_key   TEXT NOT NULL,
+  session_id  TEXT REFERENCES sessions(id),   -- NULL for a sessionless command
+  project_id  TEXT REFERENCES projects(id),
+  account_id  TEXT NOT NULL,               -- exact match on claim; never NULL-open
+  command_seq INTEGER NOT NULL,
+  kind        TEXT NOT NULL,               -- remember | supersede | reinforce | relate |
+                                           -- pin | forget | personal_create | personal_forget |
+                                           -- team_propose | pattern_promote | pattern_forget |
+                                           -- verification_run | verification_attestation
+                                           --   (two report shapes; both are remote_attested.
+                                           --    A route name does not establish a verifier.)
+  payload     TEXT NOT NULL,               -- intent only; no derived state (§3.1 of the contract)
+  state       TEXT NOT NULL CHECK (state IN
+                ('pending','in_flight','delivered','failed','refused')),
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT, next_attempt_at TEXT, last_error_kind TEXT,
+  created_at  TEXT NOT NULL,
+  UNIQUE (scope_kind, scope_key, command_seq)
+);
+
+CREATE TABLE authority_mode (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  mode TEXT NOT NULL CHECK (mode IN ('feature_004','migrating','server_authoritative')),
+  changed_at TEXT NOT NULL
+);
+
+CREATE TABLE retained_local (              -- records the server could not accept (FR-871)
+  -- must be able to name EVERY retained record type, including a relation, which has no id
+  ref_kind     TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern','relation')),
+  domain       TEXT CHECK (domain IN ('project','personal','team')), -- knowledge only
+  knowledge_id TEXT,                       -- knowledge id or pattern_id; NULL for a relation
+  relation_key TEXT,                       -- 'from|to|kind' for a relation; NULL otherwise
+  reason       TEXT NOT NULL CHECK (reason IN
+                 ('local_only','server_refused','possession_indeterminate',
+                  'owner_unclaimed')),
+  detected_at  TEXT NOT NULL,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL AND knowledge_id IS NOT NULL
+                                  AND relation_key IS NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL     AND knowledge_id IS NOT NULL
+                                  AND relation_key IS NULL)
+      OR (ref_kind = 'relation'  AND domain IS NULL     AND knowledge_id IS NULL
+                                  AND relation_key IS NOT NULL)),
+  -- SQLite treats NULLs as distinct in a UNIQUE index, and every row has a NULL by the CHECK
+  -- above, so a naive UNIQUE would not deduplicate and `--retry-retained` would insert twice.
+  -- A single non-null discriminator key is used instead.
+  dedupe_key   TEXT NOT NULL,   -- 'knowledge:<domain>:<id>' | 'pattern:<id>' | 'relation:<key>'
+  UNIQUE (dedupe_key)
+);
+
+CREATE TABLE migration_state (
+  phase TEXT PRIMARY KEY, state TEXT NOT NULL, detail_count INTEGER,
+  started_at TEXT, finished_at TEXT
+);
+
+CREATE TABLE legacy_pattern_claims (       -- one-time owner establishment, FR-867b
+  local_pattern_id TEXT PRIMARY KEY REFERENCES reusable_patterns(id),
+  owner_user_id    TEXT NOT NULL,          -- authenticated claimant, persisted before delivery
+  content_key      TEXT NOT NULL,          -- safe normalized-content digest, §6.2
+  pattern_id       TEXT NOT NULL UNIQUE,   -- UUIDv5(owner_user_id || content_key)
+  claimed_at       TEXT NOT NULL,
+  UNIQUE (owner_user_id, content_key)
+);
+```
+
+Spool overflow (FR-785), in order:
+
+1. Drop the **oldest capture-class** rows (`boundary_class = 0`) first, incrementing
+   `spool_overflow_dropped`.
+2. **If the bound is reached and no capture-class row remains** — the spool is entirely
+   boundary-class — Cairn stops accepting new events for that store and enters a
+   `spool_saturated` state. It does **not** drop a boundary row: session open, close and
+   compaction rows are what every other event is routed by, and shedding them would corrupt the
+   session structure of everything already queued.
+
+   In `spool_saturated`: capture continues to be attempted and each new event is recorded as
+   `spool_saturated_dropped` with its kind and session, so the loss is counted rather than
+   silent; the agent is still never blocked (FR-781); and the condition is surfaced by
+   `cairn status` and in capture health as a distinct, actionable state. It clears as soon as
+   delivery drains rows.
+
+This is the one place the capacity policy can lose a boundary event, and it is resolved by
+refusing new work rather than by corrupting queued work.
+
+---
+
+## 5a. Local schema v9 (SQLite) — the owner's pattern cache
+
+US3 makes a reusable pattern durable on the server (FR-708). The local side of that needs
+somewhere to hold a pulled pattern, and v8 has no table that can.
+
+```sql
+CREATE TABLE cached_patterns (
+  pattern_id    TEXT PRIMARY KEY,          -- UUIDv5(owner_user_id || content_key), §6.2
+  owner_user_id TEXT NOT NULL,             -- from the lane, never from the pulled row
+  title         TEXT NOT NULL,
+  problem       TEXT NOT NULL,
+  root_cause    TEXT NOT NULL,
+  approach      TEXT NOT NULL,
+  constraints   TEXT NOT NULL DEFAULT '[]',
+  applicability TEXT NOT NULL DEFAULT '[]',
+  trust         TEXT NOT NULL DEFAULT 'sanitized' CHECK (trust = 'sanitized'),
+  content_key   TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  forgotten_at  TEXT,                      -- tombstone; content is cleared with it
+  cached_at     TEXT NOT NULL,
+  UNIQUE (owner_user_id, content_key)
+);
+CREATE INDEX cached_patterns_owner ON cached_patterns (owner_user_id, forgotten_at);
+```
+
+### Why this is not `reusable_patterns`
+
+The obvious move is to reuse the local pattern table Feature 002 already has. It cannot hold a
+server row, and the reason is the privacy boundary rather than convenience.
+
+`reusable_patterns` declares `signals`, `signal_digest` and `origin_ref` **NOT NULL**, with a
+CHECK requiring between 2 and 16 signals. Those are three of the six field names §3.3 of
+`contracts/knowledge-commands.md` refuses at the boundary — along with `sanitization_report`,
+`source_memory_id` and `origin_deleted` — so the server never sends them and never could. A
+pulled pattern therefore has nothing to put in three NOT NULL columns, and the only ways to
+store it there are to fabricate signals, which is inventing content the record does not have,
+or to relax the constraints, which would reopen the refused names on a table a pull writes.
+FR-708b is explicit that the refusal may be lifted **only** for a redefined representation
+carrying none of them; a relaxed `reusable_patterns` is not that.
+
+So the two tables hold different things, and the split is the design rather than duplication:
+
+| | `reusable_patterns` (v5) | `cached_patterns` (v9) |
+|---|---|---|
+| Holds | this machine's evidence: signals, salted origin, sanitization report | the server's safe shape |
+| Trust | `candidate \| sanitized \| validated \| contested`, derived from applications | `sanitized` only, CHECKed |
+| Durability | local-only (FR-707); deleting the store deletes it | cache; refills from the server |
+| Written by | promotion on this machine | a pull |
+
+That also makes FR-710's requirement structural instead of a convention: which table a pattern
+is in *is* the answer to whether losing this store loses it, so the durability inventory reads
+the classification off the schema rather than forming a second opinion about it.
+
+`trust` is CHECKed to the one value for the same reason the server's column is: `validated` and
+`contested` are derived from `pattern_applications`, which stay local (FR-707, FR-708g), so
+neither side has evidence for them and neither may store one.
+
+---
+
+## 5b. Local schema v10 (SQLite) — the spool binds to a server instance
+
+`event_spool` and `command_spool` were account-bound and nothing else. That
+closes the identity half of FR-790 — one account's queued work is never
+delivered under another's credential — and left the deployment half of FR-791
+open.
+
+```sql
+ALTER TABLE event_spool   ADD COLUMN server_instance_id TEXT;
+ALTER TABLE command_spool ADD COLUMN server_instance_id TEXT;
+
+DROP INDEX IF EXISTS event_spool_claim;
+CREATE INDEX event_spool_claim
+    ON event_spool (state, account_id, server_instance_id, next_attempt_at);
+DROP INDEX IF EXISTS command_spool_claim;
+CREATE INDEX command_spool_claim
+    ON command_spool (state, account_id, server_instance_id, next_attempt_at);
+```
+
+### An endpoint is not an identity
+
+Two different servers can be reachable at one address. A deployment restored
+from backup onto a fresh database, or a new one stood up where another used to
+be, both present as "the same URL" and both mint their own `server_instance_id`.
+Work queued for the first must never be delivered to the second — the blend
+FR-495 and FR-496 already forbid for team knowledge, enforced there by
+`bind_team_server_instance_tx`, and which nothing enforced for the spool.
+
+So the claim predicate matches **both** identities exactly:
+
+```sql
+WHERE account_id = ?account AND server_instance_id = ?instance
+```
+
+A row bound elsewhere is simply not claimed. It is not refused, not discarded,
+and spends no attempt — the operator's remedy is to point the store back at its
+own server, and rows driven to `retry_exhausted` while the wrong deployment was
+answering would not be there when they did. The count of such rows is reported
+as `other_instance`, and `blocked_reason` becomes `server_instance_mismatch`, so
+a stranded backlog is visible rather than a queue that mysteriously stopped
+(FR-792).
+
+### Measured against a fresh sample, never against a remembered one
+
+`other_instance` is a comparison, and the half it compares against is *the
+instance answering now* — not the store's binding, which answers "none" exactly
+when a replacement deployment has arrived, and not an observation an earlier
+delivery attempt left in memory, which is not a fact about now at all.
+
+The second of those is the subtler mistake and it was the live one. A daemon
+that had spoken to the replacement held the observation; a daemon that had not
+fell back to the binding and reported no mismatch. Both are the same store, and
+which one answers is decided by process lifetime: a daemon exits within one
+supervision tick of another owning its socket, so the daemon that observed the
+replacement is routinely gone by the time an operator asks what happened. A
+reason held only in one process's memory is therefore lost precisely when it is
+wanted, and the report falls back to saying nothing is wrong.
+
+So status takes its own sample (FR-792a). While assembling a spool report that
+has undelivered rows to explain, and only then, it performs one bounded
+read-only peer-identity probe — the same `GET /api/version` the drain reads,
+with the same provisional-instance substitution for a server too old to name
+itself, so the probe and the drain can never disagree about who is answering.
+
+**The stated deadline is five seconds.** It is much shorter than the drain's
+twenty, because a drain is background work and a status read is somebody waiting
+at a terminal; it is far longer than a healthy round trip, because exceeding it
+is reported as an unreachable endpoint and that report has to be *true*. Two
+seconds was the first choice and measurement rejected it: on a host at load ~25,
+a 200-repetition run of the cross-daemon scenario reported `server_unreachable`
+against a server that was up and answering in 9 runs of 132 — the endpoint was
+fine and the probe lost its race for CPU. Small CI runners executing a whole
+suite in parallel sit in exactly that regime, so the deadline is set for the
+loaded case, not the idle one. A server that is genuinely gone refuses the
+connection immediately and never approaches it. The CLI allows a status exchange
+thirty seconds, so this cannot be what makes one time out.
+
+Three outcomes, and each decides a different report:
+
+| Probe outcome | `other_instance` measured against | `blocked_reason` |
+| --- | --- | --- |
+| endpoint answers as peer `P` | `P` | `server_instance_mismatch` when a durable binding `B` exists and `P != B`, else the row-derived reason |
+| endpoint unreachable within the deadline | nothing — no current peer is known | `server_unreachable` |
+| no endpoint or no credential configured | nothing | the row-derived reason, or `no_account` |
+
+The probe writes nothing durable (FR-792b). It does not establish or alter the
+`team:*` lane that *is* the binding, does not open a namespace, does not move a
+cursor, does not touch stored credentials, and never enters the claim path — so
+it cannot take a row, cannot spend an attempt and cannot change an event's
+state. Observing a peer is not binding to it: a store with no binding that
+reaches a server gains no binding and reports no mismatch, because there is
+nothing yet for the peer to mismatch.
+
+The in-memory observation survives as telemetry and nothing more (FR-792c). It
+is useful in a log when reconstructing what a daemon saw; it decides no reported
+reason, and specifically a remembered `S2` never masquerades as the current peer
+once the endpoint has gone quiet or come back as `S1`.
+
+### One reason, by stated precedence
+
+A spool can be several kinds of blocked at once and a status line reports one
+thing, so the choice is stated rather than left to the order of the tests that
+compute it (FR-792d). Highest first:
+
+| # | Reason | Holds when | Why it outranks what follows |
+| --- | --- | --- | --- |
+| 1 | `no_account` | nobody is signed in and rows are undelivered | the claim predicate matches an account exactly, so *nothing* can be claimed; a retry reason would describe a retry that is not being attempted |
+| 2 | `server_unreachable` | the probe could not reach the endpoint | Cairn cannot even ask, so no reason derived from row state describes what is happening |
+| 3 | `server_instance_mismatch` (whole) | a durable binding exists and the probe's peer differs from it, or every undelivered row is bound elsewhere | FR-791 refuses this peer, so no row moves whatever its state — and the remedy is to re-point the store, not to wait |
+| 4 | `saturated` | the bound is reached and nothing shed-able is left | the only state in which work is being *lost* rather than delayed |
+| 5 | `retry_exhausted` | a row has run out of attempts | terminal: it will never move again without intervention |
+| 6 | `refused_by_server` | a row was refused permanently | terminal, but the server has spoken; an operator reads it differently from an exhausted retry |
+| 7 | `awaiting_capability` | a row is deferred for a server upgrade | harmless and self-resolving |
+| 8 | `backing_off` | a row is retrying after a failure | Cairn is asking and failing, which is progress of a kind |
+| 9 | `server_instance_mismatch` (partial) | some rows belong elsewhere while the rest drain | reported, because those rows never will move; last, because the deliverable part *is* moving |
+
+Nothing undelivered is never blocked, whatever the network is doing — a reason
+there would make "blocked" mean "has work", and a signal that is always on is
+not a signal. That is also why an empty spool never probes: FR-792's question is
+not being asked, so the answer costs no network.
+
+### `NULL` is a state, not a wildcard
+
+A row queued before this store had ever established a lane carries `NULL`. That
+is a real state — a machine that captured something before its first successful
+sync — and it means "queued before there was an instance to name", never "any
+instance will do".
+
+**The safe first-binding rule**: the first drain that runs against an
+established instance adopts every unbound row *of that account*, once, inside
+the claim's own transaction. Three properties make it safe, and each is why a
+simpler rule is wrong:
+
+- it only ever writes over `NULL`, so a row that already names an instance is
+  never rebound and a second deployment cannot inherit the first's backlog;
+- it is scoped to the draining account, so one identity's first contact does not
+  bind another identity's unsent work;
+- it happens inside the claim transaction, so a row cannot be adopted by one
+  drainer and claimed by another in between.
+
+Treating `NULL` as matching anything would be the pre-binding behaviour
+restated, and would hand that work to whichever server answered first.
+
+### The one rebinding, and why it is not one
+
+A lane opened against a server below schema 3 is keyed by an id derived from the
+endpoint, because such a server reports none; when that peer is upgraded in
+place it begins reporting a real id and the lane re-keys
+(`contracts/sync-namespaces.md` §11a). `rebind_provisional_instance` moves the
+spooled rows with it, keyed on the **provisional id** and never on the URL. A
+different deployment at the same address reports its own id and carries no row
+bearing that provisional one, so it cannot be reached by that statement. This is
+the same server finally able to say its own name, not a second one.
+
+### Where the binding comes from
+
+`cursor::established_instance` reads it off the lane keys — `team:<instance>`,
+`personal:<instance>:<user>`, `patterns:<instance>:<user>` — rather than from a
+column of its own, because the lanes already are the record and a second place
+to keep one fact is a second place for it to go stale. It is read once when a
+row is written and never re-decided.
+
+---
+
+## 5c. A team row's version is allocated in commit order, not read off a clock
+
+`team_knowledge` rows are mirrored locally and refreshed from the server's change
+feed, so both sides need to agree which of two pictures of one row is newer. The
+feed already computed a value that looked like the answer —
+`GREATEST(created_at, ratified_at, retired_at, superseded_at) AS changed_at` —
+and it is not one.
+
+**PostgreSQL `now()` is transaction start, not statement time.** A transaction
+that opens before another commits stamps the *earlier* time, whatever order the
+writes actually land in. Measured against this repository's own PostgreSQL, with
+no lock contention required:
+
+```text
+S2 opens its transaction   14:30:40.990401   -> later writes retired_at = 40.990401
+S1 ratifies (own tx)       14:30:41.992679   -> ratified_at = 41.992679
+final row: state = 'retired', GREATEST(...) = 41.992679, retired_at < ratified_at
+```
+
+The row went proposed → authoritative → retired, and `changed_at` after the
+retirement is **identical** to `changed_at` after the ratification. Two
+consequences, and the second is the worse one:
+
+- equality cannot order two states, so a stale page or a delayed transition reply
+  compares as "not older" and applies — putting retired guidance back in front of
+  a whole team (FR-456, FR-465);
+- the feed pages on the same value, so a change that does not advance it is never
+  re-sent past a cursor already there. Other devices never learn about that
+  retirement at all. Silent divergence, with nothing later to contradict it.
+
+So team rows carry `revision BIGINT NOT NULL UNIQUE`, assigned by a
+`BEFORE INSERT OR UPDATE` trigger. The trigger rather than four call sites,
+because the defect being repaired is precisely a writer that forgot to advance
+the version, and a fifth writer added later would reintroduce it silently.
+Over-bumping is the safe direction: a revision that moved when nothing
+semantically changed re-delivers a row once, and every importer is idempotent by
+id; a revision that failed to move loses the change permanently.
+
+**The allocator is a counter row, and a sequence would not do.** `nextval` is
+monotonic, which is not the property the feed needs. It hands out numbers at
+*statement* time while rows become visible at *commit*, so:
+
+```text
+tx A takes revision 100 and stays open
+tx B takes revision 101 and commits
+a pull sees 101 and advances its cursor to 101
+tx A commits — revision 100 is now behind the cursor, forever
+```
+
+Reproduced against this project's own PostgreSQL: the reader saw only the second
+row, and the first was invisible to every later pull. The property required is
+that *a client cannot advance its cursor past a change that becomes visible
+later*, and that is what `UPDATE team_revision_counter SET next_revision =
+next_revision + 1 RETURNING next_revision - 1` provides: the allocation is the
+row lock, so a writer holding a revision holds it until it commits or rolls
+back, and the next writer cannot take a number until the previous one is
+visible. Allocation order therefore *is* commit order. Measured: a second writer
+blocked for the whole of the first's transaction, 200 races with zero orderings
+out of sequence.
+
+A rolled-back write returns its number rather than burning it, so the feed has no
+gaps — and a gap is otherwise indistinguishable from a row that has not committed
+yet. The cost is that team writes serialize on one row; team knowledge is
+proposed, ratified and retired by administrators rather than by capture traffic,
+so the contention is measured in operations per hour, while losing a retirement
+is permanent.
+
+The change feed orders and pages on `revision` alone — unique, so a keyset scan
+needs no id tie-break. The local mirror stores it as `server_revision` (local
+schema v12) and both stale-rejection paths prefer it:
+
+| Comparison | Equality | Why |
+| --- | --- | --- |
+| `server_revision` | **admitted** | a revision is allocated once per write, so an equal revision is the same server change arriving again — idempotent redelivery, which is ordinary after a lost reply or a cursor reset |
+| `server_changed_at` (fallback) | **refused** on transition adoption | a tie there is two *different* states sharing a `GREATEST` over transaction-start stamps; nothing can order them, and the stored one is preferred because a wrongly declined adoption is repaired by the next pull while a wrongly applied resurrection is not self-correcting |
+
+A server too old to send a revision still synchronizes: the comparison falls back
+to the timestamp, which is exactly what it was before. A local row that has never
+been told a revision does the same, and tightens as soon as one arrives.
+
+---
+
+## 6. Server schema v4 (PostgreSQL)
+
+```sql
+CREATE TABLE safe_events (
+  event_id         UUID PRIMARY KEY,          -- idempotency is the key itself
+  project_id       UUID NOT NULL REFERENCES projects(id),
+  session_id       UUID NOT NULL REFERENCES sessions(id),
+  account_id       UUID NOT NULL REFERENCES users(id),   -- bound from credential
+  agent            TEXT NOT NULL,
+  kind             TEXT NOT NULL,
+  vendor_event     TEXT,
+  session_seq      BIGINT NOT NULL,
+  contract_version INT  NOT NULL,
+  content          JSONB NOT NULL,
+  occurred_at      TIMESTAMPTZ NOT NULL,      -- advisory
+  received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (session_id, session_seq)
+);
+CREATE INDEX safe_events_project_time ON safe_events (project_id, received_at DESC);
+
+-- The group that gets claimed must be a lockable ROW: PostgreSQL forbids a locking clause
+-- with GROUP BY (SQLSTATE 0A000). Hence a lease table, one row per session.
+CREATE TABLE consolidation_session (
+  project_id         UUID NOT NULL,
+  session_id         UUID NOT NULL,
+  state              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending','claimed','done')),
+  claimed_by         TEXT,
+  claim_expires_at   TIMESTAMPTZ,
+  -- The oldest **pending** enqueue time for the current generation. Reset, not
+  -- minimised, when a `done` session is re-opened: keeping the old value would
+  -- carry completed work forward as the age of a new generation's first event,
+  -- so one fresh event in a long-lived session would be instantly age-eligible
+  -- on the strength of work consolidated a day ago. For a generation still
+  -- `pending` or `claimed` the true oldest is preserved (§3).
+  oldest_enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- When this generation first became eligible; NULL until it does.
+  --
+  -- The durable eligibility **latch** (`contracts/consolidation.md` §3).
+  -- Eligibility is a threshold, and a threshold re-evaluated on every election
+  -- strands the tail of a batch: 205 events trigger at 200, a pass takes 200,
+  -- and the remaining five satisfy no trigger of their own. The latch says
+  -- "this generation has begun" and keeps saying it until the generation's work
+  -- is finished. Durable rather than in-memory so a restart does not strand the
+  -- same five. Cleared when the generation finishes, and cleared again on
+  -- re-open, because a new generation has met no threshold of its own.
+  eligible_since     TIMESTAMPTZ,
+  PRIMARY KEY (project_id, session_id)
+);
+CREATE INDEX consolidation_session_elect
+  ON consolidation_session (oldest_enqueued_at) WHERE state <> 'done';
+
+CREATE TABLE consolidation_work (
+  event_id     UUID PRIMARY KEY REFERENCES safe_events(event_id),
+  project_id   UUID NOT NULL,
+  session_id   UUID NOT NULL,
+  session_seq  BIGINT NOT NULL,           -- batch order; event_id is a UUID and orders arbitrarily
+  enqueued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','failed')),
+  attempts     INT NOT NULL DEFAULT 0, last_error TEXT,
+  FOREIGN KEY (project_id, session_id) REFERENCES consolidation_session (project_id, session_id)
+);
+CREATE INDEX consolidation_pending
+  ON consolidation_work (project_id, session_id, session_seq) WHERE state = 'pending';
+
+CREATE TABLE consolidation_runs (
+  run_id UUID PRIMARY KEY, project_id UUID NOT NULL, session_id UUID,
+  started_at TIMESTAMPTZ NOT NULL, finished_at TIMESTAMPTZ,
+  events_claimed INT, candidates_proposed INT, candidates_accepted INT,
+  candidates_refused INT, extractor_kind TEXT NOT NULL, state TEXT NOT NULL
+);
+
+CREATE TABLE knowledge_candidates (
+  candidate_id UUID PRIMARY KEY,     -- deterministic, §7 of contracts/consolidation.md
+  run_id UUID NOT NULL REFERENCES consolidation_runs(run_id),
+  project_id UUID NOT NULL,
+  proposed_kind TEXT NOT NULL,       -- fact|decision|convention|failure|procedure
+  proposed_domain TEXT NOT NULL,
+  topic_key TEXT, value_key TEXT,    -- AFTER Cairn normalization, never as proposed
+  content TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN
+    ('accepted','reinforced','duplicate','conflicted','refused')),
+  refusal_reason TEXT,               -- fixed vocabulary, FR-804a
+  -- KnowledgeRef of the record this candidate became or reinforced (§6.1)
+  result_ref_kind     TEXT CHECK (result_ref_kind IN ('knowledge','pattern')),
+  result_domain       TEXT CHECK (result_domain IN ('project','personal','team')),
+  result_knowledge_id UUID,   -- KnowledgeRef id, or the pattern_id when ref_kind='pattern'
+  CHECK ((result_ref_kind IS NULL AND result_domain IS NULL AND result_knowledge_id IS NULL)
+      OR (result_ref_kind = 'knowledge' AND result_domain IS NOT NULL
+                                         AND result_knowledge_id IS NOT NULL)
+      OR (result_ref_kind = 'pattern'   AND result_domain IS NULL
+                                         AND result_knowledge_id IS NOT NULL)),
+  UNIQUE (run_id, topic_key, value_key)
+);
+
+CREATE TABLE candidate_source_events (
+  candidate_id UUID NOT NULL REFERENCES knowledge_candidates(candidate_id),
+  event_id     UUID NOT NULL REFERENCES safe_events(event_id),
+  PRIMARY KEY (candidate_id, event_id)
+);
+
+CREATE TABLE retrieval_traces (
+  trace_id UUID PRIMARY KEY,
+  project_id UUID NOT NULL, session_id UUID NOT NULL, account_id UUID NOT NULL,
+  trigger TEXT NOT NULL,             -- session_open | prompt_submit | explicit
+  delivery_point TEXT NOT NULL,
+  degradation_level TEXT,            -- NULL only while requested or on pre-generation failure
+  budget_tokens INT, budget_spent INT,
+  latency_ms INT,                     -- NULL only while requested
+  delivery_state TEXT NOT NULL CHECK (delivery_state IN
+    ('requested','generated','transmitted','failed')),
+  acknowledgement_state TEXT NOT NULL DEFAULT 'unavailable' CHECK
+    (acknowledgement_state IN ('unavailable','acknowledged')),
+                                      -- baseline 005 has no producer for acknowledged
+  failure_reason TEXT,
+  transmission_reported_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((delivery_state = 'requested' AND latency_ms IS NULL)
+      OR (delivery_state <> 'requested' AND latency_ms IS NOT NULL)),
+  CHECK ((delivery_state IN ('generated','transmitted') AND degradation_level IS NOT NULL)
+      OR delivery_state IN ('requested','failed')),
+  CHECK ((delivery_state = 'failed' AND failure_reason IS NOT NULL)
+      OR (delivery_state <> 'failed' AND failure_reason IS NULL))
+);
+
+-- Retention (FR-847): retrieval_traces and their items are retained 90 days, then deleted
+-- oldest-first by a bounded sweep in the same background task as consolidation. Trace volume
+-- is therefore bounded by traffic x 90 days, not unbounded.
+
+CREATE TABLE retrieval_trace_items (
+  trace_id      UUID NOT NULL REFERENCES retrieval_traces(trace_id) ON DELETE CASCADE,
+  -- KnowledgeRef: (domain, id). Project, personal and team knowledge live in
+  -- DIFFERENT tables, so a bare memory_id cannot name a personal or team record.
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id  UUID NOT NULL,                       -- knowledge id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
+  selection_rule TEXT, rank INT,
+  source_updated_at TIMESTAMPTZ NOT NULL,  -- copied from referenced row for delivery upsert
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
+  PRIMARY KEY (trace_id, reference_key)
+);
+
+CREATE TABLE verification_reports (        -- runs reported, never states asserted
+  report_id     UUID PRIMARY KEY,            -- SERVER-assigned
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id  UUID NOT NULL,               -- KnowledgeRef id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
+  project_id    UUID,                        -- NULLABLE: personal/team are project-independent
+  owner_user_id UUID,                        -- set for personal knowledge and PatternRef
+  account_id    UUID NOT NULL,               -- the reporting account, from the credential
+  verdict       TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
+  verifier_kind TEXT NOT NULL,
+  attesting_agent TEXT,                      -- the agent an attestation relays; NULL for /runs.
+                                             -- Deliberately NOT in the UNIQUE below: it says what
+                                             -- the report claims, not which report it is.
+  authority     TEXT NOT NULL,               -- SERVER-assigned; never from the payload
+  run_at        TIMESTAMPTZ NOT NULL,
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
+  -- Same authenticated account retrying the same logical run is a duplicate. Different
+  -- accounts reporting the same record are distinct reports.
+  UNIQUE (reference_key, account_id, verifier_kind, run_at)
+);
+
+-- Verification columns ALREADY EXIST on the server `memories` table and are NOT re-added:
+--   verification, verification_authority, last_verified_at, verification_basis,
+--   evidence_fact_count   (0002_project_intelligence.sql:31-35).
+-- `verification` is the canonical state column; there is no `verification_state`.
+-- Feature 005 changes who computes them, not what they are called
+-- (contracts/verification-summary.md §1).
+ALTER TABLE memories
+  ADD COLUMN origin_kind TEXT;   -- explicit | consolidated  (FR-816)
+
+-- Reusable patterns (FR-708/708a/708b, SC-738). The LOCAL representation is refused by the
+-- synchronization boundary and stays refused: `reusable_pattern` is a FORBIDDEN_ENTITY_TYPE,
+-- and its rows carry `signal_digest`, `origin_ref` and `sanitization_report`, all refused
+-- field names. This is the REPLACEMENT safe shape, and it is a different record — the local
+-- one is not relaxed, it is not sent.
+CREATE TABLE shared_patterns (
+  -- Deterministic, privacy-safe identity: see §6.2. NOT a random UUID, because promotion must
+  -- be idempotent across retries and migration re-runs.
+  pattern_id    UUID PRIMARY KEY,
+  domain        TEXT NOT NULL DEFAULT 'personal' CHECK (domain = 'personal'),
+  owner_user_id UUID NOT NULL REFERENCES users(id),   -- owner; visibility is owner-only (§6.2)
+  title         TEXT NOT NULL,
+  problem       TEXT NOT NULL,
+  root_cause    TEXT NOT NULL,
+  approach      TEXT NOT NULL,
+  constraints   JSONB NOT NULL DEFAULT '[]',
+  applicability JSONB NOT NULL DEFAULT '[]',          -- language/tool vocabulary only
+  trust         TEXT NOT NULL DEFAULT 'sanitized' CHECK (trust IN ('sanitized')),
+                -- Server-side trust is deliberately single-valued: see §6.2.
+  topic_key     TEXT, value_key TEXT,                 -- normalized, for reconciliation
+  content_key   TEXT NOT NULL,                       -- privacy-safe duplicate identity, §6.2
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  forgotten_at  TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX shared_patterns_identity ON shared_patterns (owner_user_id, content_key);
+CREATE INDEX shared_patterns_search
+  ON shared_patterns USING GIN (to_tsvector('english', problem || ' ' || approach));
+
+-- Deliberately absent, and why:
+--   signals, signal_digest   -- the digest is a refused name; raw signals are local evidence
+--   origin_ref               -- refused name; the source project must not be nameable
+--   sanitization_report      -- refused name; the report is local diagnostic output
+--   source_memory_id         -- names a project memory, which a project-independent record
+--                            -- must not do
+--   origin_deleted           -- a fact about a local record that no longer travels
+-- A pattern is a project-independent PERSONAL-domain record of type pattern. It inherits that
+-- domain's rules: it MUST NOT name the project it came from, and its origin stays a
+-- machine-local salted digest that is never transmitted (FR-708a/FR-708c/FR-819).
+
+-- Verification summaries for the non-project domains. `memories` has its own five columns;
+-- personal_knowledge, team_knowledge and shared_patterns do not, and gain none.
+CREATE TABLE knowledge_verification (
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('personal','team')),  -- NULL iff ref_kind='pattern'
+  knowledge_id  UUID NOT NULL,   -- knowledge id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
+  verification  TEXT NOT NULL DEFAULT 'unverified',
+  verification_authority TEXT,
+  verification_basis     JSONB NOT NULL DEFAULT '[]',
+  evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
+  last_verified_at       TIMESTAMPTZ,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
+  PRIMARY KEY (reference_key)
+);
+
+CREATE TABLE legacy_verification_audit (   -- pre-cutover values, untrusted, never derived from
+  domain       TEXT NOT NULL,
+  knowledge_id UUID NOT NULL,
+  legacy_state TEXT, legacy_authority TEXT, legacy_last_verified_at TIMESTAMPTZ,
+  demoted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (domain, knowledge_id)
+);
+
+-- The closed capability vocabulary FR-728/FR-855/SC-726 require. Health is declared per agent
+-- AND per canonical event kind, so a cell is never blank.
+--   capability = 'event:<kind>'      for each of the 21 kinds (capture)
+--              | 'deliver:session_open' | 'deliver:prompt_time'
+--              | 'deliver:post_compaction' | 'receipt'
+-- status uses the six-value vocabulary below; 'no_evidence' is a first-class answer.
+CREATE TABLE integration_health (
+  project_id UUID NOT NULL, account_id UUID NOT NULL,
+  writer_id  TEXT NOT NULL,                  -- the machine it was observed on (FR-857)
+  agent TEXT NOT NULL,
+  capability TEXT NOT NULL, stage TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN
+    ('supported','unsupported_by_vendor','declined_by_cairn',
+     'adapter_unimplemented','runtime_failure','no_evidence')),
+  evidence_kind TEXT,                        -- introspection | observation
+  observed_at TIMESTAMPTZ, degraded BOOLEAN,
+  PRIMARY KEY (project_id, account_id, writer_id, agent, capability, stage)
+);
+
+CREATE TABLE delivered_context (           -- per-session dedup; server-side, §7
+  session_id     UUID NOT NULL REFERENCES sessions(id),
+  ref_kind       TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain         TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id   UUID NOT NULL,                      -- knowledge id, or pattern_id
+  reference_key  TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
+  delivered_at   TIMESTAMPTZ NOT NULL,
+  source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
+  delivery_point TEXT NOT NULL,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
+  PRIMARY KEY (session_id, reference_key)
+);
+
+CREATE TABLE capture_dispositions (        -- funnel source; client-reported + server-observed
+  project_id UUID NOT NULL, account_id UUID NOT NULL, agent TEXT NOT NULL,
+  kind TEXT NOT NULL, disposition TEXT NOT NULL, day DATE NOT NULL,
+  n BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, account_id, agent, kind, disposition, day)
+);
+
+-- Server-side command idempotency (`contracts/knowledge-commands.md` §4).
+--
+-- The contract requires replay to be idempotent — "the server answers
+-- `duplicate` and applies nothing twice" — and gives the client a deterministic
+-- `command_id`. This is where the server remembers having seen one. Most
+-- commands would not strictly need it: a create derives its record id, a
+-- relation upserts on its natural key, a pin is the same state written twice.
+-- `reinforce` cannot be made idempotent by shape alone, because incrementing a
+-- counter twice is visibly different from once. One mechanism serves all of
+-- them, because "which commands are idempotent and by what means" acquires a
+-- wrong answer as soon as it has three.
+--
+-- **The account is part of the identity, not an annotation on it.** A
+-- `command_id` is UUIDv5 over a scope kind, a scope key and an ordinal, and a
+-- sessionless command's scope key is the *store's* `writer_id` — so two
+-- accounts on one machine derive the same ids for their own first commands.
+-- Keyed on `command_id` alone, the second account's write would be answered
+-- `duplicate` and silently never happen. `account_id` comes from the
+-- authenticated credential and never from the request body.
+--
+-- The reservation is taken with `INSERT … ON CONFLICT DO NOTHING RETURNING`
+-- **inside the effect's own transaction and before it**, so PostgreSQL's unique
+-- index is the arbiter rather than a read-then-write race, and a rolled-back
+-- effect takes its reservation with it — leaving the command replayable.
+CREATE TABLE applied_commands (
+  account_id UUID NOT NULL REFERENCES users(id),
+  command_id UUID NOT NULL,
+  result_id  UUID NOT NULL,   -- returned verbatim on a replay
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, command_id)
+);
+
+CREATE TABLE server_authority (
+  id INT PRIMARY KEY CHECK (id = 1),
+  mode TEXT NOT NULL CHECK (mode IN ('pre_cutover','server_authoritative')),
+  cutover_at TIMESTAMPTZ
+);
+
+-- A client store that has registered a migration (`migration-cutover.md` §12.1). The
+-- migration-scoped drain route is open only to a registered, uncompleted migration, so it is
+-- not a general bypass of the cutover refusal.
+CREATE TABLE client_migrations (
+  migration_token TEXT PRIMARY KEY,
+  account_id      UUID NOT NULL REFERENCES users(id),
+  writer_id       TEXT NOT NULL,
+  registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at    TIMESTAMPTZ,
+  -- Idempotent registration per store: re-registering while still open returns the same row;
+  -- re-registering after completion reopens it (clears `completed_at`) rather than minting a
+  -- second row for the same machine, which is what `--retry-retained` running after
+  -- completion depends on (FR-876d).
+  UNIQUE (account_id, writer_id)
+);
+```
+
+`integration_health.status` is the FR-855 vocabulary, and `evidence_kind` is what keeps
+configuration read-back from reading as runtime capture (FR-852). `no_evidence` is a first-class
+value, which is what lets receipt be reported honestly (FR-838e).
+
+---
+
+## 6.1 `KnowledgeRef` — naming knowledge across domains
+
+Project knowledge lives in `memories`, personal knowledge in `personal_knowledge`, team
+knowledge in `team_knowledge`. They are separate tables with separate ownership rules, so a
+bare `memory_id` cannot name a personal or team record, and `memories.account_id` does not
+exist as a way to check who owns one.
+
+Every cross-domain reference is therefore a **`KnowledgeRef = (domain, knowledge_id)`** with
+`domain ∈ {project, personal, team}` — the three domains Constitution IV fixes, and no others.
+It is used identically in retrieval traces, delivered-context dedup, authorization and web
+rendering.
+
+**A reusable pattern is not a fourth domain and is not domain-less.** Its canonical
+`shared_patterns` row carries `domain = personal`; `pattern` is the record type. It remains a
+distinct record type with its own table and lifecycle, and is referenced as
+**`PatternRef = pattern_id`**. Thus `PatternRef` omits a domain component without erasing the
+canonical record's personal domain.
+
+Where a table must reference either, it carries a discriminator rather than a widened domain:
+
+```
+ref_kind  TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern'))
+domain    TEXT     CHECK (domain IN ('project','personal','team'))  -- NULL iff ref_kind='pattern'
+record_id UUID NOT NULL
+reference_key TEXT GENERATED ALWAYS AS (
+  CASE WHEN ref_kind = 'knowledge'
+       THEN 'knowledge:' || domain || ':' || record_id::text
+       ELSE 'pattern:' || record_id::text END
+) STORED NOT NULL
+CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+    OR (ref_kind = 'pattern'   AND domain IS NULL))
+```
+
+Here `domain IS NULL` means only that the polymorphic row contains a `PatternRef` rather than a
+`KnowledgeRef`. Resolving that `PatternRef` MUST find a `shared_patterns` row whose own domain is
+explicitly `personal`. Every concrete table using this shape repeats the `CHECK`; application
+validation alone is insufficient (SC-766). Wherever the reference participates in row identity,
+the generated non-null `reference_key` participates in the primary or unique key. Thus equal
+UUIDs in different knowledge domains remain different identities, while `PatternRef(id)` has
+its own `pattern:<id>` identity (FR-819a, SC-767).
+
+**A memory relation is not a `KnowledgeRef` either.** A relation is identified by its own natural
+key, `RelationRef = (from_memory_id, to_memory_id, kind)`, which is the primary key
+`memory_relations` already has. It has no `knowledge_id` of its own and must not be given one.
+
+| Domain | Table | Owner check for a reader |
+|---|---|---|
+| `project` | `memories` | reader is a member of `memories.project_id` |
+| `personal` | `personal_knowledge`; `shared_patterns` (type `pattern`) | reader **is** the row's `owner_user_id` |
+| `team` | `team_knowledge` | reader is a member of the server's team; `proposed` rows additionally require author-or-admin |
+
+A `PatternRef` resolves against `shared_patterns`, whose visibility rule is in §6.2.
+
+Two rules follow, both binding:
+
+- **`updated_at` comparisons resolve per domain**, against the referenced table's own column.
+  There is no single table to read it from.
+- **Authorization resolves per domain before a reference is rendered.** A `personal` ref whose
+  owner is not the reader is withheld entirely — not rendered as an opaque id, which would
+  still disclose that the record exists. A project member must never be able to infer a
+  colleague's personal knowledge from a trace identifier, a rank gap, or a count.
+
+## 6.2 Reusable patterns — visibility, identity and trust
+
+### Visibility is owner-only by default
+
+A local reusable pattern is **one developer's** cross-project knowledge. FR-708 asks for
+durability, not for an audience. Making a promoted pattern readable by every authenticated
+account would take a private record and publish it to the whole server as a side effect of
+backing it up — a widening no requirement asks for, and one Constitution V forbids as a side
+effect (*"moving knowledge from one domain to a wider one is always an explicit act, never a
+side effect"*).
+
+So `shared_patterns` carries `domain = personal`, is scoped to `owner_user_id`, and reads,
+retrieval, traces and web views all filter on it. The table name describes where it is stored,
+not who can see it.
+
+Widening to a team is a **separate, explicit act with its own governance**: the owner proposes
+the content as a new team-domain record, and a human administrator ratifies it, exactly as any
+other team guidance (Product Constraints: *"an agent may propose; only a human administrator
+may make team-wide guidance authoritative"*). The personal pattern remains owner-only. There
+is no pattern-specific sharing path, and pattern visibility is never the mechanism by which
+something becomes team-wide.
+
+### Identity is derived from safe content
+
+Local duplicate identity is `signal_digest + root_cause_digest`, and the safe shape carries
+neither — both are refused field names. A random UUID cannot replace them: promotion must be
+idempotent across a retry and a migration re-run, or the same pattern lands twice.
+
+```
+content_key = digest( normalize(problem) ‖ normalize(root_cause) ‖ normalize(approach) )
+pattern_id  = UUIDv5(CAIRN_PATTERN_NS, owner_user_id ‖ content_key)
+```
+
+Every input is a field that legitimately crosses the boundary, so the identity discloses
+nothing the record does not already carry. `UNIQUE (owner_user_id, content_key)` makes a repeat
+promotion an upsert rather than a duplicate, and makes migration re-runnable.
+
+Two patterns that differ only in `title` collapse to one, which is correct: the title is a
+label, and the problem, cause and approach are the pattern.
+
+### Server trust is narrowed to one value
+
+Local `trust` is `candidate | sanitized | validated | contested`, and `validated` and
+`contested` are derived from `pattern_applications` — which stay local-only (FR-707). The server
+therefore has **no evidence** from which to derive them, and a client asserting `validated`
+would be asserting a state it earned privately, on a record the server cannot check. That is the
+same class of overclaim as client-asserted verification.
+
+So the server stores exactly one trust value, `sanitized`, meaning what it can actually
+establish: this record passed the privacy gate. `validated` and `contested` remain **local**
+states, derived locally from local applications, displayed locally, and labelled as
+machine-local rather than canonical.
+
+This is a deliberate narrowing rather than an omission. If server-side trust is wanted later it
+needs an evidence path — application outcomes reported as runs, the way verification works — and
+that is a separate feature, not an implicit consequence of storing patterns centrally.
+
+## 7. Per-session context de-duplication
+
+`delivered_context` is a **server** table, because selection is server-side and the server is
+the only party holding both sides of the comparison. Placing it on the client would make the
+rule uncomputable. It records what a session already received; prompt-time selection is:
+
+```
+relevant(session, prompt)
+  MINUS delivered_context[session]
+  PLUS  any delivered item whose updated_at > its delivered_at
+```
+
+Session-open uses the full briefing budget. Prompt-time uses an incremental budget of **25% of
+the briefing budget** and carries only new or changed items, so the two delivery points cannot
+restate each other (FR-829, FR-830). Both write a trace with their `delivery_point`.
+
+A row is written **when transmission is attempted and did not fail**, never at selection time.
+Writing at selection would suppress, for the life of the session, items the agent never
+received — dedup withholding what was only ever generated.
+
+The server inserts `retrieval_traces(delivery_state='requested')` after authenticated
+account/project/session binding and before selection begins. Generation changes it to `generated`
+or `failed`. A later authenticated transmission-outcome report names only the server-issued
+`trace_id` plus the bounded outcome. In one transaction, `generated → transmitted` upserts the
+trace's selected `retrieval_trace_items` into `delivered_context`; `generated → failed` records a
+content-free failure reason and writes no delivery rows. Repeating the same terminal outcome is a
+no-op success; a conflicting terminal outcome is refused. Baseline 005 always leaves
+`acknowledgement_state = 'unavailable'`: returning context establishes transmission, not receipt.
+
+Because `delivered_context` is server-side, deleting the local store does not cause a session's
+knowledge to be re-delivered, and does not appear in the durability-loss list.
+
+---
+
+## 8. Entity relationships
+
+```
+SafeCanonicalEvent ──▶ consolidation_work ──▶ ConsolidationRun
+                                                    │
+                                                    ▼
+                                          KnowledgeCandidate
+                                                    │
+                       result = KnowledgeRef(domain, id)  |  PatternRef(pattern_id)
+                                                    │
+              ┌──────────────┬──────────────┬───────┴────────┐
+              ▼              ▼              ▼                ▼
+          memories   personal_knowledge  team_knowledge  shared_patterns
+             project       personal          team        personal/type=pattern
+              │              │              │                │
+              └──────────────┴──────┬───────┴────────────────┘
+                                    │  referenced by (ref_kind, domain?, id)
+                                    │  identity = generated reference_key
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+    retrieval_trace_items   delivered_context     verification_reports
+              │                                           │
+              ▼                                     (derive state)
+       RetrievalTrace
+
+candidate_source_events ──▶ SafeCanonicalEvent   (evidence, additive)
+memory_relations                                 (project domain only)
+```

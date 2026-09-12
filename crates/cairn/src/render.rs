@@ -154,13 +154,18 @@ pub fn briefing(payload: &ContextPayload) -> String {
     if !b.patterns.is_empty() {
         out.push_str("\n## Patterns from other projects (unverified here)\n");
         for p in &b.patterns {
+            // The overlap clause appears only when a comparison actually
+            // ran. A server-selected canonical pattern carries no count, and
+            // printing "0 signals matched" would assert a comparison that
+            // never happened.
+            let matched = match p.signal_overlap {
+                Some(1) => " (1 signal matched)".to_string(),
+                Some(n) => format!(" ({n} signals matched)"),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "- **{}** ({}, {} signal{} matched): {}\n",
-                p.title,
-                p.trust,
-                p.signal_overlap,
-                if p.signal_overlap == 1 { "" } else { "s" },
-                p.approach
+                "- **{}** ({}{}): {}\n",
+                p.title, p.trust, matched, p.approach
             ));
             if let Some(cause) = &p.alternative_cause {
                 out.push_str(&format!("  - another cause found behind this: {cause}\n"));
@@ -254,6 +259,75 @@ fn list(out: &mut String, title: &str, items: &[String]) {
     }
 }
 
+/// A stored instant as an age a person can read.
+///
+/// Coarse on purpose. The question is "is this minutes or days", and a
+/// spurious-precision "3h07m12s" invites someone to read a difference that
+/// means nothing. An unparsable value is shown as-is rather than hidden: a
+/// timestamp the daemon could not produce properly is itself worth seeing.
+fn age_of(rfc3339: &str) -> String {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let secs = (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_seconds();
+    match secs {
+        s if s < 0 => "just now".to_string(),
+        s if s < 90 => format!("{s}s ago"),
+        s if s < 5400 => format!("{}m ago", s / 60),
+        s if s < 172_800 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// The closed `blocked_reason` vocabulary, said in words.
+///
+/// The wire carries a token so a caller can branch on it; a person reads this.
+/// An unknown token is passed through rather than dropped — a newer daemon
+/// talking to an older CLI should still say *something*, and inventing
+/// "unknown" would hide the very state that was added.
+fn blocked_phrase(reason: &str) -> String {
+    match reason {
+        "server_unreachable" => "the server cannot be reached".to_string(),
+        "server_instance_mismatch" => {
+            "this work was queued for a different server than the one now answering".to_string()
+        }
+        "saturated" => "the queue is full and new work is being refused".to_string(),
+        "retry_exhausted" => "some rows ran out of attempts and will not retry".to_string(),
+        "refused_by_server" => "the server refused some rows permanently".to_string(),
+        "awaiting_capability" => "waiting for a server that can accept them".to_string(),
+        "backing_off" => "retrying after a failure".to_string(),
+        "no_account" => "nobody is signed in, so nothing can be delivered".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// What a knowledge mutation actually achieved, said honestly.
+///
+/// **`Remembered <id>` is a claim of durability, and after cutover it is often
+/// false.** Under server authority the write is a command the server will accept
+/// or refuse, and the caller must be told it was *accepted for delivery* rather
+/// than stored (FR-709, FR-815a). Printing "Remembered" over a queued command —
+/// worse, "Remembered ?" once there is no local record to name — tells a user
+/// their knowledge is safe while it is sitting in a queue the server may still
+/// turn down.
+///
+/// Returns `None` when the reply describes a durable local record, so the
+/// caller keeps its own wording for the case that has not changed.
+pub fn queued_instead_of_stored(v: &serde_json::Value) -> Option<String> {
+    if v.get("accepted_for_delivery").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    let id = v
+        .get("command_id")
+        .and_then(|c| c.as_str())
+        .unwrap_or("(no id)");
+    Some(format!(
+        "Accepted for delivery as command {id}.\n           The server owns durable knowledge now, so this is a request it will \
+         accept or refuse — not a stored record yet. `cairn status` shows the \
+         queue.\n"
+    ))
+}
+
 pub fn status(s: &StatusPayload) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -289,6 +363,36 @@ pub fn status(s: &StatusPayload) -> String {
         "Recorded     {} observations, {} memories\n",
         s.observation_count, s.memory_count
     ));
+
+    // The spool, when it holds anything (FR-792).
+    //
+    // Three things and all three are required: the depth, the age of the oldest
+    // entry, and why delivery is not progressing. The depth alone is the number
+    // people already had and it is the least useful of them — fifty rows a
+    // second old is a busy minute, one row a week old is an outage nobody
+    // noticed, and only the age tells them apart. The reason is what turns
+    // noticing into acting.
+    //
+    // Silent when nothing is queued, because a line reading "0 waiting" on every
+    // healthy machine is a line people stop reading.
+    if let Some(c) = &s.capture {
+        for (label, spool) in [("Events", &c.events), ("Commands", &c.commands)] {
+            if spool.undelivered == 0 && spool.terminal == 0 {
+                continue;
+            }
+            let mut line = format!("{} undelivered", spool.undelivered);
+            if let Some(oldest) = &spool.oldest_at {
+                line.push_str(&format!(", oldest {}", age_of(oldest)));
+            }
+            if spool.terminal > 0 {
+                line.push_str(&format!(", {} given up on", spool.terminal));
+            }
+            if let Some(reason) = &spool.blocked_reason {
+                line.push_str(&format!(" — {}", blocked_phrase(reason)));
+            }
+            out.push_str(&format!("Queue        {label}: {line}\n"));
+        }
+    }
 
     // How far subject identity actually reaches here, and what the mechanism
     // is currently reporting (FR-499). Visible in every project, so nobody has
@@ -1283,6 +1387,7 @@ mod tests {
             sessions_awaiting_handoff: 0,
             knowledge: None,
             handoff_synthesis_failures: vec![],
+            capture: None,
         };
         let text = status(&s);
         assert!(text.contains("Sharing      local only"));

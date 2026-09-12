@@ -1,0 +1,497 @@
+# Tasks: Server-Authoritative Autonomous Memory
+
+**Input**: Approved artifacts in `specs/005-server-authoritative-autonomous-memory/`
+**Prerequisites**: `spec.md`, `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, all eight files in `contracts/`, Constitution v1.2.1, and `checklists/requirements.md`
+
+**Tests are mandatory.** Each story begins with tests that must fail before its implementation tasks and pass at its checkpoint. Task order is dependency order unless `[P]` marks disjoint files.
+
+## Format
+
+`- [ ] T### [P?] [US#?] Action with exact file path`
+
+---
+
+## Phase 1: Setup
+
+- [X] T001 Record the pre-Feature-005 workspace dependency manifest used by SC-737 in `tests/feature005/dependency-baseline.toml`
+- [X] T002 Add shared Feature 005 PostgreSQL/SQLite fixtures, identical-UUID seed helpers, authenticated multi-account helpers, and restart injection controls in `tests/src/feature005.rs`
+- [X] T003 Export the Feature 005 harness from `tests/src/lib.rs`
+- [X] T004 Add only the test dependencies required by the approved Rust/PostgreSQL/Next.js stack in `tests/Cargo.toml`
+
+---
+
+## Phase 2: Foundational (Blocking Prerequisites)
+
+**Purpose**: Establish schemas, authority, typed boundaries, spools, complete references, authenticated command handling, and restart-safe claim primitives before story work.
+
+- [X] T005 Implement SQLite schema v8 exactly as `data-model.md` §5—including `event_spool`, durable event/command sequences, `command_spool`, disposition counts, `authority_mode`, `retained_local`, `migration_state`, and immutable `legacy_pattern_claims`—in `crates/cairn-store/migrations/0008_safe_events.sql`
+- [X] T006 Test v7→v8 migration, interrupted migration rollback, existing-row preservation, retained-local discriminator constraints, and same-owner/different-owner legacy-pattern claim uniqueness in `tests/tests/feature005_local_schema.rs` (depends on T005)
+- [X] T007 Implement the complete PostgreSQL schema v4 exactly as `data-model.md` §6—including final personal/team FTS indexes and triggers, authority mode, safe events, consolidation leases/work/runs/candidates, provenance, requested/generated/transmitted/failed traces, trace-item source timestamps, delivery dedup, reports/summaries, personal-domain patterns, health, and dispositions—in `crates/cairn-server/migrations/0004_autonomous_memory.sql`
+- [X] T008 Test v3→v4 migration, every foreign key/index/trigger/CHECK, final personal/team FTS ownership, trace lifecycle constraints, canonical `reference_key`, nullable project bindings, owner-only pattern columns, and server-authority initialization in `tests/tests/feature005_server_schema.rs` (depends on T007; SC-766)
+- [X] T009 [P] Add server schema v4 and the settled capability advertisement without weakening older capability behavior in `crates/cairn-server/src/version.rs` (depends on T007)
+- [X] T010 Define `KnowledgeRef(domain,id)`, `PatternRef(pattern_id)`, the polymorphic reference enum, canonical `reference_key`, domain/type validation, and per-domain resolution contracts in `crates/cairn-core/src/domain.rs` (FR-708c–e, FR-817–FR-826, FR-819a)
+- [X] T011 [P] Define the closed, versioned 21-kind `SafeCanonicalEvent` union, typed per-kind content, provenance, dispositions, refusal vocabularies, and all numeric bounds in `crates/cairn-core/src/event.rs` (FR-734–FR-745)
+- [X] T012 [P] Implement daemon-assigned UUIDv5 event, command, candidate, refusal, corroboration, and pattern identities from their approved inputs in `crates/cairn-core/src/eventid.rs` (FR-708f, FR-738, FR-796–FR-798c)
+- [X] T013 Export the new domain, event, and identity APIs without changing the existing public tool surface in `crates/cairn-core/src/lib.rs` (depends on T010–T012)
+- [X] T014 Test the 21-kind closed union, old seven-event compatibility, per-kind content legality, bounds, clock-independent repeated-event identity, retry stability, and full reference encoding in `crates/cairn-core/tests/feature005_events.rs` (depends on T010–T013)
+- [X] T015 Extend the one canonical topic/value-key normalizer with approved separator folding while preserving dot-segment semantics and rejecting—not repairing—invalid keys in `crates/cairn-core/src/knowledge.rs` (FR-796a–d, FR-824). **Clarified during implementation:** T015 activates folding immediately while T142 rewrites existing rows only during the explicit US7 migration, so T015 must also supply the pre-cutover comparison compatibility that stops a legacy value key and its own canonical form reading as two values in the interval between them. T142 remains the permanent normalization and collision step (FR-867a); nothing here rewrites a stored key.
+- [X] T016 Test at least fifty key-variant groups, invalid-key refusal, and unchanged topic dot segmentation in `crates/cairn-core/tests/feature005_keys.rs` (depends on T015; SC-745)
+- [X] T017 Extend the existing single privacy validator for safe-event text, `repo_file`, patterns, and consolidation candidates while keeping it pure, deterministic, fail-closed, and structurally text-free on refusal in `crates/cairn-core/src/validate.rs` (FR-749–FR-764, FR-777–FR-777g)
+- [X] T018 Test every privacy rejection class, missing-input refusal, POSIX/Windows path attacks, 1024-byte/64-segment limits, and refusal Debug/Display non-leakage in `crates/cairn-core/tests/feature005_privacy.rs` (depends on T017; SC-704, SC-705, SC-743)
+- [X] T019 Extend canonical lifecycle translation so all existing seven lifecycle events remain expressible through `SafeCanonicalEvent` in `crates/cairn-core/src/lifecycle.rs` (depends on T011)
+- [X] T020 Implement durable ordinal allocation, transactional identity assignment, exact-account claims, stale-claim reclaim, bounded backoff, permanent refusal, and capacity policy shared by event and command spools in `crates/cairn-store/src/spool.rs` (depends on T005, T012). **Settled during implementation:** (a) `failed` is the *retrying* state here and `refused` the terminal one — the opposite of `outbox.rs`, where `failed` is terminal, because schema v8 gives the spool a `refused` the outbox never had; (b) FR-784's "retry MUST be bounded" is read as a bound on attempts and not only on backoff, so a row that spends a fixed attempt budget becomes terminal-and-visible rather than retrying forever. The budget is counted in attempts, not elapsed time: a device that was switched off has not used any of it, because being off is not the server refusing (FR-783). It is also enforced on the **claim**, not only where a failure is recorded — a drainer that crashes after claiming never reports a failure, and every claim increments `attempts`; (c) a **deferral** — an unsupported contract version, kind or capability — refunds the claim's attempt increment and probes at a flat interval, because `attempts` increments at claim time and an arbitrarily long old-server period would otherwise drive an upgradeable row to `retry_exhausted`; (d) spool status is a **partition** — `waiting`, `in_flight`, `retrying`, `deferred` and `terminal` are mutually exclusive and exhaustive over queued rows, with `undelivered` derived from the four non-terminal ones; the deferral marker is tested first and excluded from `waiting` and `retrying`, because a deferred row rests as `pending` with a future `next_attempt_at` and is otherwise indistinguishable from a transient backoff, and a claim clears `last_error_kind` so a row with a send in progress is not also reported as resting; (e) `command_spool` is bounded by the same stated capacity as `event_spool`, and its terminal behaviour is to refuse new commands visibly, never to shed queued ones — the event spool's shedding policy is inexpressible for commands, which carry no `boundary_class` because no explicit command is droppable (`contracts/knowledge-commands.md` §4).
+- [X] T021 Export spool repositories and replace insert-once personal/team replica merging with server-wins cache refresh semantics in `crates/cairn-store/src/lib.rs` (depends on T020; FR-712a)
+- [X] T022 Test concurrent ordinal allocation, drain-independent identity, exact-account claims, stale reclaim, retry bounds, boundary-row protection, saturation/drop counters, and command ordering in `crates/cairn-store/tests/feature005_spool.rs` (depends on T020–T021)
+- [X] T023 Add authenticated per-domain reference resolution and ownership/membership guards—including owner-only `PatternRef` resolution and withheld-not-opaque behavior—to `crates/cairn-server/src/auth.rs` (depends on T007, T010; FR-768–FR-769a, FR-834, FR-846a)
+- [X] T024 Write failing generic command-boundary contract tests for intent-only payloads, credential-derived attribution, cross-member overwrite refusal, idempotent command retries, personal ownership, pattern command shape/owner-guard delegation, and atomic team transitions in `tests/tests/feature005_commands.rs` (depends on T002, T007, T023)
+- [X] T025 Implement the generic post-cutover authoritative command boundary and DTO/dispatch contracts—including project, personal and team commands plus the safe pattern promote/forget command shape, but excluding the US3 pattern repository/lifecycle implementation—and reject all client-writable derived state in `crates/cairn-server/src/commands.rs` (depends on T024; FR-701, FR-712, FR-815–FR-816)
+- [X] T026 Wire project, personal and team command endpoints and reuse the existing compare-and-swap ratify/retire handlers; pattern routes remain interface-only until US3 supplies their lifecycle repository in `crates/cairn-server/src/api.rs` (depends on T025; FR-825, FR-889a) **Settled during implementation:** queued commands are delivered to one authenticated envelope route, `POST /api/commands`, which dispatches internally to these same handlers — a second way in, not a second implementation. The per-command paths cannot carry the deterministic `command_id`, and a drain posting the payload alone to a kind-derived path both loses idempotency and names routes the server does not serve (`contracts/knowledge-commands.md` §4.2).
+- [X] T027 Route explicit non-pattern daemon/CLI knowledge mutations through online commands or the account-bound command spool, preserving sessionless store-scoped identity, in `crates/cairnd/src/handlers.rs` (depends on T020, T025)
+- [X] T028 Write failing safe-event ingest contract tests for strict fields, refused names, bounds, UUID re-derivation, ordered vocabulary validation, session/account/project authorization, duplicate success, permanent versus transient failure, and atomic enqueue in `tests/tests/feature005_ingest.rs` (depends on T002, T007, T011, T023)
+- [X] T029 Implement `POST /api/events/batch` validation and atomic `safe_events` plus `consolidation_work` persistence in `crates/cairn-server/src/events.rs` (depends on T028; FR-765–FR-780)
+- [X] T030 Wire strict body limits, authentication, routing, and per-event outcomes for event ingest in `crates/cairn-server/src/main.rs` (depends on T029)
+- [X] T031 Write failing consolidation-claim tests covering concurrent workers, session ordering, done-session reopening, partial-batch immediate re-election, lease reclaim, and the exact edge cases—failures 1–4 retry, attempt-5 success is `done`, attempt-5 failure is `failed`, attempt 6 never runs, crash after start consumes the attempt, and failed work never strands its session—in `tests/tests/feature005_consolidation_claims.rs` (depends on T002, T007) **Settled during implementation:** §3's eligibility rules are enforced — closed session, 200 pending events, or oldest pending event 10 minutes old — with a durable `eligible_since` latch so the tail of a partial batch is re-elected at once rather than waiting for a threshold it can no longer meet, and `oldest_enqueued_at` is reset rather than minimised when a `done` session re-opens.
+- [X] T032 Implement one-session lease election, attempt increment at claim start, heartbeat/reclaim, success-before-fifth-failure close ordering, and lease release/reopen/close in `crates/cairn-server/src/consolidate.rs` (depends on T031; FR-793a–d, FR-808)
+- [X] T033 Start exactly one bounded in-process consolidation task with batch 200, lease five minutes, 100 ms yield, max attempts five, and pool share `min(2,floor(max_connections/5))` in `crates/cairn-server/src/main.rs` (depends on T032; FR-793a1)
+- [X] T034 Test deliberately identical `project:id-X`, `personal:id-X`, `team:id-X`, and `pattern:id-X` across candidate results, traces, delivery, summaries, and reports; test two reporters and every invalid discriminator/domain combination in `tests/tests/feature005_reference_identity.rs` (depends on T007, T010, T023; SC-766, SC-767)
+- [X] T035 Define the complete per-agent/per-event capability matrix vocabulary, evidence kind, no-evidence state and per-machine attribution in `crates/cairn-integrate/src/capability.rs`, and implement the shared authenticated bounded health/disposition report-validation and seeded-row read API primitive used by US5 and US6 in `crates/cairn-server/src/api.rs` (FR-728–FR-729, FR-838a–f, FR-851–FR-860)
+- [X] T036 Add pre-registered capture, decision/instruction, paraphrase, privacy, path, restart, and migration corpus metadata in `tests/feature005/corpora/manifest.json`
+- [X] T037 Add compile-time and schema lint tests that fail if a safe-event field reuses any sync-refused name or any new raw-transcript/raw-vendor-json storage field appears in `tests/tests/feature005_boundary_audit.rs` (depends on T007, T011; SC-730, SC-731, SC-751)
+- [X] T038 Add an authorization route inventory that fails when a new project-scoped Feature 005 endpoint lacks `require_member` or accepts identity from its body in `tests/tests/feature005_authorization_audit.rs` (depends on T023; FR-769, FR-894a)
+- [X] T039 Implement and register the reusable bounded event/command drain primitive—ordered claims, per-item outcomes, supported-version deferral, account/server binding hooks, backoff and stale-claim controls—in `crates/cairnd/src/sync.rs` and `crates/cairnd/src/main.rs`, while registering all foundation modules without changing the two-process architecture in `crates/cairn-server/src/main.rs` (depends on T009–T038)
+
+**Checkpoint**: Both migrations apply; typed events and complete references exist; no bare UUID is cross-domain identity; event/command spools and command API are authoritative-safe; consolidation claims are restartable and fifth-attempt-correct.
+
+---
+
+## Phase 3: User Story 1 — Work becomes knowledge without anyone asking (Priority: P1) 🎯 MVP
+
+**Goal**: A real no-tool coding session produces accurate, governed, provenance-bearing knowledge.
+
+**Independent Test**: Start with zero memories, drive one supported agent through investigate/change/test-pass without Cairn tools, and resolve the resulting knowledge back to its session and safe events.
+
+### Tests for User Story 1
+
+- [X] T040 [P] [US1] Write failing vendor fixtures for every declared event cell, file identity disposition, provenance field, unknown tool, subagent attribution, Claude/Codex semantic source, and OpenCode structural-only decline in `tests/tests/feature005_capture_matrix.rs` (depends on T035; SC-706, SC-707, SC-744) **Settled during implementation:** the declared matrix is fixed in `capability.rs::declared_matrix` rather than derived from the routing tables, because SC-706 makes the matrix the population under test and a criterion that read the implementation could always be satisfied by narrowing it.
+- [X] T041 [P] [US1] Freeze the SC-701a holdout corpus of twenty qualifying decision/instruction sessions for Claude Code and Codex CLI in `tests/feature005/corpora/sc701a-holdout.json`, and prove it on durable `memories` in `tests/tests/feature005_semantic_durable.rs`, keeping the capture-layer token and decline contracts in `tests/tests/feature005_semantic_signals.rs` (SC-701a, SC-701b) — **Repaired.** The original test counted `EventContent::Decision` values out of `capture()` against a table of sixteen positives and four declines, on a path its own header called "no PostgreSQL, no daemon". It also could not have satisfied the criterion: R7 gave eight durable decisions and all eight instruction rows were unique, so none reached R8's two-session threshold — a reachable maximum of 8/20 against a required 14. The corpus is now frozen as data, and the proof runs the real chain to PostgreSQL.
+- [X] T042 [P] [US1] Write failing extraction rule tests for R1–R8, no-worthy-knowledge cases, identical vendor-provenance invariance, all five kinds, source verification, and deterministic keys in `tests/tests/feature005_extraction.rs` (depends on T015, T036; FR-724, FR-795)
+- [X] T043 [P] [US1] Write failing adversarial extractor tests that attempt foreign domain/scope/owner, asserted durability/verification/supersession, invalid keys, foreign sources, and forbidden content in `tests/tests/feature005_governance.rs` (depends on T017, T036; SC-704, SC-734, SC-735, SC-741, SC-742, SC-749)
+- [X] T044 [P] [US1] Write failing idempotency/restart tests for unchanged reruns, fifty paraphrase pairs, additive evidence, stable corroboration identity, and twenty pre-registered crash points in `tests/tests/feature005_consolidation_restart.rs` (depends on T031, T036; SC-703, SC-736, SC-739)
+- [X] T045 [P] [US1] Write failing backlog isolation benchmark with 10,000 pending events and ten trials in `tests/tests/feature005_consolidation_backlog.rs` (depends on T031; SC-740, SC-748)
+- [X] T046 [US1] Replace the shared two-field payload allowlist with per-vendor typed field maps, local path relativization, redaction-before-vocabulary, deterministic signal mapping, and raw-payload disposal in `crates/cairn-integrate/src/agents/mod.rs` (depends on T040–T041) **Settled during implementation:** `SafeEventDraft`, `CaptureDecline` and `CaptureOutput` live in `cairn-core::event` and are re-exported from `agents/mod.rs`. They are the shape that crosses the capture-process boundary, so the wire request that carries them and the adapter that builds them must be the same type — two structurally identical definitions would compile and let one side gain a field the other silently dropped.
+- [X] T047 [P] [US1] Implement Claude Code session, tool, file, test, prompt, settled assistant, and subagent capture from the approved fields while excluding `StopFailure.last_assistant_message` and streaming deltas in `crates/cairn-integrate/src/agents/claude_code.rs` (depends on T046) **Settled during implementation:** three registrations are added (`UserPromptSubmit`, `PreToolUse`, `SubagentStop`) because a hook that is not registered never fires. `StopFailure` and `MessageDisplay` are registered nowhere and named in no field map, so an error string and a streaming fragment are unreachable by construction rather than by a rule somebody has to remember.
+- [X] T048 [P] [US1] Implement Codex CLI session, tool, patch/file, test, prompt, nullable settled assistant, and subagent capture from the approved fields while excluding `StopFailure` and streaming display text in `crates/cairn-integrate/src/agents/codex.rs` (depends on T046)
+- [X] T049 [P] [US1] Implement OpenCode structural capture and explicit `declined_by_cairn` semantic-signal status without reading beta prompt/context surfaces in `crates/cairn-integrate/src/agents/opencode.rs` (depends on T046) **Settled during implementation:** the decline is an empty `user_prompt`/`assistant_message` field list. There is no field to read, so the capability cannot be gained by an oversight in the router.
+- [X] T050 [US1] Convert approved canonical events into daemon-assigned ordinal/UUID identities, spool them transactionally, and record content-free deadline/drop/refusal dispositions in `crates/cairnd/src/capture.rs` (depends on T019–T022, T046–T049) **Settled during implementation:** identity is assigned by the store inside the spooling transaction, and the hook sends drafts carrying neither `event_id` nor `session_seq`. The session vocabulary travels *to* the hook rather than the prompt text to the daemon, because a set of tokens already visible to anyone who can read the repository may cross that boundary and a prompt fragment may not (FR-730).
+- [X] T051 [US1] Preserve boundary-class replies and capture-class fail-soft deadlines across the richer event path in `crates/cairnd/src/integrations.rs` (depends on T050; FR-749a–d) **Settled during implementation:** the capture travels on the existing `CanonicalEvent` request rather than as a second one. The hot path is one hook invocation per tool call, and two connects and two writes where one would do is the largest cost Cairn adds to a session (SC-007). The reply is never changed by what the capture half did.
+- [X] T052 [US1] Define the replaceable extractor trait, bounded `ExtractionInput`, deterministic R1–R8 baseline, project/account scoping, no hosted-provider default, and a fail-closed disclosure/retention/training/caching/isolation compliance gate for any future hosted configuration in `crates/cairn-server/src/extract.rs` (depends on T042; FR-763a–b, FR-805a–f) **Settled during implementation:** R3, R5, R6 and R8 are a separate deterministic aggregator and not part of `SemanticExtractor`, because a session-scoped `ExtractionInput` cannot see across sessions and widening it is what FR-805a1 forbids. A candidate's content carries **no backticks and no command line**: the privacy screen treats a backtick as a command substitution, so a claim written that way is refused by its own gate 3 — the same reasoning the contract already applies to the value key.
+- [X] T053 [US1] Implement fixed-order candidate governance: source/key/privacy/domain/scope/ownership/key-evidence/dedup/reinforcement/conflict/no-supersession/verification/team-proposal gates in `crates/cairn-server/src/consolidate.rs` (depends on T032, T043, T052; FR-794–FR-812) **Settled during implementation:** (a) gate 1 verifies a session rule against the batch's project *and* session and a project rule against the project, because R3/R5/R6/R8 exist precisely to span sessions and one scope would refuse every candidate they can produce; the two verified sets are kept apart so a session rule cannot borrow a project rule's verification. (b) The baseline resolves every candidate to the `project` domain — project-session activity establishes knowledge about that project and nothing else — so an extractor claiming `personal` or `team` changes nothing, which is the outcome SC-742 requires.
+- [X] T054 [US1] Persist deterministic candidates, additive source events, corroboration endpoints excluded from recall/counts, fixed relation bases, run counters, refusals without text, and provenance atomically in `crates/cairn-server/src/consolidate.rs` (depends on T044, T053; FR-797–FR-808) **Settled during implementation:** (a) a project rule's candidate is named with the **nil** session, as its relations already are, because naming it with the pass's session would give one project-wide claim a fresh corroboration and another increment on every pass forever. (b) A candidate never reinforces a record it created itself: a reclaim after a committed governance transaction would otherwise corroborate its own creation, which is the second durable effect SC-703 and SC-739 forbid. (c) The reinforcement count is bumped only when the relation row was actually inserted, so the primary key is what makes a re-execution identical to a single run.
+- [X] T055 [US1] Implement consolidation's project/personal/team exact normalized-key and text query paths using the final schema-v4 FTS indexes from T007, without changing migration schema or adding embeddings, in `crates/cairn-server/src/consolidate.rs` (depends on T007, T015, T053; FR-806) **Settled during implementation:** the three exact-key paths and the three full-text paths answer one governance question — whether knowledge this account can already read states this claim. The index narrows and exact normalized-content equality decides, so nothing here is a similarity judgement.
+- [X] T056 [US1] Record consolidation throughput, backlog depth/oldest/failures, run outcomes, and ingest-independent failure metrics in `crates/cairn-server/src/consolidate.rs` (depends on T045, T054; FR-793c, FR-807, FR-813–FR-814) **Settled during implementation:** exposed as `GET /api/consolidation/health`, authenticated and deliberately not project-scoped: the backlog belongs to the deployment's single consolidation task, and scoping it per project would suggest a per-project worker that does not exist.
+- [X] T057 [US1] Persist vendor provenance and server-bound project/account/session attribution without consulting provenance in extraction or ranking in `crates/cairn-server/src/events.rs` (depends on T029, T042; FR-723–FR-725, FR-779) **Settled during implementation:** `safe_events` already carries the vendor provenance and the server-bound project, account and session, so no column was added. What needed proving was the other half — that nothing in extraction or ranking consults it — and that is asserted by a vendor-invariance test rather than by inspection.
+- [X] T058 [US1] Configure and use the T039 shared drain primitive for normal capture, preserving session-sequence order and accepted/duplicate/refused/version-deferred handling, in `crates/cairnd/src/sync.rs` (depends on T039, T050; FR-770–FR-775) **Settled during implementation:** the T039 drain already claims in `(created_at, session_id, session_seq)` order, which is monotonic in `session_seq` within a session because the ordinal is allocated in the transaction that inserts the row. No second ordering was added; the requirement is met by the primitive rather than beside it.
+- [X] T059 [US1] Surface capture/consolidation dispositions and fixed refusal reasons through daemon status data in `crates/cairnd/src/handlers.rs` (depends on T050, T056)
+- [X] T060 [US1] Make all T040 capture-matrix assertions pass without narrowing any declared agent/event cell in `tests/tests/feature005_capture_matrix.rs` (depends on T046–T051, T057–T059)
+- [X] T061 [US1] Make the frozen SC-701a corpus pass on durable knowledge — at least fourteen of twenty qualifying sessions producing a matching `decision` or `convention` in `memories`, and no ungrounded transient word in any of them — in `tests/tests/feature005_semantic_durable.rs` (depends on T046–T057; SC-701a, SC-701b) — **Settled: 20/20, fourteen decisions and six conventions, with no production change.** The frozen corpus was run against production exactly as it stood; R7 and R8 met it unaltered, which is the outcome that makes the freeze worth having.
+- [X] T062 [US1] Make all T043 governance and privacy adversarial assertions pass with identical outcomes for hostile versus empty extractor output in `tests/tests/feature005_governance.rs` (depends on T053–T054)
+- [X] T063 [US1] Make all T044 restart/idempotency/paraphrase assertions pass with zero duplicate effects in `tests/tests/feature005_consolidation_restart.rs` (depends on T054–T056)
+- [X] T064 [US1] Implement the story-level no-tool real-repository acceptance test for Claude Code, Codex CLI, and OpenCode in `tests/tests/feature005_us1_autonomous_learning.rs` (depends on T060–T063; SC-701, SC-702)
+
+**Checkpoint**: User Story 1 passes independently; accepted safe activity becomes governed durable knowledge without a tool call.
+
+---
+
+## Phase 4: User Story 2 — A second session starts already knowing (Priority: P2)
+
+**Goal**: Claude Code and Codex CLI receive deterministic bounded context automatically, with complete traces and truthful delivery status.
+
+**Independent Test**: Seed authorized records directly through commands, open a related session, and verify delivery without depending on Story 1's capture path.
+
+### Tests for User Story 2
+
+- [X] T065 [P] [US2] Write failing selection tests for domain-separated ordering, project reserve/non-displacement, stable explanations, full versus 25% incremental budgets, unchanged-item dedup, changed-item re-entry, and identical-UUID coexistence in `tests/tests/feature005_retrieval.rs` (depends on T025, T034; SC-709–SC-711, SC-767)
+- [X] T066 [P] [US2] Write failing trace/privacy tests proving every authenticated retrieval creates a `requested` trace, generation failure becomes `failed` without `delivered_context`, and complete considered/selected refs, 90-day retention, no briefing text, owner withholding, dense post-filter ranks, scoped budgets, and membership refusal hold in `tests/tests/feature005_retrieval_traces.rs` (depends on T023, T034; SC-729, SC-761)
+- [X] T067 [P] [US2] Write failing delivery tests for generation failure, generated-plus-transmission failure, generated-plus-transmission success, duplicate outcome idempotency, foreign account/session/trace refusal, Claude/Codex session-open and prompt-time delivery, compact-triggered reopen, no post-compact return, OpenCode decline, and acknowledgement remaining `unavailable / no evidence` in `tests/tests/feature005_delivery.rs` (depends on T023, T035; SC-708, SC-712, SC-729)
+- [X] T068 [P] [US2] Write failing cache tests for 64 KiB/200-session bounds, refill, stale labels, account partition/invalidation, and fresh-unavailable behavior in `tests/tests/feature005_briefing_cache.rs` (depends on T022; SC-718)
+- [X] T069 [US2] Implement server-side authorized per-domain retrieval, section-order ranking, project reserve, pattern general-pool treatment, full/incremental budgets, complete-reference dedup, and four deterministic degradation levels in `crates/cairn-server/src/retrieve.rs` (depends on T065; FR-817–FR-838) **Settled during implementation:** (a) the reserve is **withheld, never released** — one budget is shared by two assemblers, and the server withholds Level 0's share for the daemon rather than spending it on durable memory; `reserved_for_level0` is reported so no caller recomputes the fraction. (b) `degradation_level` says how far the pipeline got and never how many items came out: §5's table and §4.1's worked example disagree, and the example governs, so a delivery legitimately emptied by dedup is `full` with a spend of zero. (c) A caller may send a **smaller** `budget_tokens`, clamped server-side — a per-machine budget and `cairn context --budget` are both real, and ignoring them returned more than the caller could spend. (d) There is no `not_visible_to_reader` selection rule: owner-scoped reads are written as `owner_user_id = $reader`, so a record the caller may not see never becomes a candidate.
+- [X] T070 [US2] Persist a trace before each authenticated retrieval generation, transition it to `generated` or generation-stage `failed`, and implement idempotent transactional transmission outcomes where only `generated → transmitted` upserts selected `reference_key` rows into `delivered_context`, while `generated → failed` writes no delivery rows; include bounded retention sweeps in `crates/cairn-server/src/retrieve.rs` (depends on T066–T069; FR-839–FR-850) **Settled during implementation:** the trace is read with `FOR UPDATE` **inside** the transaction that acts on it. Reading first and updating under a state guard left a window in which a concurrent report moved the state, after which the guarded update matched nothing while the delivery insert still ran — and a retry after a lost response is the ordinary case this endpoint is built for, so the window is one the happy path walks into.
+- [X] T071 [US2] Add authenticated `POST /api/retrieve` plus `POST /api/retrieval-traces/{trace_id}/transmission`; bind retrieve identity from the session, bind outcome account/project/session from the stored trace, accept only bounded outcome/reason fields, refuse foreign/conflicting reports, and expose no caller-selectable authority or acknowledgement in `crates/cairn-server/src/api.rs` (depends on T069–T070)
+- [X] T072 [US2] Implement daemon delivery orchestration, deadline degradation, and retry-safe reporting of the actual post-response hook transmission outcome by server-issued `trace_id`, plus the account-bound bounded outage cache, in `crates/cairnd/src/deliver.rs`, then register it in `crates/cairnd/src/main.rs` (depends on T068, T071) **Settled during implementation:** the daemon **pushes what it has queued before it retrieves**. Retrieval binds its project from a session the server holds, and a session created moments earlier is still in this machine's outbox — without the push, the first thing every new session did was ask about a session the server had never seen, so automatic delivery at session open could never have worked. The push is bounded and its failure is not an error. The daemon also keeps its own `patterns` selection: the server can only offer the account's own patterns most-recent-first, while the daemon matches them against this project's recorded signals.
+- [X] T073 [US2] Return automatic context at Claude Code session-open and prompt-submit hooks, including session-open `compact` restoration, in `crates/cairn/src/hook.rs` (depends on T072) **Settled during implementation:** a build told the server supplies the durable sections does not read them at all, rather than reading them and letting the merge overwrite them. Paying for content that is then thrown away, plus a replacement costing its own amount, put the briefing outside the budget it stated (FR-029).
+- [X] T074 [US2] Return automatic context at Codex CLI session-open and prompt-submit hooks, including session-open `compact` restoration, in `crates/cairn-integrate/src/agents/codex.rs` (depends on T072)
+- [X] T075 [US2] Keep OpenCode automatic delivery absent while exposing manual MCP context/search and explicit `declined_by_cairn` capability in `crates/cairn-integrate/src/agents/opencode.rs` (depends on T035, T072)
+- [X] T076 [US2] Preserve manual `cairn_context`, `cairn_search`, and `cairn_remember` overrides against the server path in `crates/cairnd/src/handlers.rs` (depends on T071–T072; FR-831)
+- [X] T077 [US2] Make T065 selection/budget/dedup tests pass, including personal `id-X` not suppressing team `id-X`, in `tests/tests/feature005_retrieval.rs` (depends on T069–T071)
+- [X] T078 [US2] Make T066 trace/privacy tests pass, including generation failure leaving one failed trace and zero delivery rows, without opaque references, rank gaps, cross-account patterns, or persisted briefing text in `tests/tests/feature005_retrieval_traces.rs` (depends on T070–T071)
+- [X] T079 [US2] Make T067 transmission-outcome and delivery-point tests pass with one durable effect per duplicate report, no delivery row on either failure path, refusal of foreign trace use, and acknowledgement always `unavailable / no evidence` in `tests/tests/feature005_delivery.rs` (depends on T071–T075)
+- [X] T080 [US2] Make T068 outage-cache account-isolation tests pass in `tests/tests/feature005_briefing_cache.rs` (depends on T072)
+- [X] T081 [US2] Add deterministic retrieval latency/degradation measurements for session-open and prompt-time deadlines in `tests/tests/feature005_retrieval_performance.rs` (depends on T069–T075; FR-835–FR-836) **Settled during implementation:** written as a comparison rather than a latency threshold. A wall-clock assertion on shared hardware measures the runner; what FR-835 asks is that two retrievals over identical inputs at the same declared level return byte-identical content, which is the form a timing or caching bug actually breaks.
+- [X] T082 [US2] Implement the story-level second-session no-tool acceptance test for Claude Code and Codex CLI in `tests/tests/feature005_us2_automatic_recall.rs` (depends on T077–T081) **Settled during implementation:** knowledge is seeded through the server directly, never through Story 1's capture path, so a capture regression cannot fail this test and teach nothing about delivery.
+
+**Checkpoint**: User Story 2 passes independently from command-seeded knowledge; context is bounded, deduplicated, traced, authorized, and delivered only on settled vendor surfaces.
+
+---
+
+## Phase 5: User Story 3 — Losing a machine does not lose knowledge (Priority: P3)
+
+**Goal**: Server-accepted project, personal, team, and pattern records survive local-store loss; losses are named honestly.
+
+**Independent Test**: Seed and accept all durable domains plus a pattern, delete/recreate SQLite, and verify server restoration plus an exact loss inventory.
+
+- [X] T083 [P] [US3] Write failing local-loss tests for project/personal/team/pattern restoration from directly seeded server records, cache-empty/stale reporting, and exact lost categories in `tests/tests/feature005_local_loss.rs` (depends on T034; SC-713, SC-714, SC-738)
+  - Settled during implementation: the categories are named in prose ("pattern applications", "local-only memory") rather than by table, because one category can span several tables and the report is read by a person.
+- [X] T084 [P] [US3] Write failing owner-only pattern lifecycle tests that compile against only T025's command shape—not an implemented repository—for safe promotion, deterministic duplicate identity, trust narrowing, list/forget tombstone behavior, retrieval/traces/API isolation, and team widening only through a separate proposal in `tests/tests/feature005_patterns.rs` (depends on T025, T034; SC-760–SC-762)
+  - Settled during implementation: the changes-feed test must percent-encode the cursor — a bare `+` in `+00:00` decodes to a space, and `PageCursor::decode` is deliberately lenient, so an unencoded cursor silently restarts the feed.
+- [X] T085 [US3] Implement and wire the actual safe personal-domain pattern promote/list/forget repository lifecycle behind T025's generic boundary, with credential-bound owner, deterministic content identity, `sanitized` server trust, tombstones, and no local-only fields, in `crates/cairn-server/src/commands.rs` and `crates/cairn-server/src/api.rs` (depends on T084)
+  - Settled during implementation: re-promoting forgotten content revives the row (the owner asked for it back), and a second forget answers success rather than 404 so a correct drain does not retry forever.
+- [X] T086 [US3] Implement server-wins cache refill and invalidation for project/personal/team knowledge and owner-only patterns in `crates/cairn-store/src/global.rs` (depends on T021, T085; FR-703–FR-710a)
+  - Settled during implementation: `cached_patterns` is a new table at local schema v9 rather than a relaxation of `reusable_patterns`, whose `signals`/`signal_digest`/`origin_ref` are NOT NULL and are refused names a server row cannot supply. `repo::import_memory` also moved off insert-once — project memory was the last domain still refusing a server correction.
+- [X] T087 [US3] Keep pattern applications, evidence, verification runs, observations, checkpoints, and diagnostics local-only while exposing their durability class in `crates/cairn-store/src/diag.rs` (depends on T005; FR-705–FR-708)
+  - Settled during implementation: the category list is held exhaustive against the schema by a test, and `survives_local_loss` documents that a cache survives the knowledge, not the rows.
+- [X] T088 [US3] Route pattern promotion/forget and explicit personal/team/project reads through the server-authoritative command/read boundary in `crates/cairnd/src/patterns.rs` (depends on T085–T087)
+  - Settled during implementation: forget queues the server tombstone before dropping the local row, because the canonical identity is derived from three fields that go with it. Also removed `sync::parse_global_namespace`, a second namespace parser that made the new lane invisible to the outbox walk.
+- [X] T089 [US3] Implement local-store loss inventory, cache refill status, and the local-only durability warning at the point that choice is offered in `crates/cairnd/src/handlers.rs` (depends on T086–T087)
+  - Settled during implementation: the local-only warning is withheld before cutover, where every memory is local and the note would describe the installation rather than the write.
+- [X] T090 [US3] Make T084 pattern lifecycle/idempotency/privacy tests pass, including another account sharing the project, in `tests/tests/feature005_patterns.rs` (depends on T085, T088)
+  - Settled during implementation: falsified by dropping the owner filter, randomising identity, and dropping the tombstone filter — each caught.
+- [X] T091 [US3] Make T083 local-loss tests pass and prove only server-unaccepted/local-machine categories disappear in `tests/tests/feature005_local_loss.rs` (depends on T086–T089)
+  - Settled during implementation: falsified by reclassifying a local-only category as Cache and by reverting the pattern merge to insert-once — each caught.
+- [X] T092 [US3] Implement the story-level destroy/recreate/restore acceptance test in `tests/tests/feature005_us3_durability.rs` (depends on T090–T091)
+  - Settled during implementation: re-linking the checkout after the deletion is setup, not repair — `projects.server_project_id` is a local row and `cairn link` deliberately never applies a remote-derived candidate silently (FR-064). Falsified by removing the patterns lane, which times the story out.
+
+**Checkpoint**: User Story 3 passes independently; server-accepted knowledge survives local deletion and exclusions are explicit.
+
+---
+
+## Phase 6: User Story 4 — The server goes away and the agent keeps working (Priority: P4)
+
+**Goal**: Capture and explicit commands fail soft, queue safely, replay once, and never create local authority.
+
+**Independent Test**: Seed a session, remove server connectivity, continue capture/commands/retrieval, restore connectivity, and inspect spools plus canonical rows.
+
+- [X] T093 [P] [US4] Write failing outage tests for agent deadlines, event spooling/replay, duplicate responses as success, zero local durable knowledge, and backlog visibility in `tests/tests/feature005_outage.rs` (depends on T022, T029; SC-715–SC-717)
+  - Settled during implementation: the outage is created by editing `config.json`'s `server_url` and restarting, not by `auth token set --server` — the endpoint is part of the identity, so re-pointing through the CLI correctly forgets the account and turns an outage test into a sign-out test.
+- [X] T094 [P] [US4] Write failing credential/server-switch tests for event and command account binding and exact server-instance refusal in `tests/tests/feature005_identity_outage.rs` (depends on T022; FR-790–FR-791)
+  - Settled during implementation: FR-790a's read-direction rule was already
+    implemented by US2's account-keyed outage cache; the test asserts it rather
+    than adding it. What this file established is **FR-790**, the account rule,
+    in both directions and for both spools.
+  - **Corrected after US5.** Its replacement-deployment test did not establish
+    FR-791 and could not: `Server::replaced_at_same_address` gives the new
+    process a database of its own, so the old account does not exist in it and
+    the account check alone refuses everything that test asserts. Delete every
+    instance check and it still passes. FR-791 is established instead by
+    `tests/tests/feature005_spool_instance_binding.rs`, which holds account,
+    token, project, session, spooled rows, URL, port and process image identical
+    and changes only the value in `server_instance`.
+- [X] T095 [P] [US4] Write failing capacity tests for oldest capture-class shedding, boundary-row preservation, fully-boundary saturation, content-free drop records, and automatic recovery in `tests/tests/feature005_spool_capacity.rs` (depends on T022; FR-785)
+  - Settled during implementation: a seventh test was added for the shape the first six could not falsify — a shed that actually deleted rows followed by a refusal, which is the only case where the saturation rollback is load-bearing.
+- [X] T096 [US4] Extend the T039 shared event/command drain primitive with bounded outage loops, exponential backoff, reconnect scheduling and stale-claim recovery in `crates/cairnd/src/sync.rs` (depends on T039, T093)
+  - Settled during implementation: `release_event_claims`/`release_command_claims` had no production caller; they now run once at daemon start and deliberately not per tick, which would race a live drain. The drain also translates the local project id to the server's — without it every project-scoped queued command was undeliverable.
+  - **Extended after US5.** The claim additionally binds the server instance
+    (see T099). The drain passes `context.peer_instance` alongside the account,
+    so both halves of the identity come from the one credential read the drain
+    already performs.
+- [X] T097 [US4] Queue explicit remember/supersede/relate/pattern/verification commands as accepted-for-delivery—not durable—when unreachable in `crates/cairnd/src/handlers.rs` (depends on T027, T096; FR-815a)
+  - Settled during implementation: only 4 of 13 command kinds were routed. `pin`'s `reason` and `reinforce`'s `from_memory_id` deliberately do not travel, because the server's handlers do not read them and a field that crosses and is dropped is worse than one that never left.
+- [X] T098 [US4] Enforce spool capacity, boundary protection, saturation, and disposition accounting atomically in `crates/cairn-store/src/spool.rs` (depends on T095)
+  - Settled during implementation: capacity, boundary protection and saturation were already correct from Foundations; US4 added falsification rather than behaviour.
+- [X] T099 [US4] Preserve exact credential and server-instance bindings across drain, sign-out, and re-authentication in `crates/cairnd/src/sync.rs` (depends on T094, T096)
+  - Settled during implementation: the **credential** binding was already exact —
+    one credential read per drain, no fallback identity, exact `account_id` on
+    the claim — and US4 proved that end to end.
+  - **Corrected after US5.** The original note also claimed the server-instance
+    binding was already exact. It was not: spool rows carried no instance at
+    all, so a deployment replaced or restored from backup at a familiar address
+    would have inherited its predecessor's backlog. Local schema **v10** adds
+    `server_instance_id` to `event_spool` and `command_spool`, and the claim
+    predicate now requires **both** an exact `account_id` and an exact
+    `server_instance_id`. A row bound elsewhere is held — not claimed, not
+    refused, no attempt spent — and reported as `other_instance` with
+    `blocked_reason: server_instance_mismatch`. `NULL` means "queued before this
+    store knew an instance" and is adopted once, over `NULL` only, inside the
+    claim transaction; the sole rebinding is provisional → reported for a peer
+    upgraded in place, keyed on the provisional id and never on the URL.
+- [X] T100 [US4] Surface event/command depth, oldest entry, retry blocker, saturation, permanent refusals, and fresh-knowledge-unavailable state in `crates/cairnd/src/handlers.rs` (depends on T097–T099; FR-788–FR-792)
+  - Settled during implementation: FR-792 was two thirds unimplemented. `oldest_at` and `blocked_reason` added, with `server_unreachable` and `no_account` supplied by the caller because the rows cannot show either.
+  - Settled again, after CI: the two caller-supplied reasons were read out of
+    **process-local** state — `Daemon::server_unreachable` and
+    `Daemon::last_observed_instance` — and neither survives the daemon being
+    replaced. `supervise` exits a daemon within one two-second tick of another
+    owning its socket, and any command starts one (FR-046), so the process that
+    watched a replacement deployment arrive was routinely gone by the time an
+    operator asked what was wrong; the survivor, having observed nothing, fell
+    back to the store's own binding and reported no mismatch while the whole
+    backlog was queued for a server that no longer answered. Measured 5 failures
+    in 80 on CI; reproduced deterministically as `other_instance = 0` against
+    three undelivered rows.
+    Reviewed material did not settle where status gets reachability or peer
+    identity from at all, so this was a **specification gap** rather than a
+    coding slip: FR-792a–FR-792d and SC-718a now state it. Status takes its own
+    bounded, read-only `GET /api/version` sample while assembling a report that
+    has undelivered rows to explain; a cached observation is telemetry and
+    decides nothing; the blocked-reason precedence is published rather than left
+    to `if`/`else` order. The `server_unreachable` latch is deleted — it was the
+    same defect in the reachability half.
+    The probe is opt-in on the wire (`Request::Status { spool_reason }`) because
+    `cairn agents`, `connect`, `repair` and `disconnect` reach the same request
+    for `sessions_awaiting_handoff` alone, and FR-105 forbids detection from
+    requiring network access.
+- [X] T101 [US4] Make T093 outage/replay/no-local-authority tests pass in `tests/tests/feature005_outage.rs` (depends on T096–T100)
+  - Settled during implementation: found that `cairn memory add` printed "Remembered ?" for a queued command, which claims a durability it does not have.
+- [X] T102 [US4] Make T094 credential/cache/server-instance isolation tests pass in `tests/tests/feature005_identity_outage.rs` (depends on T099–T100)
+  - Settled during implementation: passed once the account and instance bindings were exercised end to end; no production change needed.
+- [X] T103 [US4] Make T095 capacity and content-free drop tests pass in `tests/tests/feature005_spool_capacity.rs` (depends on T098–T100; SC-752, SC-753)
+  - Settled during implementation: falsified by four mutations, three caught by the original six tests and the fourth only by the seventh.
+- [X] T104 [US4] Add repeated response-loss replay trials proving one canonical event, one consolidation input, and one durable effect in `tests/tests/feature005_replay_idempotency.rs` (depends on T096, T101; SC-716)
+  - Settled during implementation: found that `ON CONFLICT (event_id)` named only one of two equivalent unique constraints, so a racing replay answered 500 instead of `duplicate`. Data was never at risk; the answer was.
+- [X] T105 [US4] Implement the story-level mid-session outage/recovery acceptance test in `tests/tests/feature005_us4_fail_soft.rs` (depends on T101–T104)
+  - Settled during implementation: the harness gained `Server::go_offline`/`come_back`, because stopping the process is the only mechanism that keeps the address, the data and the credential and removes only reachability.
+
+**Checkpoint**: User Story 4 passes independently; outage changes freshness and queue state, never agent usability or knowledge authority.
+
+---
+
+## Phase 7: User Story 5 — A user can see what Cairn learned, and why (Priority: P5)
+
+**Goal**: Authenticated web/API views reconstruct the lifecycle without exposing local-only or cross-account material.
+
+**Independent Test**: Seed canonical events, a run, candidate, knowledge, relations, verification, and retrieval directly, then reconstruct the path using only web APIs/UI.
+
+- [X] T106 [P] [US5] Write failing API tests for funnel stages/zero-vs-null, activity default/full sets, memory details, runs, traces, health, pagination, and every project membership/admin refusal in `tests/tests/feature005_control_plane_api.rs` (depends on T038; SC-727, SC-728)
+  - Settled during implementation: the five new project routes are registered with `authorization_audit`'s non-member sweep, so the refusal is proved by the audit rather than per-handler.
+- [X] T107 [P] [US5] Write failing browser tests for the complete session→event→run→candidate→knowledge→retrieval path, local-only notices, domain separation, pattern owner privacy, and team compare-and-swap actions in `web/e2e/feature005-control-plane.spec.ts`, with canonical seeded fixtures in `web/e2e/seed.ts` (depends on T106)
+  - Settled during implementation: the acceptance is deliberately split. Browser
+    navigation exercises the screens `web-control-plane.md` actually specifies —
+    funnel, activity, memory list and detail, retrieval list and detail, agents,
+    domains, team, system, admin users — while the **run and candidate hops are
+    reconstructed through the public control-plane APIs** in the same Playwright
+    suite. That is not a shortcut around a missing page: the contract specifies
+    no consolidation-run screen, and inventing one to make a browser hop
+    available would have been adding UI the contract does not ask for in order
+    to satisfy a test. What SC-728 requires is that the path be followable
+    without database or log access, and the API half satisfies that exactly.
+  - Settled during implementation: privacy assertions are written as *absences*
+    of distinctive seeded strings, because asserting that an evidence summary
+    renders passes equally on a page that also prints the content beneath it.
+- [X] T108 [US5] Implement bounded membership-guarded funnel, activity, consolidation-run, retrieval-trace and system-health read handlers, consuming T035's shared integration-health read API rather than owning it, in `crates/cairn-server/src/api.rs` (depends on T035, T106; FR-879–FR-882, FR-886–FR-887, FR-891, FR-894–FR-895)
+  - Settled during implementation: consumes T035's shared health read rather than reimplementing it; funnel counts are nullable end to end so zero and unavailable stay distinct (FR-879).
+- [X] T109 [US5] Extend memory list/detail APIs with origin, provenance, evidence summary without content, verification, relations, reinforcement, and retrieval usage in `crates/cairn-server/src/api.rs` (depends on T106; FR-883–FR-885)
+  - Settled during implementation: evidence travels as a summary — counts and kinds — and never as content.
+- [X] T110 [US5] Implement owner-scoped personal/pattern feeds and team visibility rules without cross-account enumeration in `crates/cairn-server/src/global.rs` (depends on T023, T106; FR-888, FR-892–FR-893)
+  - Settled during implementation: owner-scoped feeds are held to the whole-crate `owner_user_id` audit added in US3.
+- [X] T111 [US5] Extend typed API clients for all Feature 005 control-plane shapes, nullable counts, complete references, and withheld fields in `web/lib/api.ts` (depends on T108–T110)
+  - Settled during implementation: `verification` is a string on the memory list and an object on the detail, which is what `web-control-plane.md` §2 specifies; the client types both rather than reconciling them silently.
+- [X] T112 [P] [US5] Extend the project dashboard with the twelve-stage memory funnel and zero/unavailable distinction in `web/app/(app)/projects/[id]/page.tsx` (depends on T111)
+  - Settled during implementation: no `?? 0` anywhere in the funnel path — a null stage renders as unavailable, never as zero (FR-879).
+- [X] T113 [P] [US5] Implement the semantic activity feed with declared default kinds and explicit show-all control in `web/app/(app)/projects/[id]/activity/page.tsx` (depends on T111)
+  - Settled during implementation: the response echoes the kinds it applied, so the UI shows what it is filtering by rather than what it asked for.
+- [X] T114 [P] [US5] Implement the bounded memory explorer in `web/app/(app)/projects/[id]/memory/page.tsx` (depends on T111)
+  - Settled during implementation: `?domain=` is now honoured or refused by the API rather than silently ignored.
+- [X] T115 [P] [US5] Implement memory detail with provenance, evidence-local notice, verification, relations, reinforcement, origin, and retrieval usage in `web/app/(app)/projects/[id]/memory/[memoryId]/page.tsx` (depends on T111)
+  - Settled during implementation: evidence is summarised by count and kind; the page asserts no content path exists to render.
+- [X] T116 [P] [US5] Implement retrieval trace list and filtering in `web/app/(app)/projects/[id]/retrievals/page.tsx` (depends on T111)
+  - Settled during implementation: budget and latency stay out of the trace list — they are per-account and belong to the detail.
+- [X] T117 [P] [US5] Implement retrieval detail without briefing text, preserving complete refs and scoped budgets in `web/app/(app)/projects/[id]/retrievals/[traceId]/page.tsx` (depends on T111)
+  - Settled during implementation: the server never stores the briefing, so there is nothing for the detail to withhold; the page renders references and costs only.
+- [X] T118 [P] [US5] Implement per-agent/per-machine integration health with evidence-kind, staleness, decline, failure, and no-evidence distinctions in `web/app/(app)/projects/[id]/agents/page.tsx` (depends on T111)
+  - Settled during implementation: staleness is computed client-side per §5, so the API does not send a `stale` flag.
+- [X] T119 [P] [US5] Implement visibly separate project/personal/pattern/team panels with owner-only patterns in `web/app/(app)/projects/[id]/domains/page.tsx` (depends on T111)
+  - Settled during implementation: the patterns panel calls the owner-scoped `GET /api/patterns` rather than a second read of the same table.
+- [X] T120 [P] [US5] Implement admin-only team proposal review using only existing atomic ratify/retire routes in `web/app/(app)/team/page.tsx` (depends on T111)
+  - Settled during implementation: ratify and retire use the existing atomic routes with their compare-and-swap; no client-side read-modify-write and no edit affordance.
+- [X] T121 [P] [US5] Implement admin-only ingest/consolidation/retrieval system health in `web/app/(app)/system/page.tsx` (depends on T111)
+  - Settled during implementation: sections report `null` rather than zero below server schema 4.
+- [X] T122 [P] [US5] Implement bounded admin user management using existing endpoints in `web/app/(app)/admin/users/page.tsx` (depends on T111)
+  - Settled during implementation: built on the existing admin endpoints only.
+- [X] T123 [US5] Add role/feature-aware navigation for activity, memory, retrievals, agents, domains, team, system, and admin users in `web/components/app-sidebar.tsx` (depends on T112–T122)
+  - Settled during implementation: admin entries are hidden for non-admins as a convenience, never as the control — the API refuses regardless.
+- [X] T124 [US5] Make API and browser acceptance paths pass without database/log access in `web/e2e/feature005-control-plane.spec.ts` (depends on T108–T123; SC-727, SC-728)
+  - Settled during implementation: `npx playwright test` runs against a release
+    `cairn-server` on real PostgreSQL and a production `next build`, and passes
+    51 tests across desktop and mobile with 1 skipped. Ten of those are this
+    story's: the walked lifecycle, the zero-versus-unavailable funnel, the two
+    raw-material absences, complete references, domain separation, co-member
+    pattern privacy, the team transition and its refusal, the admin-only
+    screens, and the API-only reconstruction. No test reads the database or a
+    log.
+  - Settled during implementation: running it found two real defects — the typed
+    client sent `content-type: application/json` with no body on ratify and
+    retire, so both were rejected while the UI reported nothing wrong; and
+    `us7.spec.ts` asserted the old generic error wording for a non-member, which
+    US5 replaced with an explicit refusal carrying the server's own words.
+
+**Checkpoint**: User Story 5 passes independently from seeded server data; the web tells the whole authorized story and never becomes an authority boundary.
+
+---
+
+## Phase 8: User Story 6 — Status tells the truth, including when it does not know (Priority: P6)
+
+**Goal**: Verification and integration health report only evidence actually established.
+
+**Independent Test**: Submit reports through both authenticated routes, exercise/no-op integration capabilities, and verify derived authority/state and no-evidence distinctions.
+
+- [X] T125 [P] [US6] Write failing verification tests for both HTTP routes always assigning `remote_attested`, authority/report-id/refused-field rejection, server-only `cairn`, no baseline `remote_cairn`, derivation transitions, and duplicate identity including account in `tests/tests/feature005_verification_authority.rs` (depends on T034; SC-765, SC-767)
+  - Settled during implementation: written before the handler existed and 11 of 20 failed against it; they found §10's order inverted, `pattern_id` not accepted as its own discriminator, and the attestation field named `attesting_agent` rather than `agent`.
+- [X] T126 [P] [US6] Write failing summary tests for project columns versus non-project `knowledge_verification`, same-UUID personal/team/pattern coexistence, raw-evidence absence, and authorization in `tests/tests/feature005_verification_summaries.rs` (depends on T034; SC-766, SC-767)
+  - Settled during implementation: found that a proposed team entry was reportable by any authenticated account, and that the refused-name list missed `value_digest`, `fingerprint`, `exit_code`, `observations`, `relevant_paths`, `content_norm_digest`, `detail`, `details` and `summary`.
+- [X] T127 [P] [US6] Write failing health tests for configured-vs-runtime, every matrix cell, failure stage, stale evidence, per-machine attribution, OpenCode declines, and receipt no-evidence in `tests/tests/feature005_health.rs` (depends on T035; SC-724–SC-726)
+  - Settled during implementation: found four real defects — `DeclinedByCairn.as_str()` returning `"unsupported_by_vendor"`, `supported` checking only for a timestamp, `runtime_failure` checking nothing at all, and `stage` unvalidated.
+- [X] T128 [US6] Implement authenticated run/attestation report ingestion, server-assigned report IDs/authority, full-reference/account natural-key idempotency, and same-transaction state derivation in `crates/cairn-server/src/verifysummary.rs` (depends on T125–T126; FR-811a–d, FR-811h–i)
+  - Settled during implementation: `assign_authority()` takes no arguments, so there is nothing for a route, a kind, an account or a payload to branch it on. Authorization runs before the payload is graded, so a caller who may not see a record is told nothing about it — including nothing about whether their request was well formed.
+- [X] T129 [US6] Wire `/api/verification/runs` and `/api/verification/attestations` without any caller-selectable authority in `crates/cairn-server/src/api.rs` (depends on T128)
+  - Settled during implementation: both routes call the same handler with the same authority constant; `/runs` differs only in not requiring an attesting agent.
+- [X] T130 [US6] Queue privacy-safe verification reports through the foundational T020/T025 command-spool boundary while keeping raw evidence facts/runs local in `crates/cairnd/src/verify.rs` (depends on T020, T025, T129; FR-707, FR-811c)
+  - Settled during implementation: four fields cross — reference, verdict, verifier kind, run time — and none is evidence. The local run's digests, detail, branch and commit stay put, and there is no server table for them.
+- [X] T131 [US6] Derive per-agent/per-capability/per-machine health from recorded introspection/observation evidence and explicit failure dispositions in `crates/cairn-integrate/src/capability.rs` (depends on T127)
+  - Settled during implementation: this is T035's boundary corrected, not a second health model.
+- [X] T132 [US6] Persist authenticated health/disposition reports and implement stale/no-evidence derivation behind T035's shared server API boundary in `crates/cairn-server/src/api.rs` (depends on T035, T131)
+  - Settled during implementation: the health row was already keyed on the account, so two accounts under one `writer_id` were stored apart; the read did not return the account, so attribution was lost on the way out.
+- [X] T133 [US6] Make T125 authority/idempotency tests pass, including two accounts reporting one project/team ref without collision in `tests/tests/feature005_verification_authority.rs` (depends on T128–T130)
+  - Settled during implementation: two accounts reporting one team reference stay two reports because the account is a quarter of the natural key; dropping it from the insert fails 7 tests.
+- [X] T134 [US6] Make T126 full-reference summary tests pass, including PatternRef insertion with null reference-domain slot and personal-domain owner resolution in `tests/tests/feature005_verification_summaries.rs` (depends on T128–T129)
+  - Settled during implementation: one derivation, two storage locations — `memories` columns for the project domain, `knowledge_verification` keyed by the complete reference for everything else.
+- [X] T135 [US6] Make T127 health truthfulness tests pass without converting no evidence into vendor absence or success in `tests/tests/feature005_health.rs` (depends on T131–T132)
+  - Settled during implementation: passed once `is_coherent` required an observation for both behavioural claims, and the stage was validated against its vocabulary.
+- [X] T136 [US6] Add an explicit hostile-route-choice regression proving the stronger-looking URL cannot create `remote_cairn` or `cairn` in `tests/tests/feature005_verification_authority.rs` (depends on T133; SC-765)
+  - Settled during implementation: 48 hostile attempts across two routes, four references and six payload dressings; the assertion is made over the server's stored rows and the summaries derived from them, not over its replies.
+- [X] T137 [US6] Implement the story-level configure-then-exercise status acceptance test in `tests/tests/feature005_us6_truthful_status.rs` (depends on T133–T136)
+  - Settled during implementation: most assertions are about what the status must *not* say — configured is not working, silence is not a fault, a failure at one stage is not a failure everywhere.
+
+**Checkpoint**: User Story 6 passes independently; route names and caller payloads cannot manufacture provenance or health.
+
+---
+
+## Phase 9: User Story 7 — An existing installation migrates without losing anything (Priority: P7)
+
+**Goal**: A populated Feature 004 store migrates resumably only after canonical possession, with explicit legacy-pattern ownership and safe cutover.
+
+**Independent Test**: Build a real schema-v7 store with every record/outbox/verification/pattern case, interrupt every phase, switch credentials after a pattern claim, and compare every record after retry.
+
+- [X] T138 [P] [US7] Write failing populated-v7 migration tests for inspect/drain/possession/switch/demote ordering, every drained reference shape, blocked rows, retained-local records, and record-level preservation in `tests/tests/feature005_migration.rs` (depends on T006, T008; SC-719–SC-723) — Settled: the fixture is a real v7 store — the shipped migrations run to v7, populated, then swapped under a stopped daemon and reopened by the current build, which migrates it to v10. Its WAL is checkpointed before the copy, without which the seeded rows stay in the fixture's own `-wal` and the upgraded store is mysteriously empty. Covers every drained shape, the third possession answer, and the window between the check and the demotion.
+- [X] T139 [P] [US7] Write failing legacy-pattern ownership tests for explicit claim, persisted owner/content-key/pattern-id before delivery, unclaimed retention, credential switch, other-owner refusal, and repeated same-owner idempotency in `tests/tests/feature005_pattern_migration.rs` (depends on T006, T084; SC-764) — Settled: ownership is claimed, never inferred. The inspect report labels the historical owner `unknown`; a claim persists owner, content key and derived id before anything is deliverable; a credential switch reports `author_mismatch` and re-keys nothing.
+- [X] T140 [P] [US7] Write failing migration restart/key tests for interruption at every phase, rechecked possession at demotion, normalized legacy keys, surfaced collisions, and zero duplicate rows in `tests/tests/feature005_migration_restart.rs` (depends on T016, T138; SC-721, SC-750) — Settled: each of the six phases is rewound in turn and the run re-enters exactly there. Uses a second minimal fixture for that cycle, because the populated one holds a team proposal by an account no test can sign in as, so its drain is permanently and correctly `blocked`.
+- [X] T141 [US7] Implement the exact per-author legacy-row eligibility and persisted-claimant pattern eligibility primitives used by migration drain in `crates/cairnd/src/sync.rs` (depends on T138–T139; FR-864a, FR-867b) — Settled: two pure functions, `legacy_row_eligibility` and `pattern_eligibility`, with unit tests. **Corrected during falsification:** the recorded author was consulted for project memories alone, which left shared team records judged only by their own state — and a mutation widening the rule changed nothing any test could see.
+- [X] T142 [US7] Implement legacy topic/value-key normalization through the shared normalizer and collision recording through existing conflict machinery in `crates/cairnd/src/migrate005.rs` (depends on T015, T140; FR-867a) — Settled: re-keying runs immediately before the payloads are built, through the shipped normalizers rather than a copy. Collisions become `conflicts_with` relations with basis `deterministic_rule`; neither side is discarded.
+- [X] T143 [US7] Orchestrate the completed T141 eligibility and T142 normalization primitives through a resumable migration state-machine core with injected retained-store and remote-operation interfaces—inspect, explicit pattern claim, drain, possession, authority-switch request, possession recheck, demotion and retained retry—without claiming retained-store, remote-endpoint or cutover-transaction implementation, in `crates/cairnd/src/migrate005.rs`, then register it in `crates/cairnd/src/main.rs` (depends on T138–T142; FR-861–FR-878) — Settled: one ordered pass over the phases, skipping only what is `done`. A `while let Some(p) = first_unfinished()` loop looks equivalent and hangs: a `blocked` phase is not `done`, so it re-enters forever. **Corrected during T138:** phase 5 took its candidate set from phase 3's in-memory reply, so a resumed run — a different process — demoted nothing and reported success.
+- [X] T144 [US7] Implement retained-local and immutable legacy-pattern-claim repositories with canonical dedupe keys in `crates/cairn-store/src/migrate.rs` (depends on T006, T139) — Settled: `retain` is insert-or-ignore on a canonical `dedupe_key` derived from `Reference::reference_key()` / `RelationRef::relation_key()`; `claim_pattern` decides from the row it reads and has no update path for owner or pattern id.
+- [X] T145 [US7] Implement migration registration/token-scoped legacy drain and bounded three-result possession endpoints for KnowledgeRef, PatternRef, and RelationRef in `crates/cairn-server/src/api.rs` (depends on T023, T025, T138) — Settled: register, drain, possession and complete. `entity_id` is a string on the wire, because a relation has no id of its own — typing it as a UUID rejected the whole body with a `422` and no error object whenever a relation drained.
+- [X] T146 [P] [US7] Write failing cutover compatibility tests for pre-cutover migration, post-cutover permanent `upgrade_required`, untouched legacy local data, ordinary local operation, upgraded-client retry stop, and server-instance binding in `tests/tests/feature005_cutover.rs` (depends on T009, T138; SC-746, SC-747) — Settled: all eight knowledge-bearing shapes refused with `upgrade_required`, a row-for-row snapshot proving the refusal touches nothing, non-knowledge sync and all three read feeds still working, and the migration drain accepted while `sync/batch` is refused.
+- [X] T147 [P] [US7] Write failing cutover verification tests for server demotion/audit counts, cleared unsupported values, untouched client states, and changes-feed omission in `tests/tests/feature005_verification_cutover.rs` (depends on T126; SC-763) — Settled: exactly the unsubstantiated verification is demoted and audited, the substantiated is untouched by value, and the changes feed stops carrying the verification object — which is the only channel between a cutover and a client's own derived state.
+- [X] T148 [US7] Implement admin compare-and-swap cutover, authority advertisement, and server-wide unsubstantiated verification demotion/audit in one transaction in `crates/cairn-server/src/api.rs` (depends on T145, T147; FR-811e–g, FR-876) — Settled: one transaction — compare-and-swap, audit, demote — and zero rows affected means already cut over, with nothing else run.
+- [X] T149 [US7] Refuse post-cutover knowledge-bearing sync shapes with permanent `upgrade_required` while preserving non-knowledge sync and all read feeds in `crates/cairn-server/src/sync.rs` (depends on T146, T148; FR-876a–e, FR-877) — Settled: shape-based, read fresh from the database per request, refusing before the item claims anything so the refusal touches no row.
+- [X] T150 [US7] Stop emitting server verification objects on the post-cutover changes feed so local run-derived state is never demoted remotely in `crates/cairn-server/src/sync.rs` (depends on T147, T148) — Settled: the `verification` key is absent post-cutover rather than null.
+- [X] T151 [US7] Add `cairn migrate --inspect|--claim-patterns|--run|--status|--retry-retained` and explicit upgrade-required rendering in `crates/cairn/src/main.rs` (depends on T143–T150) — Settled: five flags, exactly one per invocation. Combining them would read as a convenience and behave as a trap.
+- [X] T152 [US7] Make populated-v7 migration and individual blocked/retained reporting tests pass in `tests/tests/feature005_migration.rs` (depends on T143–T151) — Settled by fresh runs of `feature005_migration.rs` (6 tests).
+- [X] T153 [US7] Make credential-switch pattern ownership and repeated-claim tests pass with no second owner or pattern row in `tests/tests/feature005_pattern_migration.rs` (depends on T143–T151) — Settled by fresh runs of `feature005_pattern_migration.rs` (7 tests).
+- [X] T154 [US7] Make restart, key normalization, cutover, legacy-client, and verification-demotion tests pass in `tests/tests/feature005_migration_restart.rs` (depends on T143–T151) — Settled by fresh runs of `feature005_migration_restart.rs` (7 tests).
+- [X] T155 [US7] Implement the story-level populated Feature 004 migration acceptance test in `tests/tests/feature005_us7_migration.rs` (depends on T152–T154; FR-878) — Settled: the five commands in the order a person runs them, asserting the three promises — nothing lost, nothing duplicated, nothing reassigned — and then a fleet cutover behind them.
+
+**Checkpoint**: User Story 7 passes independently on a populated v7 store; migration is explicit, resumable, owner-safe, possession-gated, and cutover-safe.
+
+---
+
+## Phase 10: Polish & Cross-Cutting Validation
+
+- [X] T156 [P] Run the complete five-phase real-repository acceptance scenario with no Cairn tool in phases 1–2 and machine/server loss in phases 4–5 in `tests/tests/feature005_end_to_end.rs` (depends on T064, T082, T092, T105, T124, T137, T155) — Settled: all five phases in one run. Three assertions were wrong on the first pass and each was wrong toward something easier — provenance resolves through `candidate_source_events`, not `origin_session_id`; replay means redelivering spooled rows, not firing a hook twice; and the baseline for that comparison must be taken after the spool is empty.
+- [X] T157 [P] Execute and record at least ten real-repository trials per supported agent/capability and the independent-reviewer accuracy rubric results in `tests/feature005/acceptance-results.md` (depends on T156; SC-701, SC-708, SC-715) — Settled: 10 trials per agent, 30 sessions. claude_code 10/10, codex 10/10, opencode 10/10 trials producing durable records; every countable mechanical criterion 21/21, 21/21, 11/11. The two `by_review` criteria are scored by an independent reviewer and never by the test — the run exports each record's claim and cited events so a reviewer can do the judgement it would otherwise have manufactured.
+- [X] T158 [P] Inspect every centrally persisted table after the adversarial corpus and assert zero transcripts, raw tool output, credentials, absolute paths, arbitrary vendor JSON, refused candidate text, or raw evidence in `tests/tests/feature005_central_privacy.rs` (depends on T062, T133; SC-730, SC-741) — Settled as an adversarial gate: nine forbidden classes plus two structural smuggling attempts, each swept across every base table and column enumerated from `information_schema` at call time. Mutation-checked — removing the ingest content screen fails it.
+- [X] T159 [P] Compare the final dependency manifest to the Feature 005 baseline and fail on a datastore, broker, worker-platform, graph-database, or mandatory-embedding addition in `tests/tests/feature005_architecture.rs` (depends on T001; SC-737) — Settled: zero dependencies added since the recorded baseline, across every `Cargo.toml` the baseline names.
+- [X] T160 [P] Re-run capture deadline, session-open/prompt retrieval deadline, and 10,000-event backlog benchmarks with stored measurements in `tests/tests/feature005_performance.rs` (depends on T045, T081, T103; SC-715, SC-740, SC-752) — Settled: capture 23 ms/250, session-open 41–44 ms/250, prompt 41–46 ms/100, backlog ratio 0.93–1.19/1.20 with zero refusals. One 103 ms prompt outlier under load is recorded rather than absorbed by widening the budget.
+- [X] T161 [P] Verify all new project reads refuse non-members, all owner reads exclude other accounts, all admin reads refuse members, and no API relies on web filtering in `tests/tests/feature005_authorization_audit.rs` (depends on T038, T108–T110, T145) — Settled as an adversarial gate over the five routes US7 added. Mutation-checked — changing cutover's extractor from `AdminUser` to `SettledUser` fails it.
+- [X] T162 [P] Verify every duplicated schema/key/reference definition matches `data-model.md`, including complete `reference_key` identity and structural discriminator checks, in `tests/tests/feature005_contract_consistency.rs` (depends on T034, T134) — Settled as an adversarial gate. **A mutation found a gap and it is closed**: the file compared `RetainedRef::dedupe_key()` against `Reference::reference_key()`, which covers knowledge and patterns but leaves a relation's prefix compared to nothing, so renaming `relation:` to `rel:` passed. `data-model.md` §5 states the three shapes on the column and is now read as the counterpart.
+- [X] T163 [P] Verify all 272 FR and 63 SC identifiers are unique and represented in the traceability index of this file in `tests/tests/feature005_traceability.rs` — Settled: 272 FR and 63 SC, both unique, every one covered by the index. `spec.md`'s `FR-401–FR-519` numbering aside is excluded by a floor derived from the inventory rather than hardcoded, so an identifier this feature owns cannot fall below it.
+- [X] T164 Re-run the install/link/capture/consolidate/retrieve/outage/local-loss/migrate commands and expected observations from `specs/005-server-authoritative-autonomous-memory/quickstart.md` (depends on T156) — Settled by running it. Ten commands in the walkthrough did not exist; each is corrected to the shipped surface and the run is recorded in `tests/feature005/quickstart-run.md`. There is no `cairn events` surface at all, and cutover is an admin HTTP route rather than a server CLI subcommand.
+- [X] T165 Update operator/user documentation for server authority, queued-not-durable commands, exact local-loss categories, OpenCode capture-only status, migration, privacy, and truthful verification in `README.md` (depends on T156–T164) — Settled: the README gains server authority and queued-not-durable, the four durability groups, the migration surface and its ordering, OpenCode as capture-only by Cairn's decision, truthful verification and health, and privacy stated as what crosses.
+
+---
+
+## Dependencies & Execution Order
+
+### Phase dependencies
+
+- Setup (T001–T004) has no feature dependency.
+- Foundations (T005–T039) depends on Setup and blocks every user story.
+- US1 (T040–T064) depends only on Foundations.
+- US2 (T065–T082) depends only on Foundations; its independent test seeds knowledge through T025 rather than requiring US1.
+- US3 (T083–T092) depends only on Foundations; its independent test seeds canonical server records directly and implements its own cache-refill path.
+- US4 (T093–T105) depends only on Foundations; T039 supplies the shared drain primitive, and US4 extends it for outage/recovery without requiring US1's normal-capture configuration. Its independent outage path exercises fresh-unavailable behavior, while cached briefing behavior remains independently covered in US2.
+- US5 (T106–T124) depends on Foundations and fixed read shapes; seeded server data makes it independent of capture/consolidation execution.
+- US6 (T125–T137) depends only on Foundations and uses T035's shared health API with server-seeded records; US5 consumes that boundary, while US6 does not depend on US5 or web UI.
+- US7 (T138–T155) follows US1–US6 because its possession/cutover path must migrate and verify every canonical surface those phases establish, matching `plan.md` phase ordering.
+- Polish (T156–T165) depends on all seven story checkpoints.
+
+### Within each story
+
+1. Author the listed failing tests and fixed corpora.
+2. Implement only the settled contract needed to make them pass.
+3. Re-run the story tests and its independent acceptance test.
+4. Do not begin US7 cutover work until canonical event, command, retrieval, pattern, verification, and health surfaces are present.
+
+### Parallel opportunities
+
+- `[P]` tasks touch disjoint files and may run concurrently only after their stated dependencies.
+- Within US1, vendor adapters T047–T049 are parallel after T046; test corpora T040–T045 are parallel after Foundations.
+- Within US5, pages T112–T122 are parallel after the typed API client T111.
+- Test implementation and production implementation are intentionally not parallel when the production task depends on the failing test.
+
+---
+
+## Traceability Index
+
+| Requirement block | Primary tasks |
+|---|---|
+| FR-701–FR-712a storage authority, durability, personal-domain patterns, commands/cache | T005–T027, T083–T092, T138–T155 |
+| FR-717–FR-730 vendor-native capture and provenance | T035, T040–T051, T057, T060–T064 |
+| FR-734–FR-745 safe canonical event model | T011–T014, T019, T028–T030, T037 |
+| FR-749–FR-780 privacy and safe-event ingest | T017–T018, T028–T030, T037, T041, T043, T050–T058, T158 |
+| FR-781–FR-792, FR-792a–FR-792d edge spool/outage behavior and status freshness | T020–T022, T068, T093–T105 |
+| FR-793–FR-816 consolidation, extraction, verification restraint, explicit commands | T012, T015–T016, T025–T033, T042–T064, T125–T136 |
+| FR-817–FR-826 domain preservation and project precedence | T010, T023–T026, T034, T053, T065–T082, T084–T090 |
+| FR-827–FR-850 and FR-838a–FR-838f retrieval, agent delivery, traces | T035, T065–T082, T106–T124 |
+| FR-851–FR-860 integration health | T035, T059, T106, T118, T125–T137 |
+| FR-861–FR-878 migration and cutover | T005–T009, T138–T155 |
+| FR-879–FR-895 web control plane | T038, T106–T124, T161 |
+| FR-901–FR-905 optional bounded graph | No graph task selected: FR-901 is MAY and explicitly makes FR-902–FR-905 inert when no graph is built; required relation visibility is delivered by T109/T115 over existing relations. |
+| SC-701–SC-707 autonomous capture/knowledge | T040–T064, T156–T158 |
+| SC-708–SC-712 automatic delivery | T065–T082, T157 |
+| SC-713–SC-718 durability/outage | T068, T083–T105, T156 |
+| SC-719–SC-723 migration safety | T138–T155 |
+| SC-724–SC-729 health/web/traces | T066–T067, T106–T137 |
+| SC-730–SC-737 privacy/governance/architecture | T037, T042–T063, T158–T159 |
+| SC-738, SC-760–SC-767 patterns, migration ownership, verification authority, polymorphic identity | T008, T034, T083–T090, T125–T155, T162 |
+| SC-739–SC-753 restart, backlog, adversarial extraction/path/key/cutover/deadline | T016, T018, T031–T045, T093–T105, T138–T160 |
+
+<!-- Mechanical coverage inventory. Keep exact identifiers so T163 can compare sets. -->
+<!-- FR: FR-701 FR-702 FR-703 FR-704 FR-705 FR-706 FR-707 FR-708 FR-708a FR-708b FR-708c FR-708d FR-708e FR-708f FR-708g FR-709 FR-710 FR-710a FR-711 FR-712 FR-712a FR-717 FR-718 FR-719 FR-720 FR-721 FR-722 FR-723 FR-724 FR-725 FR-726 FR-727 FR-727a FR-727b FR-727c FR-727d FR-727e FR-728 FR-729 FR-730 FR-734 FR-735 FR-736 FR-737 FR-738 FR-739 FR-740 FR-741 FR-742 FR-743 FR-744 FR-745 FR-749 FR-749a FR-749b FR-749c FR-749c1 FR-749c2 FR-749d FR-750 FR-751 FR-752 FR-753 FR-754 FR-755 FR-756 FR-757 FR-758 FR-759 FR-760 FR-761 FR-762 FR-763 FR-763a FR-763b FR-764 FR-765 FR-766 FR-767 FR-768 FR-769 FR-769a FR-770 FR-771 FR-772 FR-773 FR-774 FR-775 FR-776 FR-777 FR-777a FR-777a1 FR-777b FR-777c FR-777d FR-777e FR-777f FR-777g FR-778 FR-779 FR-780 FR-781 FR-782 FR-783 FR-784 FR-785 FR-786 FR-787 FR-788 FR-789 FR-790 FR-790a FR-791 FR-791a FR-791a1 FR-791b FR-792 FR-792a FR-792b FR-792c FR-792d FR-793 FR-793a FR-793a1 FR-793b FR-793c FR-793d FR-794 FR-795 FR-796 FR-796d FR-796a FR-796b FR-796c FR-797 FR-798 FR-798a FR-798b FR-798c FR-799 FR-800 FR-801 FR-801a FR-802 FR-803 FR-804 FR-804a FR-805 FR-805a FR-805a1 FR-805b FR-805c FR-805d FR-805e FR-805f FR-806 FR-807 FR-808 FR-809 FR-809a FR-810 FR-810a FR-811 FR-811a FR-811b FR-811c FR-811d FR-811e FR-811f FR-811g FR-811h FR-811i FR-812 FR-813 FR-814 FR-815 FR-815a FR-816 FR-817 FR-818 FR-819 FR-819a FR-820 FR-821 FR-822 FR-823 FR-824 FR-825 FR-826 FR-838a FR-838b FR-838c FR-838d FR-838e FR-838f FR-827 FR-828 FR-829 FR-830 FR-831 FR-832 FR-833 FR-834 FR-835 FR-836 FR-837 FR-838 FR-839 FR-840 FR-841 FR-842 FR-843 FR-844 FR-845 FR-846 FR-846a FR-847 FR-848 FR-849 FR-850 FR-851 FR-852 FR-853 FR-854 FR-855 FR-856 FR-857 FR-858 FR-859 FR-860 FR-861 FR-862 FR-863 FR-864 FR-864a FR-865 FR-866 FR-867 FR-867a FR-867b FR-868 FR-869 FR-870 FR-871 FR-872 FR-873 FR-874 FR-875 FR-876 FR-876a FR-876b FR-876b1 FR-876c FR-876d FR-876e FR-877 FR-878 FR-879 FR-880 FR-881 FR-882 FR-883 FR-884 FR-885 FR-886 FR-887 FR-888 FR-889 FR-889a FR-890 FR-891 FR-892 FR-893 FR-894 FR-894a FR-895 FR-901 FR-902 FR-903 FR-904 FR-905 -->
+<!-- SC: SC-701 SC-701a SC-701b SC-702 SC-703 SC-704 SC-705 SC-706 SC-707 SC-708 SC-709 SC-710 SC-711 SC-712 SC-713 SC-714 SC-715 SC-716 SC-717 SC-718 SC-718a SC-719 SC-720 SC-721 SC-722 SC-723 SC-724 SC-725 SC-726 SC-727 SC-728 SC-729 SC-730 SC-731 SC-732 SC-733 SC-734 SC-735 SC-736 SC-737 SC-738 SC-760 SC-761 SC-762 SC-763 SC-764 SC-765 SC-766 SC-767 SC-739 SC-740 SC-741 SC-742 SC-743 SC-744 SC-745 SC-746 SC-747 SC-748 SC-749 SC-750 SC-751 SC-752 SC-753 -->
+
+---
+
+## Implementation Strategy
+
+### MVP first
+
+1. Complete Setup and Foundations.
+2. Complete US1 and prove autonomous knowledge creation.
+3. Stop and validate US1 independently before adding recall.
+
+### Incremental delivery
+
+1. US1 creates governed knowledge.
+2. US2 delivers it automatically.
+3. US3 proves server durability.
+4. US4 proves fail-soft outage behavior.
+5. US5 makes the lifecycle auditable.
+6. US6 makes status and verification truthful.
+7. US7 safely migrates existing installations only after all canonical surfaces exist.
+
+### Non-negotiable guards
+
+- PostgreSQL is canonical after cutover; SQLite contains queues, cache, retained exceptions, and machine-local evidence only.
+- No client payload chooses account/project authority, verification authority, derived state, domain ownership, or supersession.
+- No raw transcript, raw vendor payload, raw tool output, secret, absolute local path, or local evidence crosses the approved boundary.
+- `KnowledgeRef` identity always includes domain; `PatternRef` resolves to an owner-only personal-domain pattern; `reference_key` is used wherever the union participates in identity.
+- OpenCode is automatic capture only in baseline 005; automatic delivery and semantic signals remain `declined_by_cairn` for the documented beta-boundary reason.
+- Attempt 5 runs; success becomes `done` before remaining fifth failures become `failed`; attempt 6 never runs; every lease closes or reopens.

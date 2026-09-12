@@ -1,17 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search, Trash2, X } from "lucide-react";
+import { Pin, Search, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, type Memory } from "@/lib/api";
 import { ConfirmButton } from "@/components/confirm-button";
 import {
-  EmptyState,
-  ErrorState,
-  ListSkeleton,
-  PageHeader,
-} from "@/components/page";
+  ApiErrorState,
+  NotRecorded,
+  TruncationNotice,
+  humanize,
+} from "@/components/control-plane";
+import { EmptyState, ListSkeleton, PageHeader } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,8 +28,20 @@ import {
 
 const SCOPES = ["project", "branch", "task", "session"];
 const TYPES = ["fact", "decision", "convention", "failure", "procedure"];
+/** The lifecycle states a project memory can be read in. */
+const STATES = ["active", "superseded", "stale", "conflicted"];
 /** Base UI's Select has no empty-string value, so "any" is a real option. */
 const ANY = "any";
+
+/**
+ * The page size, sent explicitly so the notice below can be honest.
+ *
+ * The server clamps to a hundred and reports back the bound it applied; asking
+ * for exactly what the route's own default is keeps the two the same number and
+ * makes "you are seeing the first N" a statement about what happened rather
+ * than an assumption (FR-895).
+ */
+const PAGE = 25;
 
 export default function MemoryPage({
   params,
@@ -39,6 +53,9 @@ export default function MemoryPage({
   const [q, setQ] = useState("");
   const [scope, setScope] = useState(ANY);
   const [type, setType] = useState(ANY);
+  // Not `ANY`: the route filters on exactly one state and defaults to `active`,
+  // so there is no "any state" answer it can give. The filter names which one.
+  const [state, setState] = useState("active");
 
   // Typing used to fire one request per keystroke. The input stays instant;
   // only the query waits for a pause.
@@ -49,12 +66,14 @@ export default function MemoryPage({
   }, [q]);
 
   const memories = useQuery({
-    queryKey: ["memories", id, debouncedQ, scope, type],
+    queryKey: ["memories", id, debouncedQ, scope, type, state],
     queryFn: () =>
       api.memories(id, {
         q: debouncedQ || undefined,
         scope: scope === ANY ? undefined : scope,
         type: type === ANY ? undefined : type,
+        state,
+        limit: PAGE,
       }),
   });
 
@@ -67,7 +86,8 @@ export default function MemoryPage({
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const filtered = scope !== ANY || type !== ANY || debouncedQ !== "";
+  const filtered =
+    scope !== ANY || type !== ANY || state !== "active" || debouncedQ !== "";
   const count = memories.data?.memories.length ?? 0;
 
   return (
@@ -138,6 +158,22 @@ export default function MemoryPage({
             ))}
           </SelectContent>
         </Select>
+        <Select value={state} onValueChange={(v) => setState(v ?? "active")}>
+          <SelectTrigger
+            className="w-36"
+            data-testid="state-filter"
+            aria-label="Filter by state"
+          >
+            <SelectValue>{(v: string) => `${v} only`}</SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {STATES.map((s) => (
+              <SelectItem key={s} value={s}>
+                {s} only
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <div
@@ -159,6 +195,7 @@ export default function MemoryPage({
               setQ("");
               setScope(ANY);
               setType(ANY);
+              setState("active");
             }}
           >
             Clear filters
@@ -167,13 +204,13 @@ export default function MemoryPage({
       </div>
 
       {memories.isLoading && <ListSkeleton />}
-      {memories.error != null && <ErrorState error={memories.error} />}
+      {memories.error != null && <ApiErrorState error={memories.error} />}
       {memories.data && count === 0 && (
         <EmptyState
           title={filtered ? "No memory matches" : "No memory yet"}
           description={
             filtered
-              ? "Try a broader search, or clear the scope and type filters."
+              ? "Try a broader search, or clear the scope, type and state filters."
               : "Memories appear here once an agent records one and syncs."
           }
         />
@@ -183,21 +220,32 @@ export default function MemoryPage({
         {memories.data?.memories.map((m) => (
           <MemoryRow
             key={m.id}
+            projectId={id}
             memory={m}
             onDelete={() => remove.mutate(m.id)}
             deleting={remove.isPending}
           />
         ))}
       </ul>
+
+      {memories.data && (
+        <TruncationNotice
+          shown={count}
+          limit={memories.data.limit}
+          refine="Narrow the search or the filters to see the rest."
+        />
+      )}
     </div>
   );
 }
 
 function MemoryRow({
+  projectId,
   memory,
   onDelete,
   deleting,
 }: {
+  projectId: string;
   memory: Memory;
   onDelete: () => void;
   deleting: boolean;
@@ -208,15 +256,55 @@ function MemoryRow({
         <CardContent>
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
-              <p data-testid="memory-content" className="text-sm">
-                {memory.content}
-              </p>
+              <Link
+                href={`/projects/${projectId}/memory/${memory.id}`}
+                className="hover:underline"
+                data-testid="memory-link"
+              >
+                <p data-testid="memory-content" className="text-sm">
+                  {memory.content}
+                </p>
+              </Link>
               <div className="text-muted-foreground mt-2 flex flex-wrap items-center gap-2 text-xs">
                 <Badge variant="secondary">{memory.type}</Badge>
                 <Badge variant="outline">{memory.scope}</Badge>
                 {memory.state !== "active" && (
                   <Badge variant="outline">{memory.state}</Badge>
                 )}
+                <Badge variant="outline" data-testid="memory-importance">
+                  {memory.importance}
+                </Badge>
+                {memory.pinned && (
+                  <Badge variant="outline">
+                    <Pin /> pinned
+                  </Badge>
+                )}
+                <span data-testid="memory-verification">
+                  {/* On the list route this is a bare state string; the detail
+                      route replaces the key with an object. Null is a record
+                      whose verification was never established, which is not the
+                      same as one that failed. */}
+                  {memory.verification ? (
+                    humanize(memory.verification)
+                  ) : (
+                    <NotRecorded what="verification not recorded" />
+                  )}
+                </span>
+                <span data-testid="memory-origin">
+                  {memory.origin_kind ? (
+                    humanize(memory.origin_kind)
+                  ) : (
+                    <NotRecorded what="origin not recorded" />
+                  )}
+                </span>
+                <span data-testid="memory-relations">
+                  {memory.relation_count} relation
+                  {memory.relation_count === 1 ? "" : "s"}
+                </span>
+                <span data-testid="memory-reinforcements">
+                  {memory.reinforcement_count} reinforcement
+                  {memory.reinforcement_count === 1 ? "" : "s"}
+                </span>
                 <span>
                   from session{" "}
                   <code data-testid="provenance-session" className="font-mono">

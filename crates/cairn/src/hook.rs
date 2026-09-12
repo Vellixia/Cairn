@@ -12,7 +12,7 @@ use crate::client;
 use crate::render;
 use cairn_core::wire::{ContextPayload, Request};
 use cairn_core::CairnConfig;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Which adapter this invocation serves.
 ///
@@ -45,6 +45,152 @@ fn to_canonical(
     )
 }
 
+/// Run Feature 005 capture for one vendor event and spool what it produced.
+///
+/// Beside the canonical-lifecycle path and never instead of it: one drives
+/// sessions, handoffs and context delivery, the other produces the safe events
+/// the server consolidates.
+///
+/// The raw payload does not leave this process. Where the event carries
+/// transient prompt or assistant text, the daemon's session vocabulary is
+/// fetched *here* and the mapping runs *here* — sending the text the other way
+/// would put a prompt fragment across the capture-process boundary, which
+/// FR-730 closes and SC-741 tests. A vocabulary that cannot be fetched in time
+/// is treated as empty, which declines the signal rather than delaying the
+/// agent; the decline is counted, so a daemon that is always too slow is
+/// visible rather than silently lossy.
+#[derive(Default)]
+struct Captured {
+    /// The vendor's own session key, which routes the events.
+    key: String,
+    /// What this vendor event established, or nothing.
+    output: Option<cairn_core::event::CaptureOutput>,
+}
+
+fn capture_pass(
+    agent: cairn_integrate::AgentId,
+    event: &str,
+    raw: &serde_json::Value,
+    cwd: &str,
+    config: &CairnConfig,
+) -> Captured {
+    let payload = cairn_integrate::RawPayload::new(raw.clone(), cwd);
+    let deadline = capture_deadline(config);
+
+    let key = raw
+        .get("session_id")
+        .or_else(|| raw.get("sessionID"))
+        .or_else(|| raw.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() {
+        // An event that cannot name its session cannot be routed, and it is
+        // declined here exactly as the lifecycle path declines it (FR-737).
+        return Captured::default();
+    }
+
+    let mut vocabulary_missed_its_deadline = false;
+    let (vocabulary, established) = if cairn_integrate::carries_semantic_material(agent, event) {
+        match fetch_vocabulary(agent, cwd, &key, deadline) {
+            Ok(pair) => pair,
+            // **A vocabulary Cairn could not fetch is not an empty one**
+            // (FR-749c). The mapping declines either way, and correctly — an
+            // unchecked claim must not be recorded — but the two declines are
+            // different findings and used to render identically as
+            // `declined_by_policy/insufficient_vocabulary`. One is a lexicon
+            // that is genuinely too thin, which repeats on every run of a frozen
+            // corpus; the other is this machine's own deadline, which is load
+            // and says nothing about the content. Journalled as the drop it is,
+            // so the decline's cause is readable instead of guessed at.
+            Err(reason) => {
+                journal_capture_drop(agent, cwd, event, None, &reason);
+                vocabulary_missed_its_deadline = true;
+                Default::default()
+            }
+        }
+    } else {
+        Default::default()
+    };
+    let root = repository_root(cwd);
+    let env = cairn_integrate::agents::CaptureEnv {
+        repo_root: root.as_deref(),
+        vocabulary: &vocabulary,
+        established_values: &established,
+    };
+
+    let output = cairn_integrate::capture(agent, event, &payload, &env);
+    // The declines this pass produced are about the material *unless* the
+    // vocabulary they were judged against never arrived (FR-749c2).
+    let output = if vocabulary_missed_its_deadline {
+        output.caused_by_deadline()
+    } else {
+        output
+    };
+    Captured {
+        key,
+        output: (!output.is_empty()).then_some(output),
+    }
+}
+
+/// Ask the daemon for this session's vocabulary and established values.
+///
+/// Failure is not an error here. An empty vocabulary justifies no token, so the
+/// mapping declines with `insufficient_vocabulary` — the honest answer when
+/// Cairn cannot check a claim's grounding, and a better one than recording a
+/// claim it could not ground.
+fn fetch_vocabulary(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    key: &str,
+    deadline: Duration,
+) -> Result<
+    (
+        cairn_core::vocabulary::SessionVocabulary,
+        std::collections::BTreeMap<String, String>,
+    ),
+    String,
+> {
+    let request = Request::CaptureVocabulary {
+        cwd: cwd.to_string(),
+        agent: agent.as_str().to_string(),
+        agent_session_key: key.to_string(),
+    };
+    let value = match client::send_blocking(&request, deadline) {
+        Ok(value) => value,
+        Err(e) => return Err(e.message),
+    };
+    let vocabulary = value
+        .get("vocabulary")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let established = value
+        .get("established_values")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    Ok((vocabulary, established))
+}
+
+/// The repository root an absolute path is relativized against.
+///
+/// Walked from the working directory rather than asked of the daemon, because
+/// the answer is needed before any round trip and a `.git` entry is the same
+/// fact either way. The root is machine configuration and never crosses the
+/// boundary (FR-753); it is used here and discarded.
+fn repository_root(cwd: &str) -> Option<std::path::PathBuf> {
+    let mut here = std::path::Path::new(cwd).to_path_buf();
+    loop {
+        if here.join(".git").exists() {
+            return Some(here);
+        }
+        if !here.pop() {
+            return None;
+        }
+    }
+}
+
 /// Handle a capture-class event without an async runtime (SC-007).
 ///
 /// Returns `true` when the event was handled here. A capture-class event needs
@@ -60,19 +206,28 @@ pub fn run_blocking(event: &str) -> bool {
     // The class is decided from the event name *before* stdin is touched: a
     // boundary event needs a reply and takes the async path, and both paths
     // reading the payload would leave the second one with nothing.
+    // Feature 005 registers three events the canonical lifecycle has no
+    // counterpart for — a prompt-time hook, a pre-tool hook and a subagent
+    // boundary. They have no class because they map to no lifecycle event, and
+    // they are still capture: `event_class` returning `None` no longer means
+    // there is nothing to do.
+    let registered = cairn_integrate::adapter_for(agent)
+        .registered_events()
+        .contains(&event);
     match cairn_integrate::event_class(agent, event) {
-        // Declined by the adapter: the normal way an event Cairn does not map
-        // is handled (FR-115). Nothing to do, and nothing is wrong — but the
-        // agent is writing the payload to this process's stdin right now, and
-        // exiting without reading it gives *the agent* a broken pipe. Cairn's
-        // hook must be invisible even when it does nothing (FR-193, FR-194),
-        // so the payload is drained and discarded.
-        None => {
+        // Declined by the adapter and not registered for capture either: the
+        // normal way an event Cairn does not map is handled (FR-115). Nothing
+        // to do, and nothing is wrong — but the agent is writing the payload to
+        // this process's stdin right now, and exiting without reading it gives
+        // *the agent* a broken pipe. Cairn's hook must be invisible even when
+        // it does nothing (FR-193, FR-194), so the payload is drained and
+        // discarded.
+        None if !registered => {
             drain_stdin();
             return true;
         }
         Some(class) if class.is_boundary_class() => return false,
-        Some(_) => {}
+        _ => {}
     }
 
     let raw = read_raw();
@@ -87,18 +242,45 @@ pub fn run_blocking(event: &str) -> bool {
         })
         .unwrap_or_else(|| ".".to_string());
 
-    let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
-        return true;
-    };
-
     let config = CairnConfig::load();
-    let request = Request::CanonicalEvent {
-        event: canonical,
-        wait_for_handoff: false,
-        token_budget: None,
+    let captured = capture_pass(agent, event, &raw, &cwd, &config);
+
+    // Prompt-time delivery (T073, `contracts/retrieval-delivery.md` §1–§2):
+    // committed for Claude Code and Codex only, and additive to capture,
+    // never a replacement for it — capture above always runs first and
+    // exactly as it did before this existed. `UserPromptSubmit` maps to no
+    // canonical lifecycle event for any agent (`the_lifecycle_still_declines_
+    // what_it_never_mapped`), so this is the one place this delivery point
+    // can be reached: the async boundary path below never sees this event at
+    // all.
+    if event == "UserPromptSubmit" && delivers_at_prompt_time(agent) {
+        deliver_prompt_time(agent, &cwd, &captured.key, &config);
+    }
+
+    // One request carrying both halves where there is a lifecycle event, and a
+    // capture-only request where there is not. Two writes per tool call is the
+    // largest cost Cairn adds to a session, and this path runs on every one
+    // (SC-007).
+    let request = match to_canonical(agent, event, &raw, &cwd) {
+        Some(canonical) => Request::CanonicalEvent {
+            event: canonical,
+            wait_for_handoff: false,
+            token_budget: None,
+            capture: captured.output,
+        },
+        None => match captured.output {
+            Some(output) => Request::CaptureEvents {
+                cwd: cwd.clone(),
+                agent: agent.as_str().to_string(),
+                agent_session_key: captured.key,
+                output,
+            },
+            // Registered, and this payload established nothing. Not a failure.
+            None => return true,
+        },
     };
     if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
-        log_drop(event, &e.message);
+        journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
     }
     true
 }
@@ -125,7 +307,23 @@ pub async fn run(event: &str) {
         .unwrap_or_else(|| ".".to_string());
     let config = CairnConfig::load();
 
+    let captured = capture_pass(agent, event, &raw, &cwd, &config);
     let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
+        // A boundary-class caller reaching an event the lifecycle declines has
+        // nothing to answer with, but the event may still be capture. This is
+        // the path a registered-but-unmapped event takes when the async entry
+        // point is used.
+        if let Some(output) = captured.output {
+            let request = Request::CaptureEvents {
+                cwd: cwd.clone(),
+                agent: agent.as_str().to_string(),
+                agent_session_key: captured.key,
+                output,
+            };
+            if let Err(e) = client::send_oneway(&request, capture_deadline(&config)).await {
+                journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
+            }
+        }
         return;
     };
 
@@ -145,50 +343,135 @@ pub async fn run(event: &str) {
         // acknowledged (D22, FR-240).
         wait_for_handoff: false,
         token_budget: None,
+        capture: captured.output,
     };
 
     if !boundary {
         // Capture class: fire and forget. A missed deadline is a dropped
         // event, not a failure (FR-015, FR-193).
         if let Err(e) = client::send_oneway(&request, deadline).await {
-            log_drop(event, &e.message);
+            journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
         }
         return;
     }
 
+    let started = Instant::now();
     match client::send_with_deadline(&request, deadline).await {
         Ok(value) => {
             if delivers_context {
-                let degraded = deliver_context(agent, &value);
+                let (content_degraded, transport_ok) =
+                    deliver_context(agent, "SessionStart", &value);
                 // The adapter reports the delivery outcome back, which is what
                 // establishes `context_at_session_open`. A session start that
                 // emitted nothing leaves the capability expected — the session
                 // started, and Cairn's context did not reach it (D19a).
-                report_context_delivery(agent, &cwd, &key, degraded, deadline).await;
+                report_context_delivery(agent, &cwd, &key, content_degraded, deadline).await;
+                // Feature 005's own report: what happened to the trace the
+                // server generated, if it generated one at all (§3, §6.2).
+                report_retrieval_outcome(&value, transport_ok, started, deadline).await;
             }
         }
         Err(e) => {
             if delivers_context {
                 // Feature 001's bounded fallback: the session starts with
                 // reduced context rather than waiting (FR-046, FR-195). No
-                // evidence is recorded, because nothing was delivered.
-                emit_context(agent, &reduced_context_notice(&e.message));
+                // evidence is recorded, because nothing was delivered, and no
+                // retrieval trace is known to report against either.
+                emit_context(agent, "SessionStart", &reduced_context_notice(&e.message));
             }
             log_drop(event, &e.message);
         }
     }
 }
 
+/// Whether this agent's `UserPromptSubmit` is a committed automatic delivery
+/// point (`contracts/retrieval-delivery.md` §1, FR-838a).
+///
+/// OpenCode's automatic delivery stays absent — capture-only, a Cairn
+/// decision about an unstable vendor surface rather than a claim the vendor
+/// cannot do it (FR-838b; see `cairn_integrate::agents::opencode`). It is also
+/// structurally excluded upstream of this check: OpenCode never registers an
+/// event named `UserPromptSubmit` at all (its vocabulary is `session.*` /
+/// `tool.*`), so this gate is defense in depth, not the only thing standing
+/// between OpenCode and a push.
+fn delivers_at_prompt_time(agent: cairn_integrate::AgentId) -> bool {
+    matches!(
+        agent,
+        cairn_integrate::AgentId::ClaudeCode | cairn_integrate::AgentId::Codex
+    )
+}
+
+/// Ask the daemon for a prompt-time briefing and hand it to the agent's
+/// context surface — the same rendering and reporting `run`'s boundary path
+/// uses, but blocking, with no async runtime (SC-007): a prompt fires once
+/// per turn, which is exactly the affordability argument `send_blocking`
+/// already rests on for the session-vocabulary fetch above `run_blocking`
+/// makes today.
+fn deliver_prompt_time(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    key: &str,
+    config: &CairnConfig,
+) {
+    let deadline = context_deadline(config);
+    let started = Instant::now();
+    let request = Request::Context {
+        cwd: cwd.to_string(),
+        agent_session_key: (!key.is_empty()).then(|| key.to_string()),
+        session_id: None,
+        reason: None,
+        token_budget: None,
+        explain: false,
+        depth: None,
+        trigger: Some("prompt_submit".to_string()),
+        open_trigger: None,
+    };
+    match client::send_blocking(&request, deadline) {
+        Ok(value) => {
+            let (_content_degraded, transport_ok) =
+                deliver_context(agent, "UserPromptSubmit", &value);
+            report_retrieval_outcome_blocking(&value, transport_ok, started, deadline);
+        }
+        Err(e) => {
+            // Same fail-soft rule as session open: the turn proceeds either
+            // way (FR-781), and there is no trace to report against, because
+            // the daemon never got far enough to hand one back.
+            emit_context(
+                agent,
+                "UserPromptSubmit",
+                &reduced_context_notice(&e.message),
+            );
+            log_drop("UserPromptSubmit", &e.message);
+        }
+    }
+}
+
 /// Emit the briefing on the agent's own context surface.
 ///
-/// Returns whether what was delivered was degraded. The distinction that
-/// matters for evidence is between *reduced* and *absent*: an empty or
+/// `hook_event` is the vendor event name the emitted `hookEventName` should
+/// carry — `"SessionStart"` for session-open delivery, `"UserPromptSubmit"`
+/// for prompt-time delivery (T073): the two delivery points share this
+/// rendering and reporting, and only their vendor event name differs.
+///
+/// Returns `(content_degraded, transport_ok)`.
+///
+/// `content_degraded` distinguishes *reduced* from *absent*: an empty or
 /// unassemblable briefing still demonstrates that the agent's context surface
 /// carries what Cairn puts on it, and is recorded with `degraded: true`. A
 /// start where nothing was emitted at all demonstrates nothing, and that case
 /// never reaches this function — it is the caller's error branch, which
 /// records no evidence (D19a).
-fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -> bool {
+///
+/// `transport_ok` is whether the write to that surface actually succeeded —
+/// the one piece of real transport evidence this process has, and the only
+/// honest basis for ever reporting `transmitted` (FR-843, FR-854): generating
+/// a briefing is not evidence an agent received one, and neither is this
+/// function *returning*, only its write actually landing.
+fn deliver_context(
+    agent: cairn_integrate::AgentId,
+    hook_event: &str,
+    value: &serde_json::Value,
+) -> (bool, bool) {
     match serde_json::from_value::<ContextPayload>(value.clone()) {
         Ok(payload) => {
             // A restored checkpoint is rendered from the raw reply, not from
@@ -207,13 +490,29 @@ fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -
             // next action acted on is worse than no next action at all.
             let mut text = render::continuity(value);
             text.push_str(&render::briefing(&payload));
-            let degraded = text.trim().is_empty();
-            emit_context(agent, &text);
-            degraded
+            let content_degraded = text.trim().is_empty();
+
+            // §12.3: a briefing served from cache is labelled cached and
+            // possibly stale, never presented as though it were fresh. An
+            // outage with no cache entry at all says so instead of quietly
+            // carrying on with only Level 0.
+            if value.get("served_from_cache").and_then(|v| v.as_bool()) == Some(true) {
+                text = format!("{}{text}", cached_context_notice());
+            } else if value
+                .get("fresh_knowledge_unavailable")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                text = format!("{}{text}", unavailable_context_notice());
+            }
+
+            let transport_ok = emit_context(agent, hook_event, &text);
+            (content_degraded, transport_ok)
         }
         Err(e) => {
-            emit_context(agent, &reduced_context_notice(&e.to_string()));
-            true
+            let transport_ok =
+                emit_context(agent, hook_event, &reduced_context_notice(&e.to_string()));
+            (true, transport_ok)
         }
     }
 }
@@ -241,6 +540,81 @@ async fn report_context_delivery(
     let _ = client::send_oneway(&request, deadline).await;
 }
 
+/// What actually happened to the transmission, in the vocabulary
+/// `RetrievalOutcome` accepts (`contracts/retrieval-delivery.md` §7).
+///
+/// `hook_transmission_deadline_exceeded` is reached when the write itself did
+/// not fail but only completed after this delivery's own budget was already
+/// spent getting an answer — the one place this process can honestly tell
+/// "ran out of time" apart from "the write itself failed" (§5, §7).
+fn transmission_outcome(
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) -> (bool, Option<&'static str>) {
+    if transport_ok {
+        (true, None)
+    } else if started.elapsed() >= deadline {
+        (false, Some("hook_transmission_deadline_exceeded"))
+    } else {
+        (false, Some("hook_transmission_failed"))
+    }
+}
+
+/// Report a delivery's transmission outcome to the daemon (which forwards it
+/// to the server), for the async boundary path.
+///
+/// **Never sent when the daemon's answer carried no `trace_id`** — an
+/// explicit retrieval, a cache hit, or an outage with nothing cached all
+/// legitimately carry none, and there is nothing to report an outcome
+/// against (§3: only a `generated` trace can become `transmitted`).
+async fn report_retrieval_outcome(
+    value: &serde_json::Value,
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) {
+    let Some(trace_id) = value
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    else {
+        return;
+    };
+    let (transmitted, failure_reason) = transmission_outcome(transport_ok, started, deadline);
+    let request = Request::RetrievalOutcome {
+        trace_id,
+        transmitted,
+        failure_reason: failure_reason.map(str::to_string),
+    };
+    let _ = client::send_oneway(&request, deadline).await;
+}
+
+/// The same report, blocking, for `run_blocking`'s prompt-time path (SC-007).
+fn report_retrieval_outcome_blocking(
+    value: &serde_json::Value,
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) {
+    let Some(trace_id) = value
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    else {
+        return;
+    };
+    let (transmitted, failure_reason) = transmission_outcome(transport_ok, started, deadline);
+    let request = Request::RetrievalOutcome {
+        trace_id,
+        transmitted,
+        failure_reason: failure_reason.map(str::to_string),
+    };
+    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
+        log_drop("UserPromptSubmit", &e.message);
+    }
+}
+
 fn capture_deadline(config: &CairnConfig) -> Duration {
     Duration::from_millis(config.capture_deadline_ms)
 }
@@ -256,25 +630,62 @@ fn reduced_context_notice(reason: &str) -> String {
     )
 }
 
+/// §12.3: served only when the server is unreachable, and always labelled
+/// cached and possibly stale — never presented as though it were fresh.
+fn cached_context_notice() -> String {
+    "_Cairn could not reach the server this turn; the durable memory below is served from \
+     a local cache and may be stale._\n\n"
+        .to_string()
+}
+
+/// §12.3's closing bullet: no cache entry exists for this session and
+/// account, so fresh knowledge is reported unavailable rather than silently
+/// served as though there were nothing to say.
+///
+/// **It used to say "Local project state below is current", and that was the
+/// misleading half.** Level 0 was assembled from the local store on this path,
+/// and the local store is one machine's store: on a cache miss it was the
+/// previous account's pulled knowledge being described as this caller's
+/// current local state (FR-790a). Nothing but the repository is served here
+/// now, and the notice says which.
+fn unavailable_context_notice() -> String {
+    "_Cairn could not reach the server this turn and has no cached briefing for this \
+     session and account; durable memory (task/branch/project memory, handoffs, \
+     patterns, personal notes, team guidance) is unavailable this turn. Only this \
+     repository's own state is shown below._\n\n"
+        .to_string()
+}
+
 /// Emit context on the agent's own supported context surface.
 ///
-/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`.
+/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`,
+/// tagged with the vendor event name that produced it (`hook_event`).
 ///
 /// OpenCode is emitted to as plain stdout, but note that its installed plugin
 /// spawns `cairn hook` with stdout ignored, so nothing written here reaches an
 /// OpenCode session today. OpenCode has no post-compaction session open either,
 /// which is why it derives `agent_initiated` and asks instead.
-fn emit_context(agent: cairn_integrate::AgentId, text: &str) {
+///
+/// Returns whether the write itself succeeded — real transport evidence,
+/// never inferred from this function merely returning without panicking.
+fn emit_context(agent: cairn_integrate::AgentId, hook_event: &str, text: &str) -> bool {
+    use std::io::Write;
     match agent {
-        cairn_integrate::AgentId::Opencode => println!("{text}"),
+        cairn_integrate::AgentId::Opencode => {
+            let mut out = std::io::stdout();
+            writeln!(out, "{text}").and_then(|()| out.flush()).is_ok()
+        }
         _ => {
             let out = serde_json::json!({
                 "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
+                    "hookEventName": hook_event,
                     "additionalContext": text,
                 }
             });
-            println!("{out}");
+            let mut stdout = std::io::stdout();
+            writeln!(stdout, "{out}")
+                .and_then(|()| stdout.flush())
+                .is_ok()
         }
     }
 }
@@ -317,6 +728,62 @@ fn log_drop(event: &str, reason: &str) {
     }
 }
 
+/// A capture-class event this process could not hand to the daemon in time.
+///
+/// **The half of FR-749b that FR-749c is about.** Dropping the event is
+/// permitted and the hook still exits zero; being quiet about it is not. A line
+/// in `cairn.log` is not a record — nothing reads it, no counter moves, and
+/// capture health reports the agent's success with no trace of Cairn's loss. It
+/// is journalled here so the daemon can count it as
+/// `capture_deadline_exceeded`, which is the vocabulary the whole funnel already
+/// speaks (`data-model.md` §4).
+///
+/// Best-effort by construction, and it must be: this runs on the path where
+/// something was already unreachable, and a hook that failed to report a drop
+/// must still not fail the agent (FR-749b). Every error is swallowed for that
+/// reason and for no other.
+///
+/// Carries no payload content (FR-749d): the agent, the vendor event name, the
+/// canonical kind where the adapter determined one, and the working directory
+/// the daemon resolves to a project.
+fn journal_capture_drop(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    vendor_event: &str,
+    kind: Option<&str>,
+    reason: &str,
+) {
+    use std::io::Write;
+    log_drop(vendor_event, reason);
+    let _ = cairn_core::paths::ensure_home();
+    let line = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "cwd": cwd,
+        "agent": agent.as_str(),
+        "vendor_event": vendor_event,
+        "kind": kind,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cairn_core::paths::capture_drop_journal_path())
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// The canonical kind a request would have carried, for a drop record.
+///
+/// `None` for a capture-only request: the adapter produced no lifecycle event,
+/// so there is no single canonical kind to name and inventing one would file the
+/// loss under something that never existed.
+fn dropped_kind(request: &Request) -> Option<&'static str> {
+    match request {
+        Request::CanonicalEvent { event, .. } => Some(event.event.as_str()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,33 +795,78 @@ mod tests {
     }
 
     #[test]
-    fn every_registered_event_reaches_the_canonical_vocabulary() {
-        // The hook's job is translation, and every event Cairn registers must
-        // survive it (FR-112).
+    fn every_registered_event_is_handled_by_one_path_or_the_other() {
+        // The rule used to be "every registered event normalizes", which held
+        // while registration and the canonical lifecycle were the same list.
+        // Feature 005 registers three events the lifecycle has no counterpart
+        // for, so the rule that actually matters is the one SC-706 states: an
+        // event Cairn registers is either translated or captured, and zero are
+        // silently dropped. A hook that fires and does nothing is the failure
+        // this pins.
         for e in cairn_integrate::agents::claude_code::EVENTS {
             let payload = raw(json!({
                 "session_id": "s-1",
                 "tool_name": "Read",
-                "tool_input": { "file_path": "a.rs" }
+                "tool_input": { "file_path": "a.rs" },
+                "prompt": "prefer sync over drift",
+                "last_assistant_message": "prefer sync over drift",
+                "agent_id": "sub-1",
+                "agent_type": "explorer",
             }));
+            let translated = to_canonical(AgentId::ClaudeCode, e, &payload, "/repo").is_some();
+            let captured = !cairn_integrate::capture(
+                AgentId::ClaudeCode,
+                e,
+                &cairn_integrate::RawPayload::new(payload.clone(), "/repo"),
+                &cairn_integrate::agents::CaptureEnv::default(),
+            )
+            .is_empty();
+            assert!(translated || captured, "{e} is registered and does nothing");
+        }
+    }
+
+    #[test]
+    fn the_lifecycle_still_declines_what_it_never_mapped() {
+        // FR-115. `PreToolUse` and `UserPromptSubmit` are now registered for
+        // capture, and they still map to no canonical lifecycle event — the two
+        // paths stayed separate rather than one quietly widening the other.
+        for e in [
+            "PreToolUse",
+            "UserPromptSubmit",
+            "SubagentStop",
+            "Notification",
+        ] {
             assert!(
-                to_canonical(AgentId::ClaudeCode, e, &payload, "/repo").is_some(),
-                "{e} did not normalize"
+                to_canonical(
+                    AgentId::ClaudeCode,
+                    e,
+                    &raw(json!({"session_id": "s-1"})),
+                    "/repo"
+                )
+                .is_none(),
+                "{e} reached the canonical lifecycle"
             );
         }
     }
 
     #[test]
-    fn an_unregistered_event_is_declined_rather_than_mapped() {
-        // FR-115: it simply does not occur for that agent.
-        for e in ["PreToolUse", "UserPromptSubmit", "Notification"] {
-            assert!(to_canonical(
-                AgentId::ClaudeCode,
-                e,
-                &raw(json!({"session_id": "s-1"})),
-                "/repo"
-            )
-            .is_none());
+    fn an_event_no_adapter_registers_captures_nothing() {
+        // The other half: not registered means nothing happens, for both paths.
+        for e in ["Notification", "StopFailure", "MessageDisplay"] {
+            let payload = cairn_integrate::RawPayload::new(
+                json!({"session_id": "s-1", "prompt": "use postgresql"}),
+                "/repo",
+            );
+            assert!(
+                cairn_integrate::capture(
+                    AgentId::ClaudeCode,
+                    e,
+                    &payload,
+                    &cairn_integrate::agents::CaptureEnv::default()
+                )
+                .is_empty(),
+                "{e} produced capture without being registered"
+            );
         }
     }
 

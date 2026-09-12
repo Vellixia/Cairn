@@ -74,15 +74,91 @@ pub fn normalize_topic_key(input: &str) -> Option<String> {
     Some(key)
 }
 
+/// One topic-key segment, folded.
+///
+/// A thin wrapper over [`fold_separators`] so the lenient and strict paths
+/// cannot drift: there is one folding in this crate, and both call it. The
+/// caller has already split on `.`, so a dot reaching here is not a separator
+/// and is dropped.
 fn normalize_segment(segment: &str) -> String {
-    let mut out = String::with_capacity(segment.len());
-    for ch in segment.chars() {
+    fold_separators(segment, Folding::TopicSegment)
+}
+
+/// Normalize a proposed value key.
+///
+/// A value key states a **value**, not a whole proposition, and it is accepted
+/// only alongside a topic key — the caller enforces that pairing, because it is
+/// a storage constraint rather than a normalization one (FR-311).
+///
+/// Separators fold exactly as they do inside a topic-key segment, so
+/// `Server Authoritative`, `server-authoritative` and `server_authoritative`
+/// are one value and not three (FR-796a). Before Feature 005 they were three:
+/// this function collapsed whitespace and lower-cased, and stopped there, so a
+/// space and an underscore named different values for the same subject — which
+/// `classify_proposal` reads as a *conflict* rather than a restatement.
+///
+/// The dot does **not** fold. In a topic key a dot separates segments; in a
+/// value key it is content, and `1.2.3` and `123` are different versions.
+pub fn normalize_value_key(input: &str) -> Option<String> {
+    let folded = fold_separators(input, Folding::ValueKey);
+    if folded.is_empty() || folded.chars().count() > VALUE_KEY_MAX_CHARS {
+        return None;
+    }
+    Some(folded)
+}
+
+/// Which key is being folded.
+///
+/// The two differ in exactly two ways, and both differences are deliberate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Folding {
+    /// One segment of a topic key. The caller has already split on `.`, so a
+    /// dot reaching here is not a separator and is dropped.
+    ///
+    /// **Byte-identical to the pre-Feature-005 behaviour**, and that is a
+    /// requirement rather than an accident. Topic keys have folded separators
+    /// since Feature 003, so every stored topic key is already canonical; if
+    /// Feature 005 changed this function at all, a lookup keyed on the new form
+    /// would stop finding rows written under the old one, and a proposal would
+    /// silently create a new subject instead of reconciling with the existing
+    /// one. So non-space whitespace is still *dropped* here, exactly as it was,
+    /// rather than folded to `_`.
+    TopicSegment,
+    /// A whole value key. `.` is content — `1.2.3` and `123` are different
+    /// versions — and any whitespace folds to `_`, so `postgresql\t16` and
+    /// `postgresql 16` agree.
+    ///
+    /// This is the folding Feature 005 introduces (FR-796a). Value keys were
+    /// previously only lower-cased and whitespace-collapsed, so stored keys may
+    /// be in the older form until T142 rewrites them; see
+    /// [`value_keys_agree`].
+    ValueKey,
+}
+
+/// The one approved separator folding (FR-796a, FR-796c).
+///
+/// NFC, lower-case, then `-`, ` ` and `/` become `_`, runs of `_` collapse, and
+/// leading and trailing `_` are trimmed. Characters outside the resulting
+/// alphabet are dropped here; the strict entry points below refuse them
+/// instead, which is the difference FR-796b turns on.
+///
+/// Deterministic and syntactic. No embedding, no similarity model, no
+/// dictionary: two keys are the same key or they are different keys, and there
+/// is no third answer (FR-796c).
+fn fold_separators(input: &str, mode: Folding) -> String {
+    let lowered: String = input.nfc().collect::<String>().to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    for ch in lowered.chars() {
         let mapped = match ch {
             'a'..='z' | '0'..='9' | '_' => ch,
+            '.' if mode == Folding::ValueKey => ch,
             '-' | ' ' | '/' => '_',
+            // Only a value key folds the rest of Unicode whitespace. A topic
+            // segment drops it, because that is what it did before Feature 005
+            // and changing it would move keys that are already stored.
+            c if mode == Folding::ValueKey && c.is_whitespace() => '_',
             _ => continue,
         };
-        // Collapse runs of '_' as we go rather than in a second pass.
         if mapped == '_' && out.ends_with('_') {
             continue;
         }
@@ -91,23 +167,216 @@ fn normalize_segment(segment: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-/// Normalize a proposed value key.
+// ---------------------------------------------------------------------------
+// Pre-cutover compatibility for legacy value keys
+// ---------------------------------------------------------------------------
+
+/// Compare a **stored** value key against a **newly normalized** one.
 ///
-/// A value key states a **value**, not a whole proposition, and it is accepted
-/// only alongside a topic key — the caller enforces that pairing, because it is
-/// a storage constraint rather than a normalization one (FR-311).
-pub fn normalize_value_key(input: &str) -> Option<String> {
-    let collapsed: String = input
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if collapsed.is_empty() || collapsed.chars().count() > VALUE_KEY_MAX_CHARS {
-        return None;
+/// ## The problem this solves, and its shape
+///
+/// Feature 005 folds separators in value keys (FR-796a). T142 rewrites existing
+/// rows to the new canonical form during the explicit US7 migration (FR-867a),
+/// and that is the permanent fix. But T015 activates the folding *now*, and
+/// migration runs later, so there is an interval in which a store holds
+/// `server authoritative` while every new proposal for the same value
+/// normalizes to `server_authoritative`.
+///
+/// String equality across that interval is wrong in three visible ways:
+/// corroboration stops being detected, a **false conflict** is recorded between
+/// a claim and a restatement of itself, and the subject view partitions into
+/// two values and reads as `Conflicted` with no winner. None of those is a real
+/// disagreement — the two keys are one key that predates a normalization
+/// change.
+///
+/// ## Why comparison-time and not a rewrite
+///
+/// Rewriting rows is the migration, and the migration is T142's: it has to
+/// surface genuine collisions through the conflict machinery, and it runs under
+/// an explicit, resumable, user-invoked procedure (FR-867a, FR-869). Doing it
+/// as a side effect of opening a v8 database would perform a semantic migration
+/// inside a schema migration, unasked and unresumable.
+///
+/// So nothing is rewritten. Only the *comparison* is made aware that a stored
+/// key may predate the folding.
+///
+/// ## What it does, exactly
+///
+/// A stored key agrees with a canonical key when it is already that key, or
+/// when folding it yields that key. Nothing else — this is not similarity, and
+/// two keys that fold to different values stay different.
+///
+/// Three properties worth stating because they are what make it safe:
+///
+/// - **It does not weaken post-cutover normalization.** A canonical key is a
+///   fixed point of the normalizer, so once T142 has rewritten a row this
+///   degenerates to string equality and changes nothing.
+/// - **It merges nothing and discards nothing.** Both rows stay in the store,
+///   distinct, with their own ids. What changes is only whether a comparison
+///   calls them the same *value*.
+/// - **It answers now what T142 will answer later.** After migration the two
+///   rows carry one key and are one value; this makes the pre-migration read
+///   agree with the post-migration read instead of disagreeing with it for the
+///   length of the interval.
+pub fn value_keys_agree(stored: &str, canonical: &str) -> bool {
+    if stored == canonical {
+        return true;
     }
-    Some(collapsed)
+    // A stored key that cannot be normalized at all keeps its literal form:
+    // falling back to "no match" would make it agree with nothing, and falling
+    // back to "match" would make it agree with everything.
+    normalize_value_key(stored).is_some_and(|folded| folded == canonical)
+}
+
+/// The form a stored value key should be compared and grouped under.
+///
+/// The folded form where one exists, and the stored string otherwise. Used to
+/// partition a subject's members, so a legacy row and a new one naming the same
+/// value land in one partition rather than reading as a disagreement.
+pub fn comparable_value_key(stored: &str) -> String {
+    normalize_value_key(stored).unwrap_or_else(|| stored.to_string())
+}
+
+/// Which characters a strict key may be built from, before folding.
+///
+/// Exactly what `fold_separators` **maps to something** in this mode, and
+/// nothing else. A character outside the set is what makes a key *invalid*
+/// rather than merely unnormalized, and the strict path refuses it instead of
+/// dropping it (FR-796b).
+///
+/// The mode matters in both directions. A topic key legitimately contains dots
+/// — the caller splits on them — so a dot is foldable there. But a topic
+/// segment *drops* non-space whitespace rather than folding it, so a tab is
+/// **not** foldable in a topic key: allowing it would let the strict path
+/// silently repair `a\tb` into `ab`, which is a plausible key naming something
+/// nobody proposed. A value key folds all whitespace, so a tab is foldable
+/// there.
+fn is_foldable(ch: char, mode: Folding) -> bool {
+    if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/' | ' ') {
+        return true;
+    }
+    match mode {
+        Folding::TopicSegment => ch == '.',
+        Folding::ValueKey => ch == '.' || ch.is_whitespace(),
+    }
+}
+
+/// Why a strictly-normalized key was refused.
+///
+/// Carries no offending text, for the same reason
+/// [`crate::validate::GlobalContentRejection`] carries none: a type with
+/// nowhere to put the value cannot leak it. A refusal is recorded under a fixed
+/// vocabulary (FR-796b, FR-804a), and [`KeyRefusal::reason`] is that
+/// vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KeyRefusal {
+    #[error("the proposed key is empty once normalized")]
+    Empty,
+    #[error("the proposed key contains a character no normalization may remove")]
+    UnrepresentableCharacter,
+    #[error("the proposed key has more than {max} segments")]
+    TooManySegments { max: usize },
+    #[error("the proposed key is longer than {max} characters")]
+    TooLong { max: usize },
+    #[error("a value key was proposed without a topic key")]
+    ValueWithoutTopic,
+}
+
+impl KeyRefusal {
+    /// The fixed refusal vocabulary a consolidation refusal is recorded under.
+    pub fn reason(&self) -> &'static str {
+        "key_normalization_failed"
+    }
+}
+
+/// Normalize a topic key for **consolidation**, refusing rather than repairing.
+///
+/// The difference from [`normalize_topic_key`] is the whole point, and it is
+/// not a stylistic one. The lenient function exists for FR-312: a memory is
+/// stored regardless, free-form if its key cannot be represented, so dropping
+/// an unrepresentable character is acceptable there because the key is a
+/// convenience.
+///
+/// Here the key *is* the identity — it decides which existing knowledge a
+/// candidate collides with, reinforces or conflicts against (FR-796d). Silently
+/// turning `storage@authority` into `storageauthority` would produce a
+/// plausible key that names something the proposer never meant, and it would do
+/// so invisibly. So a character that folding cannot represent refuses the
+/// candidate, and the refusal is recorded (FR-796b).
+///
+/// Folding case and separators is *not* repair: `Storage Authority` and
+/// `storage-authority` are the same key written two ways, and FR-796a requires
+/// them to resolve to one canonical representation.
+pub fn normalize_topic_key_strict(input: &str) -> Result<String, KeyRefusal> {
+    if input
+        .chars()
+        .any(|c| !is_foldable(c, Folding::TopicSegment))
+    {
+        return Err(KeyRefusal::UnrepresentableCharacter);
+    }
+    let lowered: String = input.nfc().collect::<String>().to_lowercase();
+    let segments: Vec<String> = lowered
+        .split('.')
+        .map(|segment| fold_separators(segment, Folding::TopicSegment))
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if segments.is_empty() {
+        return Err(KeyRefusal::Empty);
+    }
+    if segments.len() > TOPIC_KEY_MAX_SEGMENTS {
+        return Err(KeyRefusal::TooManySegments {
+            max: TOPIC_KEY_MAX_SEGMENTS,
+        });
+    }
+    let key = segments.join(".");
+    if key.chars().count() > TOPIC_KEY_MAX_CHARS {
+        return Err(KeyRefusal::TooLong {
+            max: TOPIC_KEY_MAX_CHARS,
+        });
+    }
+    Ok(key)
+}
+
+/// Normalize a value key for **consolidation**, refusing rather than repairing.
+///
+/// See [`normalize_topic_key_strict`] for why refusal is the right answer here
+/// and repair is the right answer for the lenient path.
+pub fn normalize_value_key_strict(input: &str) -> Result<String, KeyRefusal> {
+    if input.chars().any(|c| !is_foldable(c, Folding::ValueKey)) {
+        return Err(KeyRefusal::UnrepresentableCharacter);
+    }
+    let folded = fold_separators(input, Folding::ValueKey);
+    if folded.is_empty() {
+        return Err(KeyRefusal::Empty);
+    }
+    if folded.chars().count() > VALUE_KEY_MAX_CHARS {
+        return Err(KeyRefusal::TooLong {
+            max: VALUE_KEY_MAX_CHARS,
+        });
+    }
+    Ok(folded)
+}
+
+/// Both keys of a consolidation candidate, normalized together.
+///
+/// Together because the pairing rule is part of the identity: a value key
+/// without a topic key names a value of nothing, and the storage constraint
+/// that forbids it (FR-311) is the same rule that would make such a candidate
+/// unmatchable against anything.
+pub fn normalize_candidate_keys(
+    topic: Option<&str>,
+    value: Option<&str>,
+) -> Result<(Option<String>, Option<String>), KeyRefusal> {
+    match (topic, value) {
+        (None, None) => Ok((None, None)),
+        (None, Some(_)) => Err(KeyRefusal::ValueWithoutTopic),
+        (Some(t), None) => Ok((Some(normalize_topic_key_strict(t)?), None)),
+        (Some(t), Some(v)) => Ok((
+            Some(normalize_topic_key_strict(t)?),
+            Some(normalize_value_key_strict(v)?),
+        )),
+    }
 }
 
 /// The digest exact-duplicate detection compares (D46).
@@ -380,9 +649,18 @@ pub fn classify_proposal(
     // 2. A shared value key with differing content. Agreement about the value,
     //    and nothing more — so nothing is written.
     if let Some(value) = proposal.value_key.as_deref() {
+        // Compared through `value_keys_agree`, not by string equality: a member
+        // stored before Feature 005 folded value-key separators carries the old
+        // form, and calling that a different value would report a conflict
+        // between a claim and a restatement of itself until T142 migrates the
+        // row.
         let mut agreeing: Vec<&MemoryFacts> = applicable
             .iter()
-            .filter(|m| m.value_key.as_deref() == Some(value))
+            .filter(|m| {
+                m.value_key
+                    .as_deref()
+                    .is_some_and(|stored| value_keys_agree(stored, value))
+            })
             .copied()
             .collect();
         if !agreeing.is_empty() {
@@ -398,7 +676,11 @@ pub fn classify_proposal(
         // 3. A different value key in an overlapping scope: they disagree.
         let mut disagreeing: Vec<&MemoryFacts> = applicable
             .iter()
-            .filter(|m| m.value_key.is_some() && m.value_key.as_deref() != Some(value))
+            .filter(|m| {
+                m.value_key
+                    .as_deref()
+                    .is_some_and(|stored| !value_keys_agree(stored, value))
+            })
             .copied()
             .collect();
         if !disagreeing.is_empty() {
@@ -757,8 +1039,13 @@ pub fn derive_subject(members: &[MemoryFacts], relations: &[Relation]) -> Subjec
     // with anything: it forms a partition of its own, keyed by its identifier.
     let mut partitions: BTreeMap<String, Vec<&MemoryFacts>> = BTreeMap::new();
     for m in &remaining {
+        // Partitioned on the comparable form, so a member written before
+        // Feature 005's value-key folding shares a partition with one written
+        // after it. Partitioning on the raw string would split one value into
+        // two and render the subject `Conflicted` with no winner, purely
+        // because normalization changed underneath it.
         let key = match &m.value_key {
-            Some(v) => format!("v:{v}"),
+            Some(v) => format!("v:{}", comparable_value_key(v)),
             None => format!("m:{}", m.id),
         };
         partitions.entry(key).or_default().push(m);
@@ -1164,9 +1451,13 @@ mod tests {
     #[test]
     fn value_key_normalization() {
         assert_eq!(normalize_value_key("  JWT  ").as_deref(), Some("jwt"));
+        // Feature 005 folds the separator (FR-796a). Before, this produced
+        // `postgresql 16`, so a later proposal writing `postgresql_16` named a
+        // different value for the same subject — which `classify_proposal`
+        // reads as a conflict rather than a restatement.
         assert_eq!(
             normalize_value_key("PostgreSQL\t16").as_deref(),
-            Some("postgresql 16")
+            Some("postgresql_16")
         );
         assert_eq!(normalize_value_key("   "), None);
         assert_eq!(normalize_value_key(""), None);

@@ -5,12 +5,9 @@ import { use } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
 import { api } from "@/lib/api";
-import {
-  ErrorState,
-  ListSkeleton,
-  PageHeader,
-  formatDate,
-} from "@/components/page";
+import { ApiErrorState } from "@/components/control-plane";
+import { MemoryFunnel } from "@/components/funnel";
+import { ListSkeleton, PageHeader, formatDate } from "@/components/page";
 import { StatusBadge } from "@/components/session";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -36,7 +33,12 @@ export default function ProjectOverviewPage({
         subtitle={project?.repository_remote ?? undefined}
       />
 
-      {overview.error != null && <ErrorState error={overview.error} />}
+      {/* The funnel loads on its own request. A project overview that waited for
+          both would show nothing until the slower of the two landed, and the
+          funnel is the slower one — twelve counts over the whole history. */}
+      <MemoryFunnel projectId={id} />
+
+      {overview.error != null && <ApiErrorState error={overview.error} />}
       {overview.isLoading && <ListSkeleton rows={4} />}
 
       {overview.data && (

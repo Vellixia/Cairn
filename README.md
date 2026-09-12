@@ -121,6 +121,10 @@ first: a fact about *this task* beats an unrelated one, however well it matches.
 | `cairn delete session <id>` | Remove a session; its memories survive |
 | `cairn link --create` | Opt this project into server sharing |
 | `cairn sync status` | Pending, failed, last successful sync |
+| `cairn doctor --durability` | What losing this machine would cost, category by category |
+| `cairn migrate --inspect` | What a Feature 004 store holds, and what would move. Writes nothing |
+| `cairn migrate --run` | Hand durable knowledge over to the server, resumably |
+| `cairn migrate --status` | Migration phases, and every record that stayed local, with its reason |
 
 Every command takes `--json` and prints a stable envelope.
 
@@ -213,11 +217,137 @@ They never displace project context: personal and team sections come last, are
 capped at 15% of the budget, cannot touch the reserved level, and are excluded
 entirely at `depth: "minimum"`.
 
+## When the server holds your memory
+
+Connect a server and it becomes the authority for durable knowledge: project
+memory, personal notes, team guidance and reusable patterns. Your machine keeps
+a copy, but the copy is a cache.
+
+**A queued command is not a durable one.** `cairn memory add`, `pattern promote`,
+`personal add`, `team propose` and the rest state an *intent*; the server decides
+the consequence. Until the server has accepted it, the change is queued, and
+Cairn says so rather than showing you a record that does not exist yet:
+
+```bash
+cairn sync status                # pending, failed, blocked, per namespace
+```
+
+A command that is queued behind an unreachable server is not lost and is not
+applied. It goes out when the server comes back.
+
+**Verification says only what was established.** A check Cairn ran on this
+machine reads `cairn`; a check a client reported over the network reads
+`remote_attested`, whichever route carried it and whatever the report was called.
+There is no way to assert a stronger one, because the server assigns it and the
+payload has no field for it. `unverified` means nothing has been established —
+not that something failed.
+
+**Health reports evidence, not configuration.** A hook Cairn wrote and read back
+is *introspection*; a hook that fired is an *observation*. A capability is
+`supported` only on an observation, so "configured" never reads as "working" and
+silence never reads as a failure.
+
+## What losing this machine costs
+
+`cairn doctor --durability` answers it in four groups, and prints a category
+even when it is empty, so an omission is never read as an assurance:
+
+- **lost for good** — this machine's writer identity, its migration and
+  authority state, its observations and evidence facts, its verification runs,
+  continuity checkpoints, pattern applications, local-only memory, task change
+  history, and any events still spooled at the moment of loss;
+- **restored from the server on the next pull** — projects, accounts, and every
+  durable record the server has accepted;
+- **queued, accepted for delivery, not yet durable** — the spool, which is the
+  one category whose loss is silent unless you look;
+- **caches** — project memory, personal knowledge, team guidance and cached
+  patterns, which refill.
+
+Destroying the local store is safe for everything in the second and fourth
+groups and only those. Cairn names the difference rather than reporting an
+unqualified success.
+
+## Migrating a Feature 004 store
+
+A store that predates server authority migrates explicitly, and resumably:
+
+```bash
+cairn migrate --inspect          # counts and reports. Changes nothing
+cairn migrate --claim-patterns   # legacy patterns have no recorded owner
+cairn migrate --run              # drain → possession → switch → recheck → demote
+cairn migrate --status           # phases, and what stayed local, record by record
+cairn migrate --retry-retained   # re-attempt the leftovers, on demand
+```
+
+Nothing local is demoted before the server is confirmed to hold it, and
+possession is re-checked again at the moment of demotion. A record the server
+cannot accept stays local, stays readable, and is reported individually rather
+than being dropped.
+
+Legacy patterns are the one thing migration cannot work out for itself: the old
+table has no owner column and a store may have been used with several accounts,
+so ownership is claimed once, explicitly, and never inferred from whoever
+happens to be signed in.
+
+When an operator cuts a server over (`POST /api/admin/cutover`, admin only), the
+old synchronization path closes for knowledge with `upgrade_required`. Reads
+keep working, non-knowledge sync keeps working, and a refused client's local
+store is not touched — it is out of date, not wrong.
+
+## What each agent actually does
+
+| Agent | Capture | Context delivery |
+|---|---|---|
+| Claude Code | hooks, automatic | session start **and** prompt time |
+| Codex CLI | hooks, automatic | session start **and** prompt time |
+| OpenCode | **capture only** | none — declined by Cairn |
+
+OpenCode's context hooks exist but are beta, and Cairn declines to rest an
+automatic guarantee on them. That is a Cairn decision, not a missing vendor
+feature, and the health matrix says `declined_by_cairn` rather than blaming
+OpenCode for something it does offer.
+
+## Privacy
+
+Cairn captures structured observations, never transcripts. What crosses to a
+server is narrower still: no prompt or assistant text, no tool output, no
+absolute paths, no credentials, no vendor JSON. A signal Cairn cannot map to a
+safe shape is declined and counted, not guessed at.
+
+```bash
+cairn privacy exclude --path "secrets/**"   # never captured at all
+cairn doctor --json | jq '.dispositions'    # what was declined, and why
+```
+
+One machine-scoped value does reach the server, and it is worth naming because
+it is the exception that proves the rule. Cairn mints a `writer_id` once per
+local store — a UUID from a random generator, with no hostname, hardware serial,
+OS machine id, MAC address, account name or filesystem path in it. It answers
+"did these two records come from the same writer" and "is there a gap in this
+writer's stream", which is what health and evidence need; it does not answer
+"which machine is this", and nothing compares one writer's stream against
+another's to decide anything.
+
 ## Principles
 
-- **Local-first.** Everything works offline. Capture, recall, briefing, handoff, and search
-  never need a network. Cairn never blocks the agent it is attached to: capture hooks have a
-  250 ms deadline, always exit 0, and drop work rather than wait.
+- **Fail-soft, not offline-authoritative.** Cairn never blocks the agent it is attached to:
+  capture hooks have a 250 ms deadline, always exit 0, and drop work rather than wait. An
+  unlinked project *is* fully local — its own store is the only authority there is, and
+  capture, recall, briefing, handoff and search need no network at all.
+
+  A **linked** project is different, and the difference is the point of the feature. Durable
+  knowledge belongs to the server, and what happens when the server cannot be reached is
+  spelled out rather than glossed:
+
+  - the agent keeps working, and every hook still exits 0;
+  - safe capture and knowledge commands queue as specified and go out when the server returns;
+  - a briefing already authorized for **this account and this session** may be served from the
+    bounded local cache, labelled cached;
+  - a cache miss, or a cache belonging to another account, does **not** promote local copies of
+    server-owned knowledge into authority — the briefing says durable memory is unavailable this
+    turn rather than serving something it cannot check the caller against;
+  - canonical knowledge the server has accepted survives losing this machine entirely, which is
+    the guarantee the arrangement buys.
 - **Private by default.** No conversation transcripts. No unbounded command output. Secrets
   redacted before anything is written. **Raw observations never leave your machine** — a
   shared memory carries evidence identifiers and a count, never the observation rows behind

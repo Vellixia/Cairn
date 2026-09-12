@@ -16,6 +16,16 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "collaborative_global_memory",
         include_str!("../migrations/0003_collaborative_global_memory.sql"),
     ),
+    (
+        4,
+        "autonomous_memory",
+        include_str!("../migrations/0004_autonomous_memory.sql"),
+    ),
+    (
+        5,
+        "team_revision",
+        include_str!("../migrations/0005_team_revision.sql"),
+    ),
 ];
 
 /// The highest migration this build carries.
@@ -23,7 +33,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// Not what the server advertises: a deployment can be held at a lower schema
 /// deliberately, and what it can actually hold is the schema it **applied**.
 /// See [`applied_version`].
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -83,6 +93,56 @@ pub async fn applied_version(pool: &PgPool) -> anyhow::Result<i64> {
 /// Stops at `max_version`, which is [`SCHEMA_VERSION`] unless an operator held
 /// the deployment back.
 pub async fn migrate(
+    pool: &PgPool,
+    max_version: i64,
+    admin_email: Option<&str>,
+) -> anyhow::Result<()> {
+    // **One migrator at a time against one database.**
+    //
+    // Applying migrations on start is what lets a fresh deployment need no
+    // separate step, and it means every server that boots runs this. Two of
+    // them booting together — a rolling restart, a scaled deployment, or the
+    // end-to-end suite, which starts a server per test — then issue the same
+    // `CREATE TABLE` concurrently, and PostgreSQL's own catalog refuses the
+    // loser:
+    //
+    //     duplicate key value violates unique constraint
+    //     "pg_type_typname_nsp_index"
+    //
+    // `IF NOT EXISTS` does not help: it is checked before the catalog insert,
+    // not atomically with it. The server then exits, which is the honest
+    // response to a failed migration but a poor one to a race it could have
+    // waited out.
+    //
+    // A session-level lock rather than the transaction-scoped
+    // `pg_advisory_xact_lock` used elsewhere, because migrations are
+    // deliberately one transaction *each* — a partly-applied set must leave the
+    // migrations that did commit recorded — so there is no single transaction
+    // whose lifetime is the right one. It is released explicitly on both paths
+    // below, and by PostgreSQL itself if this process dies holding it.
+    let mut lock = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *lock)
+        .await?;
+    let applied = apply_migrations(pool, max_version, admin_email).await;
+    let released = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_LOCK)
+        .execute(&mut *lock)
+        .await;
+    // The migration's own outcome first: a failure to apply is what a caller
+    // needs to hear about, and reporting a failed unlock over it would bury it.
+    applied?;
+    released?;
+    Ok(())
+}
+
+/// The one advisory-lock key every booting server serializes its migrations on.
+///
+/// Fixed, because two servers taking different keys serialize against nothing.
+const MIGRATION_LOCK: i64 = 4_770_040_002;
+
+async fn apply_migrations(
     pool: &PgPool,
     max_version: i64,
     admin_email: Option<&str>,

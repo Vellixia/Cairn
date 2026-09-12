@@ -1,0 +1,175 @@
+# Pre-Feature-005 workspace dependency baseline (SC-737).
+#
+# SC-737 requires that Feature 005 adds *zero* datastore, broker or
+# worker-platform dependencies. That is only testable against a manifest
+# recorded before the feature was implemented, so this file is that record:
+# every external dependency named anywhere in the workspace at the baseline
+# commit, plus the category rules the assertion applies to anything new.
+#
+# This file is committed, not regenerated. Re-recording it to make a test pass
+# would delete the only evidence the claim rests on.
+
+[manifest]
+recorded_at_commit = "d31916d2eb70b456a1987354760d4f0b2ccfd3c1"
+recorded_at_branch = "feature-005-spec"
+recorded_on = "2026-09-02"
+# Every Cargo.toml scanned to build `entries`, relative to the workspace root.
+manifests = [
+    "Cargo.toml",
+    "crates/cairn-core/Cargo.toml",
+    "crates/cairn-git/Cargo.toml",
+    "crates/cairn-integrate/Cargo.toml",
+    "crates/cairn-server/Cargo.toml",
+    "crates/cairn-store/Cargo.toml",
+    "crates/cairn-sys/Cargo.toml",
+    "crates/cairn/Cargo.toml",
+    "crates/cairnd/Cargo.toml",
+    "tests/Cargo.toml",
+]
+# Dependency tables read from each manifest.
+tables = [
+    "workspace.dependencies",
+    "dependencies",
+    "dev-dependencies",
+    "build-dependencies",
+]
+
+# Every external dependency name present at the baseline commit, sorted.
+# In-workspace path dependencies (cairn-*) are deliberately included so that a
+# *new* workspace member also shows up as an added entry.
+entries = [
+    "anyhow",
+    "argon2",
+    "axum",
+    "cairn-core",
+    "cairn-git",
+    "cairn-integrate",
+    "cairn-store",
+    "cairn-sys",
+    "chrono",
+    "clap",
+    "dirs",
+    "flate2",
+    "hex",
+    "include_dir",
+    "jsonc-parser",
+    "libc",
+    "rand",
+    "regex",
+    "reqwest",
+    "semver",
+    "serde",
+    "serde_json",
+    "sha2",
+    "sqlx",
+    "tar",
+    "tempfile",
+    "thiserror",
+    "tiktoken-rs",
+    "tokio",
+    "toml_edit",
+    "tower",
+    "tower-http",
+    "tracing",
+    "tracing-subscriber",
+    "unicode-normalization",
+    "uuid",
+    "windows-sys",
+]
+
+# The three categories SC-737 forbids. A dependency added by Feature 005 fails
+# the assertion when its name contains any of these substrings (matched
+# case-insensitively against the crate name with `-` and `_` folded together).
+#
+# Substring matching is deliberate: it is the conservative direction. A false
+# positive is a conversation about whether the dependency belongs; a false
+# negative is the architecture principle quietly breaking.
+[forbidden.datastore]
+reason = "Principle II — Feature 005 adds no new datastore. PostgreSQL and SQLite already exist, both through `sqlx`."
+patterns = [
+    "rocksdb",
+    "sled",
+    "redis",
+    "mongodb",
+    "cassandra",
+    "scylla",
+    "clickhouse",
+    "duckdb",
+    "leveldb",
+    "lmdb",
+    "etcd",
+    "elasticsearch",
+    "opensearch",
+    "meilisearch",
+    "tantivy",
+    "qdrant",
+    "milvus",
+    "pinecone",
+    "weaviate",
+    "surrealdb",
+    "tikv",
+    "foundationdb",
+    "influxdb",
+    "couchdb",
+    "dynamodb",
+    "memcache",
+    "mysql",
+    "libsql",
+    "rusqlite",
+    "diesel",
+    "seaorm",
+    "tokiopostgres",
+]
+
+[forbidden.broker]
+reason = "Principle II — Feature 005 adds no broker. The daemon spools locally and the server holds work in its own tables."
+patterns = [
+    "kafka",
+    "rdkafka",
+    "pulsar",
+    "nats",
+    "rabbitmq",
+    "lapin",
+    "amqp",
+    "zeromq",
+    "zmq",
+    "nsq",
+    "mqtt",
+    "rumqtt",
+    "stomp",
+    "sqs",
+    "pubsub",
+    "eventbus",
+]
+
+[forbidden.worker_platform]
+reason = "Principle II — consolidation is a bounded in-process Tokio task, not a worker platform."
+patterns = [
+    "celery",
+    "sidekiq",
+    "faktory",
+    "temporal",
+    "cadence",
+    "airflow",
+    "apalis",
+    "fang",
+    "sqlxq",
+    "backie",
+    "batch",
+    "quirk",
+    "cron",
+    "clokwerk",
+    "jobrunner",
+    "taskqueue",
+    "workerpool",
+    "rayon",
+]
+
+# Feature 005 may configure a hosted extraction model provider. SC-737
+# explicitly excludes it from the three categories above — it stores nothing
+# and coordinates nothing — and hands it to FR-805a / FR-805a1 instead. A
+# dependency listed here is therefore not counted by SC-737, but is only
+# permitted at all once the `contracts/extraction.md` §5 gate is satisfied.
+# Feature 005 ships the deterministic extractor, so this list is empty.
+[extraction]
+declared = []

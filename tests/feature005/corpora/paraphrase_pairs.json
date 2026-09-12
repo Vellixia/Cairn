@@ -1,0 +1,532 @@
+{
+  "_comment": [
+    "Pre-registered paraphrase corpus for Feature 005 US1 (T044, SC-736).",
+    "",
+    "Fifty claim pairs, ten per knowledge kind. Each pair is one claim",
+    "written two ways: `topic_a`/`topic_b` are two wordings of the same",
+    "topic, and `value_a`/`value_b` are two wordings of the same value.",
+    "Both wordings of each half MUST normalize (cairn_core::knowledge::",
+    "normalize_topic_key / normalize_value_key) to the identical string \u2014",
+    "that identity is exactly what makes a restatement reinforce instead",
+    "of creating a second record (contracts/consolidation.md \u00a77).",
+    "",
+    "Every wording is deliberately a single shell-token / path-stem shape",
+    "(hyphen, slash, case and doubled-separator variation; no bare space)",
+    "because the representative subset of this corpus that",
+    "`feature005_consolidation_restart.rs` drives through the real",
+    "pipeline embeds these strings directly into a `test_command` and a",
+    "`repo_file` for R1 (fix-confirmed-by-tests) \u2014 the one deterministic",
+    "rule that derives its keys from free text rather than from a",
+    "vocabulary-justified token, so it is the rule this corpus can drive",
+    "end to end without also constructing session vocabulary.",
+    "",
+    "'variation' on each half names the separator-folding technique it",
+    "exercises (contracts/extraction.md \u00a77): hyphen, case, slash, a",
+    "doubled separator, and upper-case-plus-hyphen against a lower-case",
+    "hyphen. Both sides of every pair are asserted to normalize identically",
+    "in `feature005_consolidation_restart.rs`."
+  ],
+  "version": 1,
+  "pairs": [
+    {
+      "id": "fact-01",
+      "kind": "fact",
+      "topic_a": "test-command",
+      "topic_b": "test_command",
+      "topic_variation": "hyphen",
+      "value_a": "default/branch",
+      "value_b": "default_branch",
+      "value_variation": "slash"
+    },
+    {
+      "id": "fact-02",
+      "kind": "fact",
+      "topic_a": "Rust_Edition",
+      "topic_b": "rust_edition",
+      "topic_variation": "case",
+      "value_a": "build--target",
+      "value_b": "build__target",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "fact-03",
+      "kind": "fact",
+      "topic_a": "node/version",
+      "topic_b": "node_version",
+      "topic_variation": "slash",
+      "value_a": "DB-ENGINE",
+      "value_b": "db-engine",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "fact-04",
+      "kind": "fact",
+      "topic_a": "default--branch",
+      "topic_b": "default__branch",
+      "topic_variation": "doubled_separator",
+      "value_a": "ci-provider",
+      "value_b": "ci_provider",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "fact-05",
+      "kind": "fact",
+      "topic_a": "BUILD-TARGET",
+      "topic_b": "build-target",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Package_Manager",
+      "value_b": "package_manager",
+      "value_variation": "case"
+    },
+    {
+      "id": "fact-06",
+      "kind": "fact",
+      "topic_a": "db-engine",
+      "topic_b": "db_engine",
+      "topic_variation": "hyphen",
+      "value_a": "license/kind",
+      "value_b": "license_kind",
+      "value_variation": "slash"
+    },
+    {
+      "id": "fact-07",
+      "kind": "fact",
+      "topic_a": "Ci_Provider",
+      "topic_b": "ci_provider",
+      "topic_variation": "case",
+      "value_a": "license--kind2",
+      "value_b": "license__kind2",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "fact-08",
+      "kind": "fact",
+      "topic_a": "package/manager",
+      "topic_b": "package_manager",
+      "topic_variation": "slash",
+      "value_a": "TEST-COMMAND",
+      "value_b": "test-command",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "fact-09",
+      "kind": "fact",
+      "topic_a": "license--kind",
+      "topic_b": "license__kind",
+      "topic_variation": "doubled_separator",
+      "value_a": "rust-edition",
+      "value_b": "rust_edition",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "fact-10",
+      "kind": "fact",
+      "topic_a": "LICENSE-KIND2",
+      "topic_b": "license-kind2",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Node_Version",
+      "value_b": "node_version",
+      "value_variation": "case"
+    },
+    {
+      "id": "decision-01",
+      "kind": "decision",
+      "topic_a": "storage-authority",
+      "topic_b": "storage_authority",
+      "topic_variation": "hyphen",
+      "value_a": "error/handling",
+      "value_b": "error_handling",
+      "value_variation": "slash"
+    },
+    {
+      "id": "decision-02",
+      "kind": "decision",
+      "topic_a": "Auth_Strategy",
+      "topic_b": "auth_strategy",
+      "topic_variation": "case",
+      "value_a": "retry--policy",
+      "value_b": "retry__policy",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "decision-03",
+      "kind": "decision",
+      "topic_a": "api/versioning",
+      "topic_b": "api_versioning",
+      "topic_variation": "slash",
+      "value_a": "CACHE-LAYER",
+      "value_b": "cache-layer",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "decision-04",
+      "kind": "decision",
+      "topic_a": "error--handling",
+      "topic_b": "error__handling",
+      "topic_variation": "doubled_separator",
+      "value_a": "queue-backend",
+      "value_b": "queue_backend",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "decision-05",
+      "kind": "decision",
+      "topic_a": "RETRY-POLICY",
+      "topic_b": "retry-policy",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Schema_Owner",
+      "value_b": "schema_owner",
+      "value_variation": "case"
+    },
+    {
+      "id": "decision-06",
+      "kind": "decision",
+      "topic_a": "cache-layer",
+      "topic_b": "cache_layer",
+      "topic_variation": "hyphen",
+      "value_a": "deploy/target",
+      "value_b": "deploy_target",
+      "value_variation": "slash"
+    },
+    {
+      "id": "decision-07",
+      "kind": "decision",
+      "topic_a": "Queue_Backend",
+      "topic_b": "queue_backend",
+      "topic_variation": "case",
+      "value_a": "config--source",
+      "value_b": "config__source",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "decision-08",
+      "kind": "decision",
+      "topic_a": "schema/owner",
+      "topic_b": "schema_owner",
+      "topic_variation": "slash",
+      "value_a": "STORAGE-AUTHORITY",
+      "value_b": "storage-authority",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "decision-09",
+      "kind": "decision",
+      "topic_a": "deploy--target",
+      "topic_b": "deploy__target",
+      "topic_variation": "doubled_separator",
+      "value_a": "auth-strategy",
+      "value_b": "auth_strategy",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "decision-10",
+      "kind": "decision",
+      "topic_a": "CONFIG-SOURCE",
+      "topic_b": "config-source",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Api_Versioning",
+      "value_b": "api_versioning",
+      "value_variation": "case"
+    },
+    {
+      "id": "convention-01",
+      "kind": "convention",
+      "topic_a": "commit-style",
+      "topic_b": "commit_style",
+      "topic_variation": "hyphen",
+      "value_a": "lint/rule",
+      "value_b": "lint_rule",
+      "value_variation": "slash"
+    },
+    {
+      "id": "convention-02",
+      "kind": "convention",
+      "topic_a": "Branch_Naming",
+      "topic_b": "branch_naming",
+      "topic_variation": "case",
+      "value_a": "import--order",
+      "value_b": "import__order",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "convention-03",
+      "kind": "convention",
+      "topic_a": "test/layout",
+      "topic_b": "test_layout",
+      "topic_variation": "slash",
+      "value_a": "FILE-NAMING",
+      "value_b": "file-naming",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "convention-04",
+      "kind": "convention",
+      "topic_a": "lint--rule",
+      "topic_b": "lint__rule",
+      "topic_variation": "doubled_separator",
+      "value_a": "log-format",
+      "value_b": "log_format",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "convention-05",
+      "kind": "convention",
+      "topic_a": "IMPORT-ORDER",
+      "topic_b": "import-order",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Error_Prefix",
+      "value_b": "error_prefix",
+      "value_variation": "case"
+    },
+    {
+      "id": "convention-06",
+      "kind": "convention",
+      "topic_a": "file-naming",
+      "topic_b": "file_naming",
+      "topic_variation": "hyphen",
+      "value_a": "env/naming",
+      "value_b": "env_naming",
+      "value_variation": "slash"
+    },
+    {
+      "id": "convention-07",
+      "kind": "convention",
+      "topic_a": "Log_Format",
+      "topic_b": "log_format",
+      "topic_variation": "case",
+      "value_a": "module--layout",
+      "value_b": "module__layout",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "convention-08",
+      "kind": "convention",
+      "topic_a": "error/prefix",
+      "topic_b": "error_prefix",
+      "topic_variation": "slash",
+      "value_a": "COMMIT-STYLE",
+      "value_b": "commit-style",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "convention-09",
+      "kind": "convention",
+      "topic_a": "env--naming",
+      "topic_b": "env__naming",
+      "topic_variation": "doubled_separator",
+      "value_a": "branch-naming",
+      "value_b": "branch_naming",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "convention-10",
+      "kind": "convention",
+      "topic_a": "MODULE-LAYOUT",
+      "topic_b": "module-layout",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Test_Layout",
+      "value_b": "test_layout",
+      "value_variation": "case"
+    },
+    {
+      "id": "failure-01",
+      "kind": "failure",
+      "topic_a": "storage-authority",
+      "topic_b": "storage_authority",
+      "topic_variation": "hyphen",
+      "value_a": "timeout/retry",
+      "value_b": "timeout_retry",
+      "value_variation": "slash"
+    },
+    {
+      "id": "failure-02",
+      "kind": "failure",
+      "topic_a": "Flaky_Network",
+      "topic_b": "flaky_network",
+      "topic_variation": "case",
+      "value_a": "schema--drift",
+      "value_b": "schema__drift",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "failure-03",
+      "kind": "failure",
+      "topic_a": "race/condition",
+      "topic_b": "race_condition",
+      "topic_variation": "slash",
+      "value_a": "STALE-CACHE",
+      "value_b": "stale-cache",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "failure-04",
+      "kind": "failure",
+      "topic_a": "timeout--retry",
+      "topic_b": "timeout__retry",
+      "topic_variation": "doubled_separator",
+      "value_a": "deadlock-spool",
+      "value_b": "deadlock_spool",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "failure-05",
+      "kind": "failure",
+      "topic_a": "SCHEMA-DRIFT",
+      "topic_b": "schema-drift",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Leak_Handle",
+      "value_b": "leak_handle",
+      "value_variation": "case"
+    },
+    {
+      "id": "failure-06",
+      "kind": "failure",
+      "topic_a": "stale-cache",
+      "topic_b": "stale_cache",
+      "topic_variation": "hyphen",
+      "value_a": "panic/unwrap",
+      "value_b": "panic_unwrap",
+      "value_variation": "slash"
+    },
+    {
+      "id": "failure-07",
+      "kind": "failure",
+      "topic_a": "Deadlock_Spool",
+      "topic_b": "deadlock_spool",
+      "topic_variation": "case",
+      "value_a": "overflow--index",
+      "value_b": "overflow__index",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "failure-08",
+      "kind": "failure",
+      "topic_a": "leak/handle",
+      "topic_b": "leak_handle",
+      "topic_variation": "slash",
+      "value_a": "STORAGE-AUTHORITY",
+      "value_b": "storage-authority",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "failure-09",
+      "kind": "failure",
+      "topic_a": "panic--unwrap",
+      "topic_b": "panic__unwrap",
+      "topic_variation": "doubled_separator",
+      "value_a": "flaky-network",
+      "value_b": "flaky_network",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "failure-10",
+      "kind": "failure",
+      "topic_a": "OVERFLOW-INDEX",
+      "topic_b": "overflow-index",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Race_Condition",
+      "value_b": "race_condition",
+      "value_variation": "case"
+    },
+    {
+      "id": "procedure-01",
+      "kind": "procedure",
+      "topic_a": "release-cut",
+      "topic_b": "release_cut",
+      "topic_variation": "hyphen",
+      "value_a": "backup/restore",
+      "value_b": "backup_restore",
+      "value_variation": "slash"
+    },
+    {
+      "id": "procedure-02",
+      "kind": "procedure",
+      "topic_a": "Hotfix_Deploy",
+      "topic_b": "hotfix_deploy",
+      "topic_variation": "case",
+      "value_a": "rotate--secret",
+      "value_b": "rotate__secret",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "procedure-03",
+      "kind": "procedure",
+      "topic_a": "migration/apply",
+      "topic_b": "migration_apply",
+      "topic_variation": "slash",
+      "value_a": "BOOTSTRAP-ENV",
+      "value_b": "bootstrap-env",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "procedure-04",
+      "kind": "procedure",
+      "topic_a": "backup--restore",
+      "topic_b": "backup__restore",
+      "topic_variation": "doubled_separator",
+      "value_a": "scale-worker",
+      "value_b": "scale_worker",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "procedure-05",
+      "kind": "procedure",
+      "topic_a": "ROTATE-SECRET",
+      "topic_b": "rotate-secret",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Rollback_Release",
+      "value_b": "rollback_release",
+      "value_variation": "case"
+    },
+    {
+      "id": "procedure-06",
+      "kind": "procedure",
+      "topic_a": "bootstrap-env",
+      "topic_b": "bootstrap_env",
+      "topic_variation": "hyphen",
+      "value_a": "seed/fixture",
+      "value_b": "seed_fixture",
+      "value_variation": "slash"
+    },
+    {
+      "id": "procedure-07",
+      "kind": "procedure",
+      "topic_a": "Scale_Worker",
+      "topic_b": "scale_worker",
+      "topic_variation": "case",
+      "value_a": "cache--warm",
+      "value_b": "cache__warm",
+      "value_variation": "doubled_separator"
+    },
+    {
+      "id": "procedure-08",
+      "kind": "procedure",
+      "topic_a": "rollback/release",
+      "topic_b": "rollback_release",
+      "topic_variation": "slash",
+      "value_a": "RELEASE-CUT",
+      "value_b": "release-cut",
+      "value_variation": "mixed_case_hyphen"
+    },
+    {
+      "id": "procedure-09",
+      "kind": "procedure",
+      "topic_a": "seed--fixture",
+      "topic_b": "seed__fixture",
+      "topic_variation": "doubled_separator",
+      "value_a": "hotfix-deploy",
+      "value_b": "hotfix_deploy",
+      "value_variation": "hyphen"
+    },
+    {
+      "id": "procedure-10",
+      "kind": "procedure",
+      "topic_a": "CACHE-WARM",
+      "topic_b": "cache-warm",
+      "topic_variation": "mixed_case_hyphen",
+      "value_a": "Migration_Apply",
+      "value_b": "migration_apply",
+      "value_variation": "case"
+    }
+  ]
+}

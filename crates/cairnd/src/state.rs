@@ -68,6 +68,38 @@ pub struct Daemon {
     /// holds the rest of the queue, and then reports a depth that is accurate
     /// and useless. One in-process mutex — no lease, no lock service (FR-059).
     pub sync_drain: Arc<tokio::sync::Mutex<()>>,
+    /// The bounded, account-bound outage cache for server-side retrieval
+    /// (T072, `contracts/retrieval-delivery.md` §12.3). A cache, not durable
+    /// state: in-memory, lost on restart, rebuilt by the next successful
+    /// retrieval. Invalidated from [`Daemon::mutate_credentials`], the single
+    /// door for sign-out, credential change and account change alike
+    /// (FR-790a).
+    pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
+    /// The instance the endpoint last reported, if this process has asked.
+    ///
+    /// **Observation, never authority.** The store's binding is the singular
+    /// `team:*` lane (`cursor::bound_server_instance`, D438/FR-495/FR-496) and
+    /// a mismatching server never becomes it — FR-791 refuses that server, and
+    /// nothing here changes what a queued row is bound to.
+    ///
+    /// It exists because FR-792 asks a question the binding cannot answer.
+    /// "Which rows belong to a different deployment than the one answering?"
+    /// is measured against the server *answering*, and comparing rows to the
+    /// store's own binding always says none — the backlog then reads as a
+    /// queue that mysteriously stopped, which is the outcome FR-792 exists to
+    /// prevent. Before this, the spool report was handed whichever instance
+    /// sorted first among every lane, so it happened to be right about as
+    /// often as the ids fell the right way.
+    ///
+    /// **Telemetry, and nothing that decides a report** (FR-792c). It is in
+    /// memory and per process, which is exactly why it may not decide one: a
+    /// daemon exits within one supervision tick of another owning its socket,
+    /// so the process that observed a replacement server is routinely gone by
+    /// the time an operator asks what happened, and a reason held only here is
+    /// lost precisely when it is wanted. Status takes its own bounded sample
+    /// instead (`sync::probe_peer_instance`, FR-792a); this stays because it is
+    /// genuinely useful in a log when reconstructing what a daemon saw.
+    pub last_observed_instance: Arc<RwLock<Option<Uuid>>>,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever
@@ -361,10 +393,21 @@ impl Daemon {
             creds.generation
         };
         *creds = next;
+        drop(creds);
+        drop(config);
+
+        // Sign-out, a credential change, and any account change are exactly
+        // the three cases that reach here (the early return above is the
+        // fourth: nothing changed, nothing to invalidate) — the outage
+        // cache's own bound, account-keyed by construction, is not enough on
+        // its own: a *new* account signing in on this machine must never find
+        // a stale entry still keyed to a session id it happens to share with
+        // the old one (FR-790a, `contracts/retrieval-delivery.md` §12.3).
+        self.outage_cache.lock().await.clear();
         Ok(())
     }
 
-    /// The account this machine is authenticated as, or `None`.    /// The account this machine is authenticated as, or `None`.
+    /// The account this machine is authenticated as, or `None`.
     ///
     /// No fallback, by design: a caller that needs an account and has none must
     /// refuse, not substitute. See [`owner_identity`](Self::owner_identity).

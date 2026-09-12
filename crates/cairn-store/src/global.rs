@@ -782,6 +782,22 @@ fn personal_payload(
 /// Carries the lifecycle columns as well as the content ones, because a peer
 /// that already holds an authoritative copy learns of its retirement only from
 /// them. `origin_digest` is absent for the same reason as above.
+///
+/// **Both halves of both transitions, or neither** (FR-457). This carried
+/// `ratified_by_user_id` and `retired_at` and *not* `retired_by_user_id`, which
+/// is the same asymmetry `SyncedTeamKnowledge` had, one direction over: the
+/// backlog path could describe a retirement it structurally could not
+/// attribute. The field is here now for the same reason its ratification twin
+/// always was — a transition recorded with a timestamp and no actor is half a
+/// record, and the missing half is the one an operator asks for.
+///
+/// The server's ingest reads a fixed set of names out of this payload and
+/// ignores the rest by construction (`upsert_team` in `cairn-server`, whose
+/// conflict clause deliberately does nothing), so this field travels for
+/// completeness of the record and not because ingest consumes it — exactly as
+/// `state`, `ratified_by_user_id`, `ratified_at`, `retired_at` and
+/// `superseded_by_id` already did. An ingest that *acted* on any of them would
+/// be the privilege escalation that clause exists to refuse.
 #[allow(clippy::too_many_arguments)]
 fn team_payload(
     id: Uuid,
@@ -796,6 +812,7 @@ fn team_payload(
     proposed_by_user_id: Uuid,
     ratified_by_user_id: Option<Uuid>,
     ratified_at: Option<DateTime<Utc>>,
+    retired_by_user_id: Option<Uuid>,
     retired_at: Option<DateTime<Utc>>,
     superseded_by_id: Option<Uuid>,
 ) -> serde_json::Value {
@@ -815,6 +832,7 @@ fn team_payload(
         "proposed_by_user_id": proposed_by_user_id,
         "ratified_by_user_id": ratified_by_user_id,
         "ratified_at": ratified_at,
+        "retired_by_user_id": retired_by_user_id,
         "retired_at": retired_at,
         "superseded_by_id": superseded_by_id,
     })
@@ -999,7 +1017,7 @@ pub async fn enqueue_team_backlog(store: &Store) -> Result<usize> {
         let row = sqlx::query(
             "SELECT knowledge_type, content, topic_key, value_key, writer_id, writer_seq,
                     state, proposed_by_user_id, ratified_by_user_id, ratified_at,
-                    retired_at, superseded_by_id
+                    retired_by_user_id, retired_at, superseded_by_id
                FROM team_knowledge WHERE id = ?1",
         )
         .bind(id.to_string())
@@ -1019,6 +1037,7 @@ pub async fn enqueue_team_backlog(store: &Store) -> Result<usize> {
             rows::uuid(&row, "proposed_by_user_id")?,
             rows::opt_uuid(&row, "ratified_by_user_id")?,
             rows::opt_ts(&row, "ratified_at")?,
+            rows::opt_uuid(&row, "retired_by_user_id")?,
             rows::opt_ts(&row, "retired_at")?,
             rows::opt_uuid(&row, "superseded_by_id")?,
         );
@@ -1309,9 +1328,9 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 // Team's own shape, beyond that shared discipline:
 //
 // * **`proposed → authoritative → retired`, compare-and-swap** (§3, §5b).
-//   [`ratify_team`] and [`retire_team`] are the *only* two `UPDATE` statements
-//   against `team_knowledge` in this crate, and each hardcodes the state it
-//   requires the row to already be in (`'proposed'` and `'authoritative'`
+//   [`ratify_team`] and [`retire_team`] are the two *lifecycle-advancing*
+//   `UPDATE` statements against `team_knowledge`, and each hardcodes the state
+//   it requires the row to already be in (`'proposed'` and `'authoritative'`
 //   respectively) in its own `WHERE` clause — the same shape the contract's
 //   own SQL gives (§3) and the same shape `crate::criteria::check_revision`
 //   already proved for task criteria, adapted from an integer revision to a
@@ -1321,6 +1340,24 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 //   proceed to `'authoritative'`; the state `CHECK` plus this predicate
 //   together make "un-retire" not a statement this module can execute.
 //
+//   **They are not the only two `UPDATE`s on the table, and saying so was how
+//   this invariant got broken.** Two more exist, both applying a decision the
+//   *server* already made rather than making one: [`adopt_team_transition`],
+//   which writes the state, actor and timestamp out of the server's own reply
+//   when the compare-and-swap above lost, and [`merge_synced_team`], which
+//   refreshes the whole row from a pulled page. The second is the writer that
+//   falsified FR-457: it updated on `WHERE id = ?` alone, so a page fetched
+//   before a local retirement and applied after it wrote `NULL` over
+//   `retired_by_user_id` and rolled the row back to `proposed` — after which
+//   `retire_team`'s compare-and-swap refused and the actor was recorded
+//   nowhere. Neither of the two takes a state predicate, because neither is
+//   deciding a transition; what orders them instead is the server's own
+//   version of the row (`server_changed_at`, schema 11), stated at
+//   [`merge_synced_team`]'s `WHERE` clause. A comment claiming a table has
+//   two writers when it has four is not documentation, it is a false
+//   invariant, and the next writer added under it inherits none of the care
+//   the other two were written with.
+//
 // * **No admin check lives here.** `role` is a server-side concept
 //   (`cairn-server`'s `users.role`) that this local SQLite schema does not
 //   carry at all — `users` here has no `role` column (`0001_init.sql`). This
@@ -1329,9 +1366,11 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 //   caller that already established that (the CLI, backed by an admin
 //   token against the server; or the server itself applying its own
 //   already-authorized decision back into this local mirror). What this
-//   module *does* guarantee structurally is narrower and sufficient: there
-//   is no *other* function anywhere in this crate that can move a row to
-//   `authoritative`, and nothing in this file is reachable from the MCP
+//   module *does* guarantee structurally is narrower and sufficient: the only
+//   other functions in this crate that can put a row in `authoritative` are
+//   [`adopt_team_transition`] and [`merge_synced_team`], and neither invents
+//   that state — each copies one a server already decided, from that server's
+//   own reply or its own change feed. Nothing in this file is reachable from the MCP
 //   six-tool surface (T125, T126 — enforced in `crates/cairn/src/mcp.rs`,
 //   outside this file, by that surface simply never calling `ratify_team` or
 //   `retire_team` at all).
@@ -1881,6 +1920,9 @@ pub async fn propose_team(
             &applicability,
             TeamState::Proposed,
             new.proposed_by_user_id,
+            // A fresh proposal has neither transition, so neither actor and
+            // neither timestamp — absent, never fabricated.
+            None,
             None,
             None,
             None,
@@ -1990,11 +2032,146 @@ async fn team_state_for_update(tx: &mut sqlx::SqliteConnection, id: Uuid) -> Res
 /// `supersedes`, when given, is the ratifying admin's own explicit act
 /// (T127, §6, D431) — recorded here, in the same transaction as the
 /// ratification, and nowhere else in this module infers it.
+/// What a server said about a team row's version — its **revision** and its
+/// `changed_at`, either of which may be absent.
+///
+/// **Two fields because there are two kinds of peer, not because there are two
+/// clocks.** `revision` is `team_knowledge.revision` (server migration 5):
+/// assigned from a sequence at statement time by a trigger on every row write,
+/// so it is monotonic in the order the writes actually happened and no write
+/// can leave it unchanged. `changed_at` is the server's older ordering key,
+/// `GREATEST(created_at, ratified_at, retired_at, superseded_at)`.
+///
+/// `changed_at` is kept only as the fallback for a server that has no revision
+/// to send, because it cannot do the job on its own. Every column inside that
+/// `GREATEST` is stamped with `now()`, which is *transaction start* time: a
+/// retirement whose transaction opened before an earlier-committing
+/// ratification writes a `retired_at` older than that `ratified_at`, and the
+/// `GREATEST` then reads the same value after the retirement as before it.
+/// Measured against this repository's own PostgreSQL as a one-second inversion,
+/// deterministically and with no lock contention. Two different states, one
+/// value, nothing able to order them.
+///
+/// **`unknown()` is a real answer and not a zero.** A caller with nothing to
+/// offer — every local-only `ratify_team`/`retire_team` caller, and a reply this
+/// store could not read — passes it, and both marks are then left exactly as
+/// they were rather than moved to a guess. A fabricated version is worse than
+/// none, because none is honest about what is not known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerVersion {
+    /// The server's derived `changed_at`, when the reply or page carried one.
+    pub changed_at: Option<DateTime<Utc>>,
+    /// The server's monotonic `revision`, when the peer is at server migration
+    /// 5 or above. `None` means "this server cannot order pages for me", never
+    /// "revision zero" — the sequence has `MINVALUE 1`, so zero is not a
+    /// revision any row can hold.
+    pub revision: Option<i64>,
+}
+
+impl ServerVersion {
+    /// Neither half known: leave both marks where they are.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// The stored form of the timestamp half, for binding.
+    fn changed_at_text(&self) -> Option<String> {
+        self.changed_at.map(server_version_text)
+    }
+}
+
+/// Move both version marks forward, never backward, from `?4` (the timestamp)
+/// and `?5` (the revision).
+///
+/// **Advanced independently, and each only when it has something to say.** A
+/// peer at server migration 5 supplies both; one below it supplies only `?4`
+/// and must not be allowed to erase a revision this row already learned from a
+/// newer peer, because one such write would switch the revision comparison off
+/// for that row permanently. `NULL` on either side therefore leaves that mark
+/// alone rather than clearing it.
+///
+/// The `CASE` on each is what keeps a reply that is somehow older than the page
+/// this row already reflects from moving a mark backwards.
+const ADVANCE_VERSION: &str = "server_changed_at = CASE
+                        WHEN ?4 IS NOT NULL
+                             AND (server_changed_at IS NULL OR server_changed_at < ?4)
+                        THEN ?4 ELSE server_changed_at END,
+                    server_revision = CASE
+                        WHEN ?5 IS NOT NULL
+                             AND (server_revision IS NULL OR server_revision < ?5)
+                        THEN ?5 ELSE server_revision END";
+
+/// May a reply carrying version `?4`/`?5` be written over this row?
+///
+/// **The revision decides whenever both sides have one, and the timestamp
+/// decides only when one of them does not.** The two comparisons are not the
+/// same relation, deliberately:
+///
+/// - `server_revision <= ?5` — **equality is admitted.** A revision comes from
+///   a sequence, so an equal revision is *the same server change* arriving
+///   again: re-applying it writes the values already there, which is idempotent
+///   rather than a decision about which of two states wins. Redelivery is
+///   ordinary — a lost reply, a cursor reset, a retried command — and refusing
+///   it would leave a repaired row reported as unrepaired.
+/// - `server_changed_at < ?4` — **equality is refused**, and that asymmetry is
+///   the point. A tie there is not one change twice; it is two *different*
+///   states that happen to share a `GREATEST` over transaction-start
+///   timestamps. Nothing can order them, and the stored one is preferred
+///   because the failure modes are not symmetric: a wrongly declined adoption
+///   is repaired by the next pull, while a wrongly applied resurrection is not
+///   self-correcting — nothing later contradicts it, because the server's own
+///   feed was keyed by the value that failed to move. The reachable ordering:
+///   the server ratifies at T1 and retires the same row at T2, this device
+///   records the retirement, and the delayed *ratify* handler adopts
+///   `authoritative`/T1 — putting retired guidance back in front of every user
+///   of the store (FR-456, FR-465).
+///
+/// `server_revision IS NULL` falls to the timestamp arm rather than admitting
+/// outright: such a row predates local schema 12 and has a `server_changed_at`
+/// that is still the best comparison available. It learns a revision from the
+/// first page that carries one, and the guard tightens from there.
+///
+/// `server_changed_at IS NULL` still admits, which is the row that predates
+/// version tracking altogether; and a reply this store cannot date or number
+/// changes nothing, because an unreadable version is not a version.
+const NEWER_THAN_RECORDED: &str = "(CASE
+                        WHEN ?5 IS NOT NULL AND server_revision IS NOT NULL
+                        THEN server_revision <= ?5
+                        ELSE (server_changed_at IS NULL
+                              OR (?4 IS NOT NULL AND server_changed_at < ?4))
+                        END)";
+
 pub async fn ratify_team(
     store: &Store,
     id: Uuid,
     ratified_by_user_id: Uuid,
     supersedes: Option<Uuid>,
+) -> Result<TeamKnowledge> {
+    ratify_team_at_version(
+        store,
+        id,
+        ratified_by_user_id,
+        supersedes,
+        ServerVersion::unknown(),
+    )
+    .await
+}
+
+/// [`ratify_team`], recording the server version this row now reflects in the
+/// same transaction.
+///
+/// The reasoning is [`retire_team_at_version`]'s exactly: a ratification whose
+/// version lands in a later transaction is exposed, for that window, to a page
+/// fetched before it — which rolls the row back to `proposed` and takes
+/// `ratified_by_user_id` with it. That rollback is what made the *retirement*
+/// actor unrecordable in the first place, because the retire then found a state
+/// its compare-and-swap would not accept.
+pub async fn ratify_team_at_version(
+    store: &Store,
+    id: Uuid,
+    ratified_by_user_id: Uuid,
+    supersedes: Option<Uuid>,
+    server_version: ServerVersion,
 ) -> Result<TeamKnowledge> {
     let mut tx = tx::begin(store, "ratify_team").await?;
     let actual = team_state_for_update(&mut tx, id).await?;
@@ -2003,14 +2180,18 @@ pub async fn ratify_team(
     }
 
     let now = rows::now_text();
-    let result = sqlx::query(
+    let version = server_version.changed_at_text();
+    let result = sqlx::query(&format!(
         "UPDATE team_knowledge
-            SET state = 'authoritative', ratified_by_user_id = ?1, ratified_at = ?2
-          WHERE id = ?3 AND state = 'proposed'",
-    )
+            SET state = 'authoritative', ratified_by_user_id = ?1, ratified_at = ?2,
+                {ADVANCE_VERSION}
+          WHERE id = ?3 AND state = 'proposed'"
+    ))
     .bind(ratified_by_user_id.to_string())
     .bind(&now)
     .bind(id.to_string())
+    .bind(version.as_deref())
+    .bind(server_version.revision)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -2081,10 +2262,192 @@ pub async fn ratify_team(
 /// `retired` or still-`proposed` row refuse, naming that actual state,
 /// rather than silently doing nothing or half-applying. Content is never
 /// touched (FR-461): the `UPDATE` names only `state` and `retired_at`.
+/// Write the transition the server has already made, without the guard.
+///
+/// **The CAS is a concurrency control, not an authorization one**, and once the
+/// server has decided there is nothing left for it to protect. `ratify_team` and
+/// `retire_team` each swap on the state this device expected to find; when that
+/// swap loses — because the ratification that made the row authoritative had not
+/// landed locally yet, or a pull re-merged it in between — the transition has
+/// still happened on the server, and a local row left at its old state is simply
+/// wrong. Under FR-712a that row is a cache, and this is the correction.
+///
+/// Narrow on purpose. It applies only the four values the server's own reply
+/// carries: the new state, who acted and when. It does not touch content, keys,
+/// applicability or writer provenance, because the reply says nothing about
+/// those and a merge that invented them would be worse than the staleness it
+/// was fixing. A full row arriving later by pull overwrites this the ordinary
+/// way.
+///
+/// **`revision` and `at` are also the server version this row now reflects**,
+/// and recording them is what stops the next pull from undoing this repair
+/// (FR-457). Without that, the marks would still hold whatever the last *page*
+/// said, every page in flight would compare as newer than the transition just
+/// adopted, and [`merge_synced_team`]'s guard would have nothing to decline
+/// with: the actor would be written here and erased a second later.
+///
+/// `revision` is `team_knowledge.revision` from the server's reply — the
+/// monotonic sequence value the write that made this transition was assigned,
+/// and the version the guard prefers whenever this row already has one.
+///
+/// `at` is the transition's timestamp *as the server wrote it*, which is also
+/// the server's older ordering key for the row after it
+/// (`GREATEST(created_at, ratified_at, retired_at, superseded_at)`) — so a
+/// reply saying "retired at T" is a reply saying "this row's `changed_at` is
+/// now T". It is the fallback for a server below server migration 5, which
+/// sends no revision, and it cannot replace one: those columns are stamped
+/// with transaction-start `now()`, so a retirement can leave that `GREATEST`
+/// exactly where the preceding ratification left it and two states then share
+/// one value.
+///
+/// Both marks are advanced, never lowered, and only ever from the server's own
+/// reply — a version this store cannot read leaves that mark alone rather than
+/// guessing. See [`NEWER_THAN_RECORDED`] for which of the two decides, and for
+/// why equality is admitted on the revision and refused on the timestamp.
+pub async fn adopt_team_transition(
+    store: &Store,
+    id: Uuid,
+    state: TeamState,
+    actor: Option<Uuid>,
+    at: Option<&str>,
+    revision: Option<i64>,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "adopt_team_transition").await?;
+    // The server's timestamp for this transition, re-encoded into the one
+    // comparable form `server_changed_at` holds. `None` when the reply carried
+    // no parseable timestamp, in which case that mark is left exactly as it was
+    // — an unparseable clock reading is not a version, and inventing one would
+    // let a later stale page be declined for the wrong reason.
+    let version = at.and_then(rows::parse_ts).map(server_version_text);
+    // **The state, the actor, the timestamp and both version marks move
+    // together, under one predicate** — which they did not, and that was a live
+    // defect. Guarding only the marks meant a reply the server had already
+    // superseded still rewrote everything else on `WHERE id = ?`, putting a
+    // retired row back to `authoritative` carrying its own retirement, so
+    // `team_active_predicate` served withdrawn guidance to every user of the
+    // store.
+    //
+    // `?4` is the timestamp, `?5` the revision — the two placeholders
+    // [`NEWER_THAN_RECORDED`] and [`ADVANCE_VERSION`] both name, and where the
+    // choice between comparing revisions and comparing timestamps is stated.
+    match state {
+        TeamState::Authoritative => {
+            sqlx::query(&format!(
+                "UPDATE team_knowledge
+                    SET state = 'authoritative', ratified_by_user_id = ?2, ratified_at = ?3,
+                        {ADVANCE_VERSION}
+                  WHERE id = ?1 AND {NEWER_THAN_RECORDED}"
+            ))
+            .bind(id.to_string())
+            .bind(actor.map(|a| a.to_string()))
+            .bind(at)
+            .bind(&version)
+            .bind(revision)
+            .execute(&mut *tx)
+            .await?;
+        }
+        TeamState::Retired => {
+            sqlx::query(&format!(
+                "UPDATE team_knowledge
+                    SET state = 'retired', retired_by_user_id = ?2, retired_at = ?3,
+                        {ADVANCE_VERSION}
+                  WHERE id = ?1 AND {NEWER_THAN_RECORDED}"
+            ))
+            .bind(id.to_string())
+            .bind(actor.map(|a| a.to_string()))
+            .bind(at)
+            .bind(&version)
+            .bind(revision)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Nothing on the server moves a row *back* to proposed, so a reply
+        // saying so is not a transition this function knows how to trust.
+        TeamState::Proposed => {}
+    }
+    tx::commit(tx, "adopt_team_transition").await?;
+    Ok(())
+}
+
+/// Record that this row now reflects the server version `at` (FR-457).
+///
+/// **The other half of [`merge_synced_team`]'s guard, for the path that does
+/// not go through a page.** [`ratify_team`] and [`retire_team`] apply a
+/// transition the server has *already* made, and they apply it without any page
+/// having carried it — so `server_changed_at` still names whatever version was
+/// last pulled, and every page already in flight compares as newer than a
+/// transition that in fact happened after all of them. The guard would then let
+/// exactly one of those pages through, and that one page is enough: it writes
+/// `NULL` over `retired_by_user_id` and puts the row back to `proposed`.
+///
+/// `at` is the transition's timestamp *from the server's own reply*, which is
+/// also the server's ordering key for the row after it (`GREATEST(created_at,
+/// ratified_at, retired_at, superseded_at)`) — so this is not a new clock
+/// entering the comparison, it is the same clock read from the reply instead of
+/// from a page.
+///
+/// **Advanced, never lowered, and never invented.** A caller with no server
+/// timestamp to offer does not call this; there is no local-clock fallback,
+/// because a local reading compared against a server reading is the mistake
+/// this column exists to avoid. Separate from the transition's own statement
+/// rather than folded into it: those two functions are called from thirty-odd
+/// places that have no server reply to pass, and widening their signatures to
+/// carry an argument almost every caller would pass as `None` would put the
+/// version in the same list as `retired_by_user_id` — where a `None` means
+/// "nobody acted" and would be a fabrication in the other direction.
+pub async fn note_team_server_version(store: &Store, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+    let version = server_version_text(at);
+    sqlx::query(
+        "UPDATE team_knowledge
+            SET server_changed_at = ?2
+          WHERE id = ?1
+            AND (server_changed_at IS NULL OR server_changed_at < ?2)",
+    )
+    .bind(id.to_string())
+    .bind(&version)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
 pub async fn retire_team(
     store: &Store,
     id: Uuid,
     retired_by_user_id: Uuid,
+) -> Result<TeamKnowledge> {
+    retire_team_at_version(store, id, retired_by_user_id, ServerVersion::unknown()).await
+}
+
+/// [`retire_team`], recording **in the same transaction** the server version
+/// this row now reflects.
+///
+/// **Why the version cannot be a second statement.** The row is protected from
+/// a stale pulled page by `merge_synced_team`'s guard, and that guard compares
+/// the page's version against `server_changed_at`. Writing the transition in
+/// one transaction and advancing `server_changed_at` in the next leaves a
+/// window in which the row already holds the new actor while
+/// `server_changed_at` still names the *previous* page's version — so a page
+/// fetched before the transition compares as no older, is admitted, and erases
+/// the actor exactly as it did before any of this existed. The window is far
+/// narrower than the 250-300 ms fetch-to-apply gap that made the original
+/// defect reproducible at 1 in 60, but it is the same defect, and "much less
+/// likely" is not what FR-457 says.
+///
+/// So the two facts are written together or not at all. `server_version` is the
+/// transition's timestamp **as the server wrote it** — the server's ordering key
+/// for a row is `GREATEST(created_at, ratified_at, retired_at, superseded_at)`,
+/// so a reply saying "retired at T" is a reply saying "this row's version is
+/// now T". `None` leaves the mark alone: an absent or unparseable server clock
+/// is not a version, and inventing one would let a later page be declined for
+/// the wrong reason.
+///
+/// Advanced, never lowered, so a reply somehow older than the page this row
+/// already reflects cannot move the mark backwards.
+pub async fn retire_team_at_version(
+    store: &Store,
+    id: Uuid,
+    retired_by_user_id: Uuid,
+    server_version: ServerVersion,
 ) -> Result<TeamKnowledge> {
     let mut tx = tx::begin(store, "retire_team").await?;
     let actual = team_state_for_update(&mut tx, id).await?;
@@ -2098,14 +2461,20 @@ pub async fn retire_team(
     // recorded with who acted and when" — and retirement is the transition most
     // worth attributing, since it removes guidance from every user on the
     // server.
-    let result = sqlx::query(
+    let version = server_version.changed_at_text();
+    // `?1`/`?2`/`?3` are this statement's own; `?4`/`?5` are the two version
+    // marks `ADVANCE_VERSION` reads, bound in the order it names them.
+    let result = sqlx::query(&format!(
         "UPDATE team_knowledge
-            SET state = 'retired', retired_at = ?1, retired_by_user_id = ?3
-          WHERE id = ?2 AND state = 'authoritative'",
-    )
+            SET state = 'retired', retired_at = ?1, retired_by_user_id = ?3,
+                {ADVANCE_VERSION}
+          WHERE id = ?2 AND state = 'authoritative'"
+    ))
     .bind(&now)
     .bind(id.to_string())
     .bind(retired_by_user_id.to_string())
+    .bind(version.as_deref())
+    .bind(server_version.revision)
     .execute(&mut *tx)
     .await?;
     if result.rows_affected() == 0 {
@@ -2381,6 +2750,60 @@ pub struct SyncedTeamKnowledge {
     /// it.
     pub retired_by_user_id: Option<Uuid>,
     pub retired_at: Option<DateTime<Utc>>,
+    /// **The version the server ordered this page by** — its `changed_at` on
+    /// the wire, `GREATEST(created_at, ratified_at, retired_at, superseded_at)`
+    /// as computed by `team_changes` and `team_knowledge_view`.
+    ///
+    /// Not a column of `team_knowledge` on either side, which is why it is the
+    /// one field whose name differs between the two schemas: here it is
+    /// *whose* clock that matters, so the column it lands in is
+    /// `server_changed_at` (schema 11).
+    ///
+    /// `None` means the peer is a server below that schema and sent no version
+    /// at all. It is **not** "version zero" and never orders anything: see
+    /// [`merge_synced_team`], where such a page applies unconditionally,
+    /// because a store that could not sync with an older server would be a
+    /// worse failure than the staleness this field exists to order.
+    pub server_changed_at: Option<DateTime<Utc>>,
+    /// **The monotonic revision the server assigned this row's last write** —
+    /// its `revision` on the wire (`team_knowledge.revision`, server migration
+    /// 5), stored here as `server_revision` (local schema 12).
+    ///
+    /// This is the version [`merge_synced_team`] prefers, and `changed_at`
+    /// above is the fallback for a peer that has none. The fallback cannot be
+    /// promoted to the primary: `GREATEST(created_at, ratified_at, retired_at,
+    /// superseded_at)` is computed over columns stamped with transaction-start
+    /// `now()`, so a retirement whose transaction opened before an
+    /// earlier-committing ratification leaves that value exactly where the
+    /// ratification left it — two different states sharing one version, which
+    /// no comparison can order. A sequence value cannot do that: it is assigned
+    /// at statement time and every row write advances it.
+    ///
+    /// `None` means the peer is a server below that migration and sent no
+    /// revision at all. It is **not** revision zero and never orders anything
+    /// — see [`merge_synced_team`], where such a page falls back to the
+    /// timestamp comparison, because a store rendered unable to sync with an
+    /// older server would be a worse failure than the staleness being ordered.
+    pub server_revision: Option<i64>,
+}
+
+/// The stored form of a server-authored team version (schema 11).
+///
+/// **Fixed width on purpose, and not [`rows::ts_text`].** This is the one
+/// timestamp column in the schema that is *compared* in SQL rather than only
+/// read back, and SQLite compares `TEXT` byte by byte. `to_rfc3339` prints its
+/// fractional part in groups of three digits, or omits it entirely, so two
+/// instants can differ in length; `%.9f` is always nine digits, which makes
+/// byte order and chronological order the same relation for every value this
+/// column can hold. `rows::parse_ts` reads it back like any other RFC 3339
+/// timestamp, so nothing else has to know.
+///
+/// Both sides of every comparison go through this function — the value already
+/// stored was written by it, and the incoming one is re-encoded by it from a
+/// parsed `DateTime<Utc>` — so a peer's own choice of precision (Postgres
+/// prints microseconds) never reaches the comparison.
+fn server_version_text(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S.%9f+00:00").to_string()
 }
 
 /// Merge one team_knowledge row synchronized from `server_instance_id` into
@@ -2407,14 +2830,18 @@ pub struct SyncedTeamKnowledge {
 /// implementation of a check that already ran, which is exactly what
 /// FR-579's discipline exists to prevent.
 ///
-/// **Content is set once, at first insert, and never updated again.** An id
-/// already present in this store has only its lifecycle columns (`state`,
-/// `ratified_by_user_id`, `ratified_at`, `retired_at`, `superseded_by_id`)
-/// moved to match the incoming row — the same "no `UPDATE … SET content`
-/// beyond the tombstone/CAS" discipline §3 of the contract states, upheld
-/// here even against an incoming row that (through a bug or a malicious
-/// peer) disagreed with the stored content: this function has no SQL
-/// statement capable of writing to `content` a second time.
+/// **The stored row is a cache, and the server wins** (FR-712a). An id already
+/// present here is refreshed from the incoming row — content, keys,
+/// applicability and lifecycle alike — rather than kept at whatever this store
+/// first saw. This replaces the insert-once rule these merges were written
+/// with, and the monotonic state clamp that went with it; the reasoning for
+/// each reversal is at the statement that used to enforce it.
+///
+/// The safety that rule was providing has not been discarded, it has moved: an
+/// incoming row is refused outright when it comes from a *different server
+/// instance* (above), which is what stops a second deployment's guidance
+/// blending into this corpus. What a peer on the bound instance says about a
+/// team record is, by definition, what the authority says.
 pub async fn merge_synced_team(
     store: &Store,
     server_instance_id: Uuid,
@@ -2435,8 +2862,9 @@ pub async fn merge_synced_team(
                 (id, knowledge_type, content, topic_key, value_key, content_norm_digest,
                  origin_digest, state, proposed_by_user_id, ratified_by_user_id, ratified_at,
                  writer_id, writer_seq, created_at, superseded_by_id, retired_by_user_id,
-                 retired_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 retired_at, server_changed_at, server_revision)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18)",
         )
         .bind(incoming.id.to_string())
         .bind(incoming.knowledge_type.as_str())
@@ -2454,6 +2882,12 @@ pub async fn merge_synced_team(
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
         .bind(incoming.retired_at.map(rows::ts_text))
+        // The version this row is created reflecting, both marks. A first
+        // sight of a row is as much a version to be ordered against as any
+        // later one — and a row inserted with a revision is ordered by
+        // revision from its very first page, never through the fallback.
+        .bind(incoming.server_changed_at.map(server_version_text))
+        .bind(incoming.server_revision)
         .execute(&mut *tx)
         .await?;
 
@@ -2469,35 +2903,133 @@ pub async fn merge_synced_team(
             .await?;
         }
     } else {
-        // **A merge never walks a row's state backwards** (FR-609).
+        // **Server-wins cache refresh** (FR-712a), including a state that did
+        // not advance — but never *backwards* along the server's own clock
+        // (FR-457).
         //
-        // Team state only advances: proposed, then authoritative, then retired.
-        // A page fetched from the server before a ratification and merged after
-        // it carries the row as it was *then*, and this update applied it
-        // wholesale — turning a locally ratified entry back into a proposal, and
-        // with it dropping the supersession that ratification had recorded. The
-        // window is small and the loss is silent: the entry simply stops being
-        // guidance, and the one it replaced goes on competing.
+        // What stood here was the FR-609 monotonic clamp: team state only ever
+        // moves proposed → authoritative → retired, so a page fetched from the
+        // server before a ratification and merged after it must not roll the
+        // local row back to `proposed` and drop the supersession the
+        // ratification recorded. That reasoning was sound while the local row
+        // was itself a record of the transition. It is not sound now. Under
+        // server authority this row is a cache of a record the server owns, and
+        // the server is the only side that knows which of two pages is later —
+        // so a clamp here is a client overruling the authority, and it makes a
+        // legitimate correction (a ratification reversed, a retirement undone by
+        // an administrator) permanently unapplicable on this device.
         //
-        // The server already refuses to let a pushed payload advance state
-        // (`global-memory.md` §5b); this is the same principle facing the other
-        // way. Delivery order is not something either side can promise, so
-        // "later" has to mean further along, not more recently arrived.
-        sqlx::query(
+        // The staleness the clamp was defending against does not disappear; it
+        // moves to where it can actually be resolved — and for a while nothing
+        // resolved it. "The sync cursor's job" is true of rows this store has
+        // not seen and says nothing about a page racing this store's *own*
+        // concurrent write of a transition it had just been authorized to make.
+        // That race cost FR-457 outright: a page fetched before a local
+        // retirement and applied after it wrote `NULL` over
+        // `retired_by_user_id` and `retired_at` and put the row back to
+        // `proposed`, after which `retire_team`'s compare-and-swap on
+        // `authoritative` refused and the actor was recorded nowhere at all.
+        // Observed rollback: 11.7 ms.
+        //
+        // **So the page is dated, and the comparison is between two readings of
+        // one clock.** `server_changed_at` holds the server's own ordering key
+        // for the last page this row was made to reflect, and the predicate
+        // declines a page that is not newer than it. Nothing local enters the
+        // comparison, so a device whose clock disagrees with its server cannot
+        // decide which record of a retirement survives.
+        //
+        // **This is not the clamp returning.** The clamp read the *state* and
+        // required it to advance, which is the client judging the authority's
+        // decisions. This reads the authority's own version and requires it to
+        // advance, which is the client declining to apply the authority's
+        // answers out of order. A genuinely newer row still wins whatever it
+        // says — a reversal included — because a newer decision carries a newer
+        // `changed_at`: every statement the server has
+        // (`ratify_team`/`retire_team`/`supersede` in `cairn-server`) only ever
+        // *sets* a lifecycle timestamp to `now()`, never clears one, so
+        // `GREATEST(created_at, ratified_at, retired_at, superseded_at)` is
+        // non-decreasing per row. A future route that cleared one would have to
+        // carry its own newer version, or this predicate would decline it.
+        //
+        // **`changed_at` was the wrong quantity, and this is the fix.** The
+        // predicate below used to be `server_changed_at <= ?17` alone, and it
+        // could not do the job asked of it. Every column inside the server's
+        // `GREATEST(created_at, ratified_at, retired_at, superseded_at)` is
+        // stamped with `now()`, which is *transaction start* time — so a
+        // retirement whose transaction opened before an earlier-committing
+        // ratification writes a `retired_at` older than that `ratified_at`, and
+        // the `GREATEST` reads the same value after the retirement as before
+        // it. Measured against this repository's own PostgreSQL as a
+        // one-second inversion, deterministically, with no lock contention:
+        //
+        //     S2 opens its transaction   14:41:43.252792 -> retired_at
+        //     S1 ratifies (own tx)       14:41:44.048009 -> ratified_at
+        //     final row: state='retired', GREATEST(...) = 44.048009
+        //
+        // So one value stood for two different states, `<=` admitted a page
+        // fetched *after* the ratification over the retired row, and the row
+        // was un-retired on this device. `<` would not have helped: equality is
+        // also what a legitimately redelivered page looks like, so refusing it
+        // trades a resurrection for a page that can never be applied.
+        //
+        // **`?18` is the server's `revision`** — a sequence value assigned at
+        // statement time by a trigger on every row write (server migration 5).
+        // It is monotonic in the order the writes actually happened and no
+        // write can leave it unchanged, so it *is* a row version, and `<=` on
+        // it is safe for the reason it was unsafe on the timestamp: an equal
+        // revision is the **same server change** arriving again, and
+        // re-applying the values already there is idempotent rather than a
+        // choice between two states. Redelivery is ordinary — a cursor reset,
+        // a retried pull — and it must stay free.
+        //
+        // **The timestamp arm is kept, unchanged, as the fallback.** It is
+        // reached when either side has no revision, and it must keep behaving
+        // exactly as it did:
+        //
+        // - `?18 IS NULL` — the *peer* is a server below migration 5 and sends
+        //   no revision at all. Such a page is ordered by `changed_at` as
+        //   before, because a store rendered unable to sync with an older
+        //   server would be a worse failure than the staleness being ordered.
+        // - `server_revision IS NULL` — *this row* has never been told a
+        //   revision (it predates local schema 12, or every page it has seen
+        //   came from an older server). `server_changed_at` is still the best
+        //   comparison available; the row learns a revision from the first page
+        //   that carries one, and the guard tightens from there.
+        // - `server_changed_at IS NULL` inside that arm is a row that predates
+        //   version tracking altogether: nothing is known, and the safe reading
+        //   of unknown is that the incoming page wins, so an upgraded store
+        //   converges on its next pull exactly as it did before. Stated as an
+        //   explicit disjunct because `server_changed_at <= NULL` is `NULL`,
+        //   which is not true.
+        //
+        // `COALESCE` on both marks on the way in for the mirror image of that:
+        // a page from an older peer must not *erase* a version this row already
+        // has, or one such page would switch the comparison off for that row
+        // permanently.
+        //
+        // Content is refreshed for the same reason it is refreshed for personal
+        // knowledge: a server-side correction the cache cannot accept is a
+        // correction that never reaches the reader.
+        let digest = content_norm_digest(&incoming.content);
+        let incoming_version = incoming.server_changed_at.map(server_version_text);
+        let applied = sqlx::query(
             "UPDATE team_knowledge
-                SET state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
-                    retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7
+                SET knowledge_type = ?8, content = ?9, content_norm_digest = ?10,
+                    topic_key = ?11, value_key = ?12,
+                    state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
+                    retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7,
+                    proposed_by_user_id = ?13, writer_id = ?14, writer_seq = ?15,
+                    created_at = ?16,
+                    server_changed_at = COALESCE(?17, server_changed_at),
+                    server_revision = COALESCE(?18, server_revision)
               WHERE id = ?6
-                AND (CASE state
-                        WHEN 'proposed' THEN 0
-                        WHEN 'authoritative' THEN 1
-                        WHEN 'retired' THEN 2
-                        ELSE 0 END)
-                    <= (CASE ?1
-                        WHEN 'proposed' THEN 0
-                        WHEN 'authoritative' THEN 1
-                        WHEN 'retired' THEN 2
-                        ELSE 0 END)",
+                AND CASE
+                      WHEN ?18 IS NOT NULL AND server_revision IS NOT NULL
+                      THEN server_revision <= ?18
+                      ELSE (server_changed_at IS NULL
+                            OR ?17 IS NULL
+                            OR server_changed_at <= ?17)
+                      END",
         )
         .bind(incoming.state.as_str())
         .bind(incoming.ratified_by_user_id.map(|u| u.to_string()))
@@ -2506,8 +3038,53 @@ pub async fn merge_synced_team(
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.id.to_string())
         .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
+        .bind(incoming.knowledge_type.as_str())
+        .bind(&incoming.content)
+        .bind(&digest)
+        .bind(incoming.topic_key.as_deref())
+        .bind(incoming.value_key.as_deref())
+        .bind(incoming.proposed_by_user_id.to_string())
+        .bind(incoming.writer_id.to_string())
+        .bind(incoming.writer_seq)
+        .bind(rows::ts_text(incoming.created_at))
+        .bind(&incoming_version)
+        .bind(incoming.server_revision)
         .execute(&mut *tx)
         .await?;
+
+        // **A declined page is not an error, and it is not half-applied
+        // either.** Zero rows means the predicate above judged this page older
+        // than what the row already reflects. The caller is told the page was
+        // processed — it was, and re-delivering it forever would wedge the pull
+        // cursor over a page there is nothing left to do with — but the facts
+        // must not be rewritten from it. Replacing applicability from a stale
+        // page would undo a re-scoping the newer page had already applied,
+        // which is the same erasure the `WHERE` clause exists to prevent,
+        // committed one table over.
+        if applied.rows_affected() > 0 {
+            // As for personal knowledge: applicability is replaced, not added
+            // to, so a fact the server removed stops scoping recall here.
+            sqlx::query("DELETE FROM team_knowledge_applicability WHERE team_id = ?1")
+                .bind(incoming.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            for fact in &incoming.applicability {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO team_knowledge_applicability (team_id, kind, value)
+                     VALUES (?1, ?2, ?3)",
+                )
+                .bind(incoming.id.to_string())
+                .bind(fact.kind.as_str())
+                .bind(&fact.value)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else {
+            tracing::debug!(
+                team = %incoming.id,
+                "declined a pulled team page older than the version this row already reflects"
+            );
+        }
     }
 
     tx::commit(tx, "merge_synced_team").await?;
@@ -2567,16 +3144,21 @@ pub struct SyncedPersonalKnowledge {
 /// surfacing only the one currently authenticated (`sync-namespaces.md` §10,
 /// FR-567).
 ///
-/// **Content is set once, at first insert, and never updated again.** As with
-/// team knowledge, an id already present here has only its two lifecycle
-/// columns — `superseded_by_id` and `forgotten_at` — moved to match. There is
-/// no statement in this function capable of writing `content` a second time, so
-/// an incoming row that disagreed with the stored content (through a bug, or a
-/// peer acting in bad faith) cannot rewrite what this store already recorded.
-/// The one exception is the tombstone, and it is not an exception to the rule:
-/// forgetting clears content to the empty string, and a `forgotten_at` that
-/// arrives here does exactly that, because a record forgotten on one device and
-/// still recallable on the next is the failure the tombstone exists to prevent.
+/// **The stored row is a cache, and the server wins** (FR-712a). As with team
+/// knowledge, an id already present here is refreshed from the incoming row —
+/// content, keys, applicability, writer provenance and both lifecycle columns —
+/// rather than kept at whatever this store first saw. A server-side correction
+/// a cache cannot accept is a correction that never reaches the reader.
+///
+/// The tombstone is unchanged and still takes precedence over any content that
+/// arrives with it: forgetting clears content to the empty string, because a
+/// record forgotten on one device and still recallable on the next is the
+/// failure the tombstone exists to prevent.
+///
+/// Refresh is scoped to the `(id, owner_user_id)` pair, so it reaches only rows
+/// that came from the server for that owner. A record this store holds and the
+/// server has never sent is not named by any merge and is left exactly where it
+/// is.
 ///
 /// **No content re-validation.** This is downstream of the fifth validator
 /// entry point, not a sixth one: the content was screened server-side before
@@ -2632,24 +3214,80 @@ pub async fn merge_synced_personal(
             .await?;
         }
     } else {
-        // The tombstone travels as `forgotten_at`, and applying it clears
-        // content here exactly as `forget_personal` does locally. `CASE WHEN`
-        // rather than an unconditional assignment: a row that arrives without a
-        // tombstone must leave content alone, and a statement that could write
-        // content in that case is the one this function promises not to have.
+        // **Server-wins cache refresh** (FR-712a). The row already here is a
+        // cached copy of a record the server owns, so an arriving copy replaces
+        // it — content included.
+        //
+        // This reverses the insert-once rule these merges were written with.
+        // That rule was right while the local store was an authority and a
+        // second delivery could only be a redelivery of what was already known;
+        // under server authority the same statement makes a server-side
+        // correction unapplicable, and the device would go on recalling the
+        // uncorrected text for as long as the id survives. FR-701's declaration
+        // that the server is correct does not execute itself: it needs a merge
+        // rule capable of accepting a correction.
+        //
+        // The tombstone still clears content, exactly as `forget_personal` does
+        // locally, and takes precedence over whatever content arrived with it —
+        // a record forgotten on one device and still recallable on the next is
+        // the failure the tombstone exists to prevent. `content_norm_digest`
+        // follows content and is left alone when the row is forgotten, which is
+        // what the local forget path does with it too.
+        //
+        // `origin_digest` is deliberately absent from this statement. It
+        // identifies *this machine's* promotion of *this* project and never
+        // crosses the wire (D434, FR-551), so it is local-only provenance that a
+        // pulled row has nothing to say about and must not erase.
+        let digest = content_norm_digest(&incoming.content);
         sqlx::query(
             "UPDATE personal_knowledge
-                SET superseded_by_id = ?1,
-                    forgotten_at = ?2,
-                    content = CASE WHEN ?2 IS NULL THEN content ELSE '' END
-              WHERE id = ?3 AND owner_user_id = ?4",
+                SET knowledge_type = ?1,
+                    content = CASE WHEN ?7 IS NULL THEN ?2 ELSE '' END,
+                    content_norm_digest =
+                        CASE WHEN ?7 IS NULL THEN ?3 ELSE content_norm_digest END,
+                    topic_key = ?4,
+                    value_key = ?5,
+                    writer_id = ?8,
+                    writer_seq = ?9,
+                    created_at = ?10,
+                    superseded_by_id = ?6,
+                    forgotten_at = ?7
+              WHERE id = ?11 AND owner_user_id = ?12",
         )
+        .bind(incoming.knowledge_type.as_str())
+        .bind(&incoming.content)
+        .bind(&digest)
+        .bind(incoming.topic_key.as_deref())
+        .bind(incoming.value_key.as_deref())
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(incoming.writer_id.to_string())
+        .bind(incoming.writer_seq)
+        .bind(rows::ts_text(incoming.created_at))
         .bind(incoming.id.to_string())
         .bind(incoming.owner_user_id.to_string())
         .execute(&mut *tx)
         .await?;
+
+        // Applicability is part of the cached record, so a refresh replaces the
+        // set rather than adding to it: a fact the server removed has to
+        // disappear here, and an `INSERT OR IGNORE` alone would leave it
+        // scoping recall forever.
+        sqlx::query("DELETE FROM personal_knowledge_applicability WHERE personal_id = ?1")
+            .bind(incoming.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for fact in &incoming.applicability {
+            sqlx::query(
+                "INSERT OR IGNORE INTO personal_knowledge_applicability (personal_id, kind, value)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(incoming.id.to_string())
+            .bind(fact.kind.as_str())
+            .bind(&fact.value)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx::commit(tx, "merge_synced_personal").await?;
@@ -2668,6 +3306,347 @@ pub async fn merge_synced_personal(
     // half the time — under a busy timeout that a truncating checkpoint does not
     // wait out.
     get_personal(store, incoming.id, incoming.owner_user_id).await
+}
+
+// ---------------------------------------------------------------------------
+// The pattern cache (T086, FR-703, FR-710, FR-710a, FR-712a)
+// ---------------------------------------------------------------------------
+//
+// The third refill path, and the one with no local authority behind it at all.
+// Personal and team knowledge were written locally first and were demoted to a
+// cache by FR-712a; a server-held pattern was never local in this shape. Its
+// rows live in `cached_patterns` rather than in `reusable_patterns` because the
+// six field names that table declares NOT NULL are exactly the ones the privacy
+// boundary refuses, so a row pulled from the server cannot supply them and
+// inventing them would be fabricating content (FR-708b,
+// `migrations/0009_pattern_cache.sql`). `reusable_patterns` keeps its own
+// meaning: the local, pre-promotion rows, which stay local (FR-707).
+
+/// One `shared_patterns` row arriving from the server.
+///
+/// The safe shape and nothing else — the same shape promotion sends, read back
+/// (knowledge-commands.md §3.3). `signals`, `signal_digest`, `origin_ref`,
+/// `sanitization_report`, `source_memory_id` and `origin_deleted` are absent
+/// for the reason [`SyncedPersonalKnowledge`] has no `origin_digest`, only
+/// stronger: those names are refused on the boundary, the server was never told
+/// them, and a field here for one would be a field nothing could ever fill
+/// honestly.
+///
+/// `trust` is absent too, and deliberately. The server stores exactly one
+/// level, `sanitized`, because passing the privacy gate is the only thing it
+/// can witness; `validated` and `contested` are derived from
+/// `pattern_applications`, which never leave the machine (FR-707, FR-708g). A
+/// field here would be somewhere for a level the server cannot establish to
+/// arrive.
+pub struct SyncedPattern {
+    pub pattern_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub title: String,
+    pub problem: String,
+    pub root_cause: String,
+    pub approach: String,
+    pub constraints: Vec<String>,
+    pub applicability: Vec<String>,
+    /// The digest of the normalized problem, root cause and approach that the
+    /// pattern's identity is derived from — `pattern_id` is
+    /// UUIDv5(owner_user_id ‖ content_key) (FR-708f). Stored rather than
+    /// recomputed: recomputing it here would be a second implementation of the
+    /// server's identity rule, free to drift from it.
+    pub content_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub forgotten_at: Option<DateTime<Utc>>,
+}
+
+/// One cached pattern as this store holds it.
+///
+/// Distinct from [`SyncedPattern`] by two columns, and the difference is the
+/// point: `trust` and `cached_at` are what let a reader tell a cached pattern
+/// from a server-accepted one at the point of reading it (FR-710).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPattern {
+    pub pattern_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub title: String,
+    pub problem: String,
+    pub root_cause: String,
+    pub approach: String,
+    pub constraints: Vec<String>,
+    pub applicability: Vec<String>,
+    /// Read back from the row rather than assumed to be [`PATTERN_TRUST`].
+    ///
+    /// The column is CHECKed to one value, so this can only ever be that value
+    /// — which is the argument for reading it: a store that somehow held
+    /// another one would show it here instead of having it silently reported as
+    /// `sanitized` by a constant this code substituted.
+    pub trust: String,
+    pub content_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub forgotten_at: Option<DateTime<Utc>>,
+    /// When *this copy* was last written, which is not `updated_at`. That one
+    /// is the server's statement about the record; this one is the local
+    /// statement about the copy, and reporting the cache stale needs the second
+    /// (FR-710a).
+    pub cached_at: DateTime<Utc>,
+}
+
+/// The only trust level a server-held pattern can carry.
+///
+/// Named here as well as CHECKed in the schema so the merge has something to
+/// bind that is not a bare string literal, and so the reason travels with the
+/// value: `sanitized` means the record passed the privacy gate, and passing the
+/// gate is the only thing the server witnesses (FR-708g).
+pub const PATTERN_TRUST: &str = "sanitized";
+
+/// Merge one pattern synchronized from the server into this store's cache
+/// (T086, FR-703, FR-712a).
+///
+/// **The stored row is a cache, and the server wins — unconditionally.** An id
+/// already present here is replaced from the incoming row, content included,
+/// rather than kept at whatever this store first saw. The reasoning is
+/// [`merge_synced_personal`]'s and does not weaken for patterns: a correction a
+/// cache cannot accept is a correction that never reaches the reader, and it
+/// would go on reading the uncorrected text for as long as the id survives.
+/// There is no clamp and no comparison of timestamps here, because a client
+/// comparing two of the server's own statements is a client overruling the
+/// authority. Ordering pulled pages is the patterns cursor's job
+/// ([`SyncNamespace::Patterns`]), not a per-row decision.
+///
+/// **Scoped to the `(pattern_id, owner_user_id)` pair.** One machine may hold
+/// more than one identity's cache — a user account is per-server, so two
+/// servers are already two owners — and a pattern is visible only to the
+/// account that owns it (FR-708d). Every statement below names both, so a merge
+/// for one identity cannot reach a row belonging to another on the same
+/// machine.
+///
+/// **No content re-validation**, for the reason [`merge_synced_personal`] gives:
+/// this is downstream of the server-side ingest validator, not a sixth entry
+/// point to it. The content was screened before the promotion that created the
+/// record this pull is reading, and re-screening here would be a second
+/// implementation of a check that already ran (FR-579).
+pub async fn merge_synced_pattern(store: &Store, incoming: SyncedPattern) -> Result<()> {
+    let mut tx = tx::begin(store, "merge_synced_pattern").await?;
+
+    // The tombstone takes precedence over whatever content arrived with it, and
+    // it is resolved once, here, rather than in six `CASE` expressions.
+    //
+    // A forgotten pattern that is still legible on this device is precisely the
+    // failure the tombstone exists to prevent, and a server that sends a
+    // `forgotten_at` alongside stale content — a page assembled before the
+    // forget, delivered after it — must not be able to leave that content
+    // behind. `content_key` is *not* cleared: it is the identity input, not
+    // content, and clearing it would break the `(owner_user_id, content_key)`
+    // constraint's ability to keep a later refill converging on this same row.
+    let forgotten = incoming.forgotten_at.is_some();
+    let title = if forgotten { "" } else { &incoming.title };
+    let problem = if forgotten { "" } else { &incoming.problem };
+    let root_cause = if forgotten { "" } else { &incoming.root_cause };
+    let approach = if forgotten { "" } else { &incoming.approach };
+    let constraints = json_list(if forgotten {
+        &[]
+    } else {
+        &incoming.constraints
+    });
+    let applicability = json_list(if forgotten {
+        &[]
+    } else {
+        &incoming.applicability
+    });
+    let now = rows::now_text();
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM cached_patterns WHERE pattern_id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(incoming.pattern_id.to_string())
+    .bind(incoming.owner_user_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if existing.is_none() {
+        // `trust` is bound from [`PATTERN_TRUST`] and never from the incoming
+        // row, which has no field for it to arrive in. The one level the server
+        // can establish is the one level this table may hold (FR-708g).
+        //
+        // A `pattern_id` already present under a *different* owner is left to
+        // collide with the primary key rather than being absorbed. It cannot
+        // happen from an honest feed — the id is UUIDv5(owner ‖ content_key), so
+        // a shared id means a shared owner — and the alternative to a loud
+        // failure is one identity's row being overwritten by another's, which
+        // is the exact outcome the owner scoping above exists to prevent.
+        sqlx::query(
+            "INSERT INTO cached_patterns
+                (pattern_id, owner_user_id, title, problem, root_cause, approach,
+                 constraints, applicability, trust, content_key,
+                 created_at, updated_at, forgotten_at, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )
+        .bind(incoming.pattern_id.to_string())
+        .bind(incoming.owner_user_id.to_string())
+        .bind(title)
+        .bind(problem)
+        .bind(root_cause)
+        .bind(approach)
+        .bind(&constraints)
+        .bind(&applicability)
+        .bind(PATTERN_TRUST)
+        .bind(&incoming.content_key)
+        .bind(rows::ts_text(incoming.created_at))
+        .bind(rows::ts_text(incoming.updated_at))
+        .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        // **Server-wins cache refresh** (FR-712a). Every column the server owns
+        // is taken from the incoming row — there is no field here this store
+        // has a better claim on than the server does, which is what makes the
+        // rule this simple to state.
+        //
+        // `trust` is refreshed to `sanitized` rather than left alone, for the
+        // same reason it is written that way on insert: the value is a
+        // consequence of the record existing on the server, not something
+        // carried by a particular delivery of it.
+        //
+        // `cached_at` moves and `created_at` does not. The first records that
+        // this device refilled the copy just now; the second is the server's
+        // statement about when the record began, and a cache rewriting it would
+        // be inventing history for a record it does not own.
+        sqlx::query(
+            "UPDATE cached_patterns
+                SET title = ?1, problem = ?2, root_cause = ?3, approach = ?4,
+                    constraints = ?5, applicability = ?6, trust = ?7,
+                    content_key = ?8, created_at = ?9, updated_at = ?10,
+                    forgotten_at = ?11, cached_at = ?12
+              WHERE pattern_id = ?13 AND owner_user_id = ?14",
+        )
+        .bind(title)
+        .bind(problem)
+        .bind(root_cause)
+        .bind(approach)
+        .bind(&constraints)
+        .bind(&applicability)
+        .bind(PATTERN_TRUST)
+        .bind(&incoming.content_key)
+        .bind(rows::ts_text(incoming.created_at))
+        .bind(rows::ts_text(incoming.updated_at))
+        .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(&now)
+        .bind(incoming.pattern_id.to_string())
+        .bind(incoming.owner_user_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx::commit(tx, "merge_synced_pattern").await?;
+    // No `store.checkpoint()` here, for the reason spelled out at the end of
+    // [`merge_synced_personal`]: a truncating checkpoint takes an exclusive
+    // lock and belongs to deletions. A tombstone arriving on this path *does*
+    // clear content, and the pull worker checkpoints once per drained page
+    // rather than once per row — which is what stopped foreground commands
+    // failing with "database is locked" while a machine caught up.
+    Ok(())
+}
+
+/// This owner's cached patterns, most recently updated first (T086).
+///
+/// Forgotten rows stay out, exactly as [`list_personal`] excludes them: a
+/// tombstone is not something the owner still holds, and the emptied content
+/// columns behind one would read as a pattern with no problem and no approach.
+///
+/// Scoped to `owner_user_id` in the statement rather than filtered afterwards.
+/// A pattern is visible only to the account that owns it (FR-708d), and a
+/// visibility rule applied after the fetch is a visibility rule a future caller
+/// can skip.
+///
+/// The order is `updated_at DESC, pattern_id`. The second key is not
+/// decoration: two patterns refilled from the same page can carry the same
+/// `updated_at`, and an order that left them to the database's discretion would
+/// give a caller a different sequence on different runs over unchanged rows.
+pub async fn cached_patterns(store: &Store, owner: Uuid) -> Result<Vec<CachedPattern>> {
+    let rs = sqlx::query(
+        "SELECT * FROM cached_patterns
+          WHERE owner_user_id = ?1 AND forgotten_at IS NULL
+          ORDER BY updated_at DESC, pattern_id",
+    )
+    .bind(owner.to_string())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter().map(cached_pattern_row).collect()
+}
+
+/// Apply a forget to this store's cached copy: content cleared, `forgotten_at`
+/// set, nothing else touched.
+///
+/// **This is not where a pattern is forgotten.** Forgetting is the server's to
+/// decide — `POST /api/patterns/{id}/forget`, reached through a `pattern_forget`
+/// command, because under server authority a local mutation of a server-owned
+/// record is a request the server accepts or refuses and never a local write it
+/// later discovers (FR-712). What this function does is stop the cache serving
+/// a record whose forget has already been accepted, in the window before the
+/// next pull would carry the tombstone back. Calling it on a forget the server
+/// has not accepted would make this store the only place that believes it.
+///
+/// Scoped to `owner_user_id` in the same statement that finds the row, and
+/// returning the same `NotFound` for a wrong owner as for a missing id — the
+/// discipline [`forget_personal`] keeps, for the same reason: a distinguishable
+/// error would let a caller probe another identity's cache by id.
+///
+/// The checkpoint is the one thing this path has that [`merge_synced_pattern`]
+/// does not. It removes content, and removed content has to leave the
+/// write-ahead log rather than stay legible in an old frame (FR-052).
+pub async fn forget_cached_pattern(store: &Store, owner: Uuid, pattern_id: Uuid) -> Result<()> {
+    let mut tx = tx::begin(store, "forget_cached_pattern").await?;
+    let result = sqlx::query(
+        "UPDATE cached_patterns
+            SET forgotten_at = ?1, cached_at = ?1,
+                title = '', problem = '', root_cause = '', approach = '',
+                constraints = '[]', applicability = '[]'
+          WHERE pattern_id = ?2 AND owner_user_id = ?3 AND forgotten_at IS NULL",
+    )
+    .bind(rows::now_text())
+    .bind(pattern_id.to_string())
+    .bind(owner.to_string())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        // Nothing changed, so `tx` is dropped and rolls back a transaction that
+        // wrote nothing. One error covers three cases alike: no such id, another
+        // owner's id, and an id already forgotten.
+        return Err(StoreError::NotFound(format!("cached pattern {pattern_id}")));
+    }
+    tx::commit(tx, "forget_cached_pattern").await?;
+    store.checkpoint().await?;
+    Ok(())
+}
+
+/// A JSON array of strings, for the two list columns.
+///
+/// Serialization of a `Vec<String>` cannot fail, so the fallback is unreachable
+/// rather than a swallowed error; `[]` is what the column defaults to anyway,
+/// which keeps an impossible branch from being the one that writes something
+/// the schema would reject.
+fn json_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn cached_pattern_row(row: &SqliteRow) -> Result<CachedPattern> {
+    Ok(CachedPattern {
+        pattern_id: rows::uuid(row, "pattern_id")?,
+        owner_user_id: rows::uuid(row, "owner_user_id")?,
+        title: row.try_get("title")?,
+        problem: row.try_get("problem")?,
+        root_cause: row.try_get("root_cause")?,
+        approach: row.try_get("approach")?,
+        constraints: rows::json_field(row, "constraints")?,
+        applicability: rows::json_field(row, "applicability")?,
+        trust: row.try_get("trust")?,
+        content_key: row.try_get("content_key")?,
+        created_at: rows::ts(row, "created_at")?,
+        updated_at: rows::ts(row, "updated_at")?,
+        forgotten_at: rows::opt_ts(row, "forgotten_at")?,
+        cached_at: rows::ts(row, "cached_at")?,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2781,6 +3760,187 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .unwrap()
+    }
+
+    // -- T086: the pattern cache -------------------------------------------
+
+    fn incoming_pattern(pattern_id: Uuid, owner_user_id: Uuid, approach: &str) -> SyncedPattern {
+        let now = Utc::now();
+        SyncedPattern {
+            pattern_id,
+            owner_user_id,
+            title: "retry the flaky integration probe".into(),
+            problem: "the probe fails once and the run is abandoned".into(),
+            root_cause: "the caller treats a transient refusal as terminal".into(),
+            approach: approach.into(),
+            constraints: vec!["only for idempotent probes".into()],
+            applicability: vec!["rust".into()],
+            content_key: format!("ck-{pattern_id}"),
+            created_at: now,
+            updated_at: now,
+            forgotten_at: None,
+        }
+    }
+
+    /// FR-712a for patterns. The server is the pattern's canonical owner, so a
+    /// second delivery replaces what is here rather than being ignored — a
+    /// correction a cache cannot accept is a correction that never reaches the
+    /// reader.
+    #[tokio::test]
+    async fn a_refill_replaces_a_cached_patterns_content() {
+        let store = store().await;
+        let owner_user_id = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry once"),
+        )
+        .await
+        .unwrap();
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry twice with backoff"),
+        )
+        .await
+        .unwrap();
+
+        let held = cached_patterns(&store, owner_user_id).await.unwrap();
+        assert_eq!(held.len(), 1, "a refill converges on one row: {held:#?}");
+        assert_eq!(held[0].approach, "retry twice with backoff");
+        assert_eq!(
+            held[0].trust, PATTERN_TRUST,
+            "the only level the server can establish"
+        );
+        assert_eq!(
+            held[0].constraints,
+            vec!["only for idempotent probes".to_string()],
+            "the list columns survive the round trip as lists"
+        );
+    }
+
+    /// The tombstone clears content and takes precedence over whatever content
+    /// arrived alongside it — a page assembled before the forget and delivered
+    /// after it must not leave the text behind.
+    #[tokio::test]
+    async fn a_tombstone_clears_the_content_it_arrives_with() {
+        let store = store().await;
+        let owner_user_id = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry once"),
+        )
+        .await
+        .unwrap();
+
+        let mut forgotten = incoming_pattern(pattern_id, owner_user_id, "retry once");
+        forgotten.forgotten_at = Some(Utc::now());
+        merge_synced_pattern(&store, forgotten).await.unwrap();
+
+        assert!(
+            cached_patterns(&store, owner_user_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a forgotten pattern is not something the owner still holds"
+        );
+        let row: (String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT title, problem, root_cause, approach, constraints, applicability
+               FROM cached_patterns WHERE pattern_id = ?1",
+        )
+        .bind(pattern_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "[]".to_string(),
+                "[]".to_string()
+            ),
+            "the tombstone must leave nothing legible behind"
+        );
+        let content_key: String =
+            sqlx::query_scalar("SELECT content_key FROM cached_patterns WHERE pattern_id = ?1")
+                .bind(pattern_id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            !content_key.is_empty(),
+            "content_key is identity, not content: clearing it would stop a later \
+             refill converging on this row"
+        );
+    }
+
+    /// One machine may hold two identities' caches side by side, and a merge for
+    /// one must not reach the other's row (FR-708d).
+    #[tokio::test]
+    async fn a_merge_for_one_owner_leaves_another_owners_row_alone() {
+        let store = store().await;
+        let mine = owner();
+        let theirs = owner();
+        let my_pattern = Uuid::now_v7();
+        let their_pattern = Uuid::now_v7();
+
+        merge_synced_pattern(&store, incoming_pattern(my_pattern, mine, "mine, v1"))
+            .await
+            .unwrap();
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(their_pattern, theirs, "theirs, v1"),
+        )
+        .await
+        .unwrap();
+
+        merge_synced_pattern(&store, incoming_pattern(my_pattern, mine, "mine, v2"))
+            .await
+            .unwrap();
+
+        let ours = cached_patterns(&store, mine).await.unwrap();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].approach, "mine, v2");
+
+        let others = cached_patterns(&store, theirs).await.unwrap();
+        assert_eq!(others.len(), 1, "the other identity keeps exactly its row");
+        assert_eq!(others[0].approach, "theirs, v1");
+        assert_eq!(others[0].pattern_id, their_pattern);
+    }
+
+    /// A read never crosses the owner boundary, and a forget scoped to the
+    /// wrong owner is `NotFound` rather than a distinguishable refusal — the
+    /// discipline `forget_personal` keeps, so an id cannot be probed.
+    #[tokio::test]
+    async fn forgetting_another_owners_cached_pattern_is_not_found() {
+        let store = store().await;
+        let mine = owner();
+        let theirs = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(&store, incoming_pattern(pattern_id, mine, "mine"))
+            .await
+            .unwrap();
+
+        match forget_cached_pattern(&store, theirs, pattern_id).await {
+            Err(StoreError::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(
+            cached_patterns(&store, mine).await.unwrap().len(),
+            1,
+            "the owner's row is untouched"
+        );
+
+        forget_cached_pattern(&store, mine, pattern_id)
+            .await
+            .unwrap();
+        assert!(cached_patterns(&store, mine).await.unwrap().is_empty());
     }
 
     // -- T100: outbox routing ----------------------------------------------
@@ -3090,23 +4250,48 @@ mod tests {
         assert_eq!(stored_seq, 4);
     }
 
-    /// A second delivery of the same row cannot rewrite its content, even when
-    /// the incoming copy disagrees.
+    /// A second delivery of the same row **does** rewrite its content, because
+    /// the local copy is a cache and the server is the author of record.
+    ///
+    /// This assertion is the inverse of the one it replaces, and the inversion
+    /// is the requirement rather than a relaxation of it. Feature 004's merge
+    /// was insert-once: a pull could not rewrite content, so a correction made
+    /// on the server never reached a device that already held the old text, and
+    /// the device went on serving it indefinitely. FR-712a names that rule
+    /// explicitly and requires it replaced — "a local copy MUST be able to
+    /// accept a server-side correction, including a content correction and a
+    /// state that did not advance monotonically" — because under server
+    /// authority the local replica is a cache and a cache that refuses refreshes
+    /// is just a stale copy with extra steps.
+    ///
+    /// Its sibling `an_arriving_tombstone_clears_content` is unchanged and still
+    /// passes: a tombstone still wins over incoming content, so a forgotten
+    /// record is not resurrected by a late delivery of the text it used to have.
     #[tokio::test]
-    async fn a_second_delivery_cannot_rewrite_content() {
+    async fn a_second_delivery_carries_a_server_side_correction() {
         let store = store().await;
         let owner_user_id = owner();
         let first = synced(owner_user_id, "the original claim", 1);
         let id = first.id;
         merge_synced_personal(&store, first).await.unwrap();
 
-        let mut second = synced(owner_user_id, "a rewritten claim", 1);
+        let mut second = synced(owner_user_id, "a corrected claim", 1);
         second.id = id;
         let merged = merge_synced_personal(&store, second).await.unwrap();
         assert_eq!(
-            merged.content, "the original claim",
-            "a redelivery rewrote the stored content"
+            merged.content, "a corrected claim",
+            "the cache refused a correction the server had already made"
         );
+
+        // And the correction is durable, not just reflected in the return
+        // value — a caller that re-reads must see it too.
+        let stored: String =
+            sqlx::query_scalar("SELECT content FROM personal_knowledge WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored, "a corrected claim");
     }
 
     /// A tombstone that arrives clears content, exactly as forgetting does
@@ -4379,6 +5564,8 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
+            server_revision: None,
         };
         let merged = merge_synced_team(&store, a, row).await.unwrap();
         assert_eq!(merged.content, "we squash-merge");
@@ -4414,6 +5601,8 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
+            server_revision: None,
         };
         merge_synced_team(&store, a, first).await.unwrap();
 
@@ -4435,6 +5624,8 @@ mod tests {
             superseded_by_id: None,
             retired_by_user_id: None,
             retired_at: None,
+            server_changed_at: None,
+            server_revision: None,
         };
         let err = merge_synced_team(&store, b, second).await.unwrap_err();
         match err {
@@ -4454,6 +5645,1080 @@ mod tests {
         assert!(row.is_none());
         // The first instance's row is untouched.
         assert_eq!(row_count(&store, "team_knowledge").await, 1);
+    }
+
+    /// One `team_knowledge` row exactly as the server's change feed would send
+    /// it, at a stated server version.
+    ///
+    /// `changed_at` is the server's own ordering key — what `team_changes`
+    /// computes as `GREATEST(created_at, ratified_at, retired_at,
+    /// superseded_at)` — and the whole point of these tests is that two pages
+    /// carrying different values of it are not interchangeable.
+    fn team_page(
+        row: &TeamKnowledge,
+        state: TeamState,
+        changed_at: Option<DateTime<Utc>>,
+    ) -> SyncedTeamKnowledge {
+        SyncedTeamKnowledge {
+            id: row.id,
+            knowledge_type: row.knowledge_type,
+            content: row.content.clone(),
+            topic_key: row.topic_key.clone(),
+            value_key: row.value_key.clone(),
+            applicability: Vec::new(),
+            state,
+            proposed_by_user_id: row.proposed_by_user_id,
+            // A page from before either transition carries neither actor and
+            // neither timestamp. That is not a defect of the fixture — it is
+            // precisely the page whose application erases both.
+            ratified_by_user_id: None,
+            ratified_at: None,
+            writer_id: row.writer_id,
+            writer_seq: row.writer_seq,
+            created_at: row.created_at,
+            superseded_by_id: None,
+            retired_by_user_id: None,
+            retired_at: None,
+            server_changed_at: changed_at,
+            // No revision: these fixtures exercise the **fallback** arm of the
+            // guard, the one a server below server migration 5 reaches. The
+            // revision arm has its own tests, and `team_page_rev` builds for
+            // it.
+            server_revision: None,
+        }
+    }
+
+    /// One `team_knowledge` row as a server at migration 5 or above sends it:
+    /// carrying a monotonic `revision`.
+    ///
+    /// `changed_at` is deliberately fixed for every page this builds, at a
+    /// value *older* than anything the row could already have recorded. That is
+    /// not laziness — it is what makes these tests about the revision. If the
+    /// guard ever fell back to the timestamp on a page that has a revision,
+    /// every one of these pages would be declined, and the test that expects a
+    /// newer revision to apply would fail.
+    fn team_page_rev(row: &TeamKnowledge, state: TeamState, revision: i64) -> SyncedTeamKnowledge {
+        let ancient = DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        SyncedTeamKnowledge {
+            server_revision: Some(revision),
+            ..team_page(row, state, Some(ancient))
+        }
+    }
+
+    /// The version a server **below server migration 5** states: a timestamp
+    /// and no revision.
+    ///
+    /// Every test that uses this is a test of the fallback arm — the one
+    /// FR-712a's older-server compatibility rests on — and keeping them on it
+    /// is deliberate. They were written against the timestamp comparison and
+    /// they still hold it to the same relation, equality-refusal included.
+    fn older_server(at: DateTime<Utc>) -> ServerVersion {
+        ServerVersion {
+            changed_at: Some(at),
+            revision: None,
+        }
+    }
+
+    async fn stored_server_version(store: &Store, id: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT server_changed_at FROM team_knowledge WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// The stored server version orders the way SQLite compares it (FR-457).
+    ///
+    /// The guard in [`merge_synced_team`] is a `TEXT` comparison, and SQLite
+    /// compares `TEXT` byte by byte. So "older than" has to be the same
+    /// relation as "sorts before" for every value this column can hold, or the
+    /// predicate silently decides some pairs backwards — and the pair it gets
+    /// wrong is the one where a retirement is erased.
+    ///
+    /// `to_rfc3339` cannot be used for this: it prints the fractional part in
+    /// groups of three digits or omits it altogether, so two instants can be
+    /// encoded at different lengths. Fixed nine digits makes byte order and
+    /// chronological order the same relation, and the values are still ordinary
+    /// RFC 3339 that [`rows::parse_ts`] reads back.
+    ///
+    /// Falsified by encoding the column with `rows::ts_text`.
+    #[test]
+    fn the_stored_server_version_sorts_in_time_order() {
+        let base = DateTime::parse_from_rfc3339("2026-09-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let instants = [
+            base,
+            base + chrono::Duration::nanoseconds(1),
+            base + chrono::Duration::microseconds(1),
+            base + chrono::Duration::milliseconds(500),
+            base + chrono::Duration::seconds(1),
+            base + chrono::Duration::days(400),
+        ];
+        let encoded: Vec<String> = instants.iter().copied().map(server_version_text).collect();
+
+        let width = encoded[0].len();
+        for (text, instant) in encoded.iter().zip(instants.iter()) {
+            assert_eq!(
+                text.len(),
+                width,
+                "{text} is not the same width as the rest"
+            );
+            assert_eq!(
+                rows::parse_ts(text),
+                Some(*instant),
+                "{text} does not read back as the instant it encodes"
+            );
+        }
+        for pair in encoded.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} must sort before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// A pulled page older than what a row already reflects cannot erase who
+    /// retired it (FR-457).
+    ///
+    /// FR-457 requires every team state transition to be recorded with who
+    /// acted *and* when, and to **remain inspectable after the transition**.
+    /// The last clause is the one that failed, and it failed on the acting
+    /// device: `merge_synced_team` refreshed a row on `WHERE id = ?` and
+    /// nothing else, so a page fetched from the server *before* a local
+    /// retirement and applied after it wrote `NULL` over `retired_by_user_id`
+    /// and `retired_at` and rolled an `authoritative` row back to `proposed`.
+    /// `retire_team`'s compare-and-swap on `authoritative` then found
+    /// `proposed` and refused, and the retirement's actor was recorded nowhere
+    /// at all while `cairn team retire` reported success.
+    ///
+    /// That race was reproducible at roughly one run in sixty and one in four
+    /// under load, which is a defect a test cannot be built on. This makes it
+    /// deterministic by doing in three statements what the race did by
+    /// accident: advance the row locally, then hand the merge the page the
+    /// server had sent before it. No daemon, no server, no clock to lose.
+    ///
+    /// The second half is what keeps the fix from being "ignore the server"
+    /// (FR-712a): a page carrying a *newer* server version still wins outright,
+    /// content, actor and all. The guard declines exactly one thing — a page
+    /// older than the version the row already reflects — and it decides that by
+    /// comparing two readings of the server's own clock, never a local one
+    /// against a remote one.
+    ///
+    /// Falsified by restoring `merge_synced_team`'s predicate to
+    /// `WHERE id = ?6`, by dropping `server_changed_at` from either of its two
+    /// branches, or by removing the version `note_team_server_version` records
+    /// for a locally applied transition.
+    #[tokio::test]
+    async fn a_stale_pulled_page_cannot_erase_who_retired_a_team_entry() {
+        let store = store().await;
+        let inst = instance();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "release tags are annotated",
+            "release.tags",
+            "annotated",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        // Where this device stood after its last successful pull: the proposal,
+        // at the server version the proposal was created with.
+        let proposal_version = Utc::now();
+        let merged = merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged.state, TeamState::Proposed);
+        assert!(
+            stored_server_version(&store, id).await.is_some(),
+            "a merged page must leave the version it was ordered by on the row, \
+             or there is nothing for a later page to be compared against"
+        );
+
+        // The two transitions, applied locally the way `cairn team ratify` and
+        // `cairn team retire` apply them once the server has authorized each —
+        // and then the server version each reply named, which is the only thing
+        // that tells this row it has moved past the page above.
+        ratify_team(&store, id, retirer, None).await.unwrap();
+        note_team_server_version(&store, id, proposal_version + chrono::Duration::seconds(1))
+            .await
+            .unwrap();
+        retire_team(&store, id, retirer).await.unwrap();
+        let retirement_version = proposal_version + chrono::Duration::seconds(2);
+        note_team_server_version(&store, id, retirement_version)
+            .await
+            .unwrap();
+
+        // The race, made deterministic: the page the server sent before the
+        // retirement, delivered after it.
+        let survived = merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            survived.state,
+            TeamState::Retired,
+            "a page older than this row rolled a retired entry back to proposed"
+        );
+        assert_eq!(
+            survived.retired_by_user_id,
+            Some(retirer),
+            "a stale page erased who retired the entry, on the device that \
+             retired it (FR-457)"
+        );
+        assert!(
+            survived.retired_at.is_some(),
+            "a stale page erased when the entry was retired (FR-457)"
+        );
+        assert_eq!(
+            survived.ratified_by_user_id,
+            Some(retirer),
+            "a stale page erased who ratified the entry as well (FR-457)"
+        );
+
+        // And the authority still wins when it is genuinely speaking later.
+        let corrector = admin();
+        let corrected_at = retirement_version + chrono::Duration::seconds(1);
+        let mut newer = team_page(&proposed.record, TeamState::Retired, Some(corrected_at));
+        newer.content = "release tags are annotated and signed".to_string();
+        newer.ratified_by_user_id = Some(retirer);
+        newer.ratified_at = Some(proposal_version);
+        newer.retired_by_user_id = Some(corrector);
+        newer.retired_at = Some(corrected_at);
+        let applied = merge_synced_team(&store, inst, newer).await.unwrap();
+        assert_eq!(
+            applied.content, "release tags are annotated and signed",
+            "a newer server page must still correct this row's content (FR-712a)"
+        );
+        assert_eq!(
+            applied.retired_by_user_id,
+            Some(corrector),
+            "a newer server page must still correct who acted (FR-712a)"
+        );
+    }
+
+    /// A transition and the version it reflects are recorded together, so there
+    /// is no instant at which a stale page can still erase it (FR-457).
+    ///
+    /// # What this adds over the test above
+    ///
+    /// That test records each transition and *then* records the version it
+    /// reflects, which is how the repair was first written and is what the
+    /// production paths did. Two statements leave a window: between them the row
+    /// already holds the new actor while `server_changed_at` still names the
+    /// previous page's version, so `merge_synced_team`'s guard evaluates
+    /// `server_changed_at <= incoming` as true and admits a page fetched before
+    /// the transition — which erases the actor exactly as it did before any of
+    /// this existed. Far narrower than the 250-300 ms fetch-to-apply gap that
+    /// made the original defect reproducible at 1 in 60, and the same defect.
+    ///
+    /// So there is no second statement here. The version travels into the swap
+    /// and commits with it, and the stale page arrives with nothing having
+    /// happened in between — which is the strongest form of the scenario the
+    /// production path can actually be in.
+    ///
+    /// **Falsified by** moving the `server_changed_at` advance out of either
+    /// swap's `UPDATE` and back into a following statement: the page is then
+    /// admitted and the retirement's actor is gone.
+    #[tokio::test]
+    async fn a_transition_and_its_server_version_commit_together() {
+        let store = store().await;
+        let inst = instance();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "migrations run on boot",
+            "migrations.boot",
+            "on",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        let proposal_version = Utc::now();
+        merge_synced_team(
+            &store,
+            inst,
+            team_page(
+                &proposed.record,
+                TeamState::Proposed,
+                Some(proposal_version),
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Exactly what the handlers now do: the server authorized each
+        // transition and named when, and that timestamp goes *into* the swap.
+        // Nothing follows either call.
+        ratify_team_at_version(
+            &store,
+            id,
+            retirer,
+            None,
+            older_server(proposal_version + chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(
+                proposal_version + chrono::Duration::seconds(1)
+            )),
+            "the ratification did not record the version it reflects, so the \
+             guard has nothing to decline a stale page with"
+        );
+
+        retire_team_at_version(
+            &store,
+            id,
+            retirer,
+            older_server(proposal_version + chrono::Duration::seconds(2)),
+        )
+        .await
+        .unwrap();
+
+        // **The page that makes this test about the retirement.**
+        //
+        // Not the original proposal — the ratification already advanced the mark
+        // past that one, so a proposal-era page is declined whatever the retire
+        // does, and asserting against it would pass with the retire's version
+        // advance deleted. This is the page the server sent *after* the
+        // ratification and *before* the retirement: it carries the ratified
+        // state at the ratification's own version, which is exactly the mark the
+        // row would still hold if the retirement had not recorded its own. The
+        // guard admits an equal version by design, so the only thing standing
+        // between this page and an erased retirement is the retirement having
+        // committed its version with itself.
+        let mut mid = team_page(
+            &proposed.record,
+            TeamState::Authoritative,
+            Some(proposal_version + chrono::Duration::seconds(1)),
+        );
+        mid.ratified_by_user_id = Some(retirer);
+        mid.ratified_at = Some(proposal_version + chrono::Duration::seconds(1));
+        let survived = merge_synced_team(&store, inst, mid).await.unwrap();
+
+        assert_eq!(
+            survived.state,
+            TeamState::Retired,
+            "a page from before the retirement rolled a retired entry back to \
+             authoritative, with no second statement to blame"
+        );
+        assert_eq!(
+            survived.retired_by_user_id,
+            Some(retirer),
+            "who retired the entry was erased on the device that retired it, \
+             with the version recorded in the same transaction (FR-457)"
+        );
+        assert!(
+            survived.retired_at.is_some(),
+            "when the entry was retired was erased (FR-457)"
+        );
+        assert_eq!(
+            survived.ratified_by_user_id,
+            Some(retirer),
+            "who ratified the entry was erased as well (FR-457)"
+        );
+    }
+
+    /// A delayed transition reply cannot resurrect retired guidance (FR-456,
+    /// FR-465, FR-457).
+    ///
+    /// # The ordering this exists to refuse
+    ///
+    /// `adopt_team_answer` is the repair path for a compare-and-swap that lost:
+    /// the server decided, this device's local swap found a state it did not
+    /// expect, so the server's reply is applied directly. That is right when
+    /// the reply is the newest word about the row. It is wrong when it is not,
+    /// and the wrong case is reachable:
+    ///
+    /// ```text
+    /// server ratifies at T1                 -> authoritative
+    /// server retires the same row at T2     -> retired, T2 recorded locally
+    /// the ratify handler, delayed, reaches STATE_CONFLICT
+    /// adopt_team_answer applies authoritative/T1
+    /// ```
+    ///
+    /// `server_changed_at` was already guarded and stays at T2. Nothing else
+    /// was: `state`, the actor and the timestamp were written on `WHERE id = ?`
+    /// alone. So the row goes back to `authoritative` while still carrying its
+    /// retirement, and `team_active_predicate` — `state = 'authoritative' AND
+    /// superseded_by_id IS NULL` — puts retired guidance back in front of every
+    /// user of this store. Retirement removes guidance from a whole team
+    /// (FR-456, FR-465); undoing it because a reply arrived late is the same
+    /// class of defect as the stale page that erased the actor, through the
+    /// other door.
+    ///
+    /// # Why the version is the right thing to compare
+    ///
+    /// The reply carries the server's own timestamp for the transition it
+    /// describes, and the server's ordering key for a row is
+    /// `GREATEST(created_at, ratified_at, retired_at, superseded_at)` — so
+    /// "retired at T2" *is* "this row's version is T2". A reply older than the
+    /// version the row already reflects is therefore describing a state the
+    /// server has since moved past, and applying any part of it is applying
+    /// history as if it were news.
+    ///
+    /// **Falsified by** dropping the version predicate from either arm of
+    /// `adopt_team_transition`, which puts the row back to `authoritative` and
+    /// back into `recall_team`.
+    #[tokio::test]
+    async fn a_delayed_transition_reply_cannot_resurrect_retired_guidance() {
+        let store = store().await;
+        let inst = instance();
+        let ratifier = admin();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "secrets never enter the repository",
+            "secrets.repository",
+            "never",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(1);
+        let t2 = t0 + chrono::Duration::seconds(2);
+
+        merge_synced_team(
+            &store,
+            inst,
+            team_page(&proposed.record, TeamState::Proposed, Some(t0)),
+        )
+        .await
+        .unwrap();
+
+        // Ratified, then retired — both as this device would record them, each
+        // carrying the server version of its own transition.
+        ratify_team_at_version(&store, id, ratifier, None, older_server(t1))
+            .await
+            .unwrap();
+        retire_team_at_version(&store, id, retirer, older_server(t2))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(t2)),
+            "the retirement did not record its own version, so the rest of this \
+             test would be measuring the wrong thing"
+        );
+
+        // The delayed ratify reply. Exactly what `adopt_team_answer` hands over
+        // when the local swap lost: the state, the actor and the timestamp the
+        // server reported for a transition it has since superseded.
+        adopt_team_transition(
+            &store,
+            id,
+            TeamState::Authoritative,
+            Some(ratifier),
+            Some(&t1.to_rfc3339()),
+            // No revision: an older server's reply has none, so this adoption
+            // is decided by the timestamp arm — which refuses a tie.
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = team_row_any_state(&store, id).await.unwrap();
+        assert_eq!(
+            row.state,
+            TeamState::Retired,
+            "a ratification the server has already superseded put retired \
+             guidance back into authority (FR-456, FR-465)"
+        );
+        assert_eq!(
+            row.retired_by_user_id,
+            Some(retirer),
+            "the stale reply overwrote who retired the entry (FR-457)"
+        );
+        assert!(
+            row.retired_at.is_some(),
+            "the stale reply overwrote when the entry was retired (FR-457)"
+        );
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(t2)),
+            "the recorded server version moved backwards"
+        );
+
+        // And the property a user actually experiences: retired guidance is not
+        // recalled. Asserted through the real read rather than through the
+        // column, because `team_active_predicate` is what decides it.
+        let recalled = recall_team(&store, None, None, &[], 10).await.unwrap();
+        assert!(
+            !recalled.iter().any(|r| r.id == id),
+            "retired guidance is being recalled again after a delayed \
+             ratification reply (FR-456, FR-465): {:?}",
+            recalled.iter().map(|r| (r.id, r.state)).collect::<Vec<_>>()
+        );
+    }
+
+    /// The same guard in the other direction: a delayed *retirement* reply
+    /// cannot overwrite a newer server state either (FR-456, FR-457, FR-712a).
+    ///
+    /// # Why both arms need testing separately
+    ///
+    /// `adopt_team_transition` has one arm per state and they were written
+    /// independently, so a guard added to one proves nothing about the other. A
+    /// delayed retire reply is the mirror image and just as reachable: the
+    /// server retires at T2 and then supersedes the row at T3, this device
+    /// learns T3 from a pull page, and the retire handler — delayed — reaches
+    /// `STATE_CONFLICT` and adopts `retired`/T2 over it. That would drop the
+    /// supersession pointer's state and re-date the row to a decision the
+    /// server has already moved past.
+    ///
+    /// **Falsified by** dropping the version predicate from the `Retired` arm.
+    #[tokio::test]
+    async fn a_delayed_retirement_reply_cannot_overwrite_a_newer_server_state() {
+        let store = store().await;
+        let inst = instance();
+        let retirer = admin();
+        let proposer = member();
+
+        let proposed = propose(
+            &store,
+            proposer,
+            "release branches are cut on Thursday",
+            "release.branch_day",
+            "thursday",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        let t2 = Utc::now();
+        let t3 = t2 + chrono::Duration::seconds(1);
+
+        // What this device currently reflects: the server's state as of T3.
+        let mut newer = team_page(&proposed.record, TeamState::Authoritative, Some(t3));
+        newer.ratified_by_user_id = Some(retirer);
+        newer.ratified_at = Some(t3);
+        merge_synced_team(&store, inst, newer).await.unwrap();
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(t3)),
+            "the page did not record its version, so this test would measure \
+             nothing"
+        );
+
+        // The delayed retire reply, describing T2.
+        adopt_team_transition(
+            &store,
+            id,
+            TeamState::Retired,
+            Some(retirer),
+            Some(&t2.to_rfc3339()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = team_row_any_state(&store, id).await.unwrap();
+        assert_eq!(
+            row.state,
+            TeamState::Authoritative,
+            "a retirement the server has already moved past overwrote a newer \
+             state (FR-712a)"
+        );
+        assert!(
+            row.retired_at.is_none() && row.retired_by_user_id.is_none(),
+            "the stale retirement reply wrote its actor and timestamp onto a \
+             row the server had already carried further: retired_at={:?} \
+             retired_by={:?}",
+            row.retired_at,
+            row.retired_by_user_id
+        );
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(t3)),
+            "the recorded server version moved backwards"
+        );
+    }
+
+    /// A peer that sends no version at all can still synchronize (FR-457,
+    /// FR-712a).
+    ///
+    /// The guard orders pages by the server's own `changed_at`, and a server
+    /// below local schema 11 sends none. "Cannot be ordered" must mean *the
+    /// page applies*, not *the page is refused*: a store rendered unable to
+    /// accept anything from an older deployment would be a far larger outage
+    /// than the staleness being ordered here, and it would be an outage caused
+    /// by a repair.
+    ///
+    /// The same reading covers a row written before the column existed: its
+    /// `NULL` means nothing is known about which version it reflects, so the
+    /// incoming page wins and an upgraded store converges on its next pull
+    /// exactly as it did before. The guard only ever tightens.
+    ///
+    /// And an unversioned page must not *erase* a version the row already has,
+    /// or one page from an older peer would switch the guard off for that row
+    /// permanently — which is what the `COALESCE` is for.
+    ///
+    /// Falsified by dropping either `IS NULL` disjunct from
+    /// `merge_synced_team`'s predicate, or by binding `?17` directly instead of
+    /// through `COALESCE`.
+    #[tokio::test]
+    async fn a_page_from_a_peer_that_sends_no_version_still_applies() {
+        let store = store().await;
+        let inst = instance();
+        let proposer = member();
+        let proposed = propose(&store, proposer, "we squash-merge", "vcs.merge", "squash").await;
+        let id = proposed.record.id;
+
+        // A row that predates the column, merged from a peer that predates the
+        // field: both nulls, and the page applies.
+        assert!(stored_server_version(&store, id).await.is_none());
+        // Both halves of the ratification, because the table's own `CHECK`
+        // requires them of an authoritative row — the schema does not let a
+        // transition be half-recorded even from a page (FR-457).
+        let ratifier = admin();
+        let ratified_at = Utc::now();
+        let authoritative = |version: Option<DateTime<Utc>>| {
+            let mut page = team_page(&proposed.record, TeamState::Authoritative, version);
+            page.ratified_by_user_id = Some(ratifier);
+            page.ratified_at = Some(ratified_at);
+            page
+        };
+        let mut page = authoritative(None);
+        page.content = "we squash-merge, always".to_string();
+        let applied = merge_synced_team(&store, inst, page).await.unwrap();
+        assert_eq!(applied.content, "we squash-merge, always");
+        assert_eq!(applied.state, TeamState::Authoritative);
+        assert!(
+            stored_server_version(&store, id).await.is_none(),
+            "an unversioned page must not invent a version for the row"
+        );
+
+        // Once a version *is* known, an unversioned page still applies — and
+        // still must not erase it.
+        let known = Utc::now();
+        let mut versioned = authoritative(Some(known));
+        versioned.content = "we squash-merge on main".to_string();
+        merge_synced_team(&store, inst, versioned).await.unwrap();
+        let recorded = stored_server_version(&store, id).await;
+        assert!(recorded.is_some());
+
+        let mut unversioned = authoritative(None);
+        unversioned.content = "we squash-merge on every branch".to_string();
+        let applied = merge_synced_team(&store, inst, unversioned).await.unwrap();
+        assert_eq!(
+            applied.content, "we squash-merge on every branch",
+            "an older peer's page must still apply"
+        );
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            recorded,
+            "an older peer's page erased the version this row already had, \
+             which switches the guard off for it permanently"
+        );
+    }
+
+    async fn stored_server_revision(store: &Store, id: Uuid) -> Option<i64> {
+        sqlx::query_scalar("SELECT server_revision FROM team_knowledge WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    // -- The monotonic revision (FR-456, FR-457, FR-465, FR-712a) --------------
+
+    /// A pulled page older than the revision the row already reflects is
+    /// refused; a newer one applies (FR-457, FR-712a).
+    ///
+    /// This is [`merge_synced_team`]'s guard stated on the quantity that can
+    /// actually carry it. The predicate it replaced compared the server's
+    /// `changed_at`, which is `GREATEST` over columns stamped with
+    /// transaction-start `now()` — so two different states can share one value
+    /// and the comparison has nothing to decide with. `revision` comes from a
+    /// sequence: strictly ordered, advanced by every server-side write.
+    ///
+    /// Asserted on `content` rather than on the version column alone, because
+    /// what a stale page actually costs is the row's *facts*: the page fetched
+    /// before a transition writes `NULL` over `retired_by_user_id` and rolls
+    /// the state back, and a test that watched only the mark would pass while
+    /// that happened.
+    ///
+    /// **Falsified by** removing the `server_revision <= ?18` arm from
+    /// `merge_synced_team`'s predicate — either by deleting the `CASE` or by
+    /// making that arm unconditionally true — which admits the older page and
+    /// puts its content and its state back.
+    #[tokio::test]
+    async fn a_pulled_page_below_the_recorded_revision_is_refused_and_above_it_applies() {
+        let store = store().await;
+        let inst = instance();
+        let proposed = propose(&store, member(), "we squash-merge", "vcs.merge", "squash").await;
+        let id = proposed.record.id;
+
+        // First sight of the row, at revision 7.
+        let mut first = team_page_rev(&proposed.record, TeamState::Proposed, 7);
+        first.content = "at revision 7".to_string();
+        merge_synced_team(&store, inst, first).await.unwrap();
+        assert_eq!(stored_server_revision(&store, id).await, Some(7));
+
+        // A page the server has already moved past.
+        let mut older = team_page_rev(&proposed.record, TeamState::Proposed, 6);
+        older.content = "at revision 6".to_string();
+        let survived = merge_synced_team(&store, inst, older).await.unwrap();
+        assert_eq!(
+            survived.content, "at revision 7",
+            "a page below the recorded revision was applied over a newer one"
+        );
+        assert_eq!(
+            stored_server_revision(&store, id).await,
+            Some(7),
+            "a declined page moved the recorded revision"
+        );
+
+        // And a genuinely newer one wins whatever it says — this guard orders
+        // the authority's answers, it does not judge them.
+        let mut newer = team_page_rev(&proposed.record, TeamState::Proposed, 8);
+        newer.content = "at revision 8".to_string();
+        let applied = merge_synced_team(&store, inst, newer).await.unwrap();
+        assert_eq!(applied.content, "at revision 8");
+        assert_eq!(stored_server_revision(&store, id).await, Some(8));
+    }
+
+    /// An **equal** revision is admitted, and applying it is idempotent
+    /// (FR-712a).
+    ///
+    /// # Why equality is safe here and refused on the timestamp path
+    ///
+    /// A revision is a sequence value, so an equal revision is *the same server
+    /// change* arriving again — a redelivered page after a cursor reset, a
+    /// retried pull, a page delivered twice because the cursor moves only when
+    /// a whole page lands. Re-applying it writes the values already there.
+    /// There is no decision to get wrong, and refusing it would strand a page
+    /// the feed will keep offering.
+    ///
+    /// The timestamp arm refuses equality, and that is not an inconsistency:
+    /// there, a tie is two *different* states that happen to share one
+    /// `GREATEST` over transaction-start timestamps, nothing can order them,
+    /// and the stored one is preferred because a wrongly declined page is
+    /// repaired by the next pull while a wrongly applied resurrection is not
+    /// self-correcting.
+    ///
+    /// **Falsified by** tightening `server_revision <= ?18` to
+    /// `server_revision < ?18` in `merge_synced_team`, which declines the
+    /// redelivery and leaves the row at the first page's content.
+    #[tokio::test]
+    async fn a_page_at_an_equal_revision_is_admitted_as_the_same_server_change() {
+        let store = store().await;
+        let inst = instance();
+        let proposed = propose(&store, member(), "we rebase", "vcs.merge", "rebase").await;
+        let id = proposed.record.id;
+
+        let mut page = team_page_rev(&proposed.record, TeamState::Proposed, 11);
+        page.content = "as the server holds it".to_string();
+        merge_synced_team(&store, inst, page).await.unwrap();
+
+        // The same revision again — the same change, redelivered.
+        let mut again = team_page_rev(&proposed.record, TeamState::Proposed, 11);
+        again.content = "as the server holds it".to_string();
+        let applied = merge_synced_team(&store, inst, again).await.unwrap();
+        assert_eq!(
+            applied.content, "as the server holds it",
+            "a redelivered page at the same revision was declined"
+        );
+        assert_eq!(stored_server_revision(&store, id).await, Some(11));
+
+        // Idempotent, and observably so: the applicability replacement inside
+        // the guard's success branch also ran, rather than being skipped as it
+        // is for a declined page.
+        assert_eq!(
+            row_count(&store, "team_knowledge").await,
+            1,
+            "a redelivered page created a second row"
+        );
+    }
+
+    /// **The defect this column exists for.** A transition whose server
+    /// timestamp went *backwards* is still adopted, because the revision orders
+    /// it and the timestamp cannot (FR-456, FR-457, FR-465).
+    ///
+    /// # The inversion is not a tie, and it is not rare
+    ///
+    /// The server stamps `ratified_at` and `retired_at` with PostgreSQL
+    /// `now()`, which is **transaction start** time, not statement time. A
+    /// retirement whose transaction opened before an earlier-committing
+    /// ratification therefore writes a `retired_at` *older* than that
+    /// `ratified_at`. Measured against this repository's own PostgreSQL, with
+    /// no lock contention required:
+    ///
+    /// ```text
+    /// S2 opens its transaction   14:41:43.252792  -> writes retired_at  = 43.252792
+    /// S1 ratifies (own tx)       14:41:44.048009  -> writes ratified_at = 44.048009
+    /// final row: state = 'retired', retired_at < ratified_at = true,
+    ///            GREATEST(...) = 44.048009 — the ratification's value
+    /// ```
+    ///
+    /// So the retirement reply this device has to adopt carries a timestamp a
+    /// full second *older* than the version the row already records, even
+    /// though it describes a strictly later state. On the timestamp comparison
+    /// the retirement is refused — the actor and the time of the retirement are
+    /// recorded nowhere on the machine that performed it (FR-457), and
+    /// `team_active_predicate` keeps serving guidance an administrator
+    /// withdrew (FR-456, FR-465). The revision is 3 where the ratification's
+    /// was 2, and decides it correctly.
+    ///
+    /// **Falsified by** removing the revision arm from `NEWER_THAN_RECORDED`,
+    /// which drops this adoption on the floor and leaves the row
+    /// `authoritative`.
+    #[tokio::test]
+    async fn a_transition_whose_timestamp_went_backwards_is_still_adopted_by_revision() {
+        let store = store().await;
+        let inst = instance();
+        let ratifier = admin();
+        let retirer = admin();
+        let proposed = propose(
+            &store,
+            member(),
+            "secrets never enter the repository",
+            "secrets.repository",
+            "never",
+        )
+        .await;
+        let id = proposed.record.id;
+
+        // The two server timestamps, inverted exactly as the trace above.
+        let ratified_at = DateTime::parse_from_rfc3339("2026-09-10T14:41:44.048009Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let retired_at = DateTime::parse_from_rfc3339("2026-09-10T14:41:43.252792Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            retired_at < ratified_at,
+            "this test is only about the inverted case"
+        );
+
+        merge_synced_team(
+            &store,
+            inst,
+            team_page_rev(&proposed.record, TeamState::Proposed, 1),
+        )
+        .await
+        .unwrap();
+
+        // The ratification, adopted from the server's reply: revision 2, and
+        // the *later* of the two timestamps.
+        adopt_team_transition(
+            &store,
+            id,
+            TeamState::Authoritative,
+            Some(ratifier),
+            Some(&ratified_at.to_rfc3339()),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored_server_revision(&store, id).await, Some(2));
+
+        // The retirement, adopted from the server's reply: revision 3 — a
+        // strictly later server change — carrying the *earlier* timestamp.
+        adopt_team_transition(
+            &store,
+            id,
+            TeamState::Retired,
+            Some(retirer),
+            Some(&retired_at.to_rfc3339()),
+            Some(3),
+        )
+        .await
+        .unwrap();
+
+        let row = team_row_any_state(&store, id).await.unwrap();
+        assert_eq!(
+            row.state,
+            TeamState::Retired,
+            "a retirement whose server timestamp is older than the \
+             ratification's was refused, so withdrawn guidance stays \
+             authoritative (FR-456, FR-465)"
+        );
+        assert_eq!(
+            row.retired_by_user_id,
+            Some(retirer),
+            "who retired the entry was recorded nowhere on the machine that \
+             retired it (FR-457)"
+        );
+        assert_eq!(stored_server_revision(&store, id).await, Some(3));
+        // The timestamp mark did not move backwards, which is the other half
+        // of `ADVANCE_VERSION`: an older reading of the fallback clock is not
+        // allowed to overwrite a newer one just because the revision admitted
+        // the write.
+        assert_eq!(
+            stored_server_version(&store, id).await,
+            Some(server_version_text(ratified_at)),
+            "the fallback mark moved backwards"
+        );
+
+        // And the delayed ratify reply that arrives afterwards is refused on
+        // the revision, exactly as the timestamp arm refuses its own stale
+        // replies.
+        adopt_team_transition(
+            &store,
+            id,
+            TeamState::Authoritative,
+            Some(ratifier),
+            Some(&ratified_at.to_rfc3339()),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let row = team_row_any_state(&store, id).await.unwrap();
+        assert_eq!(
+            row.state,
+            TeamState::Retired,
+            "a reply at a revision the server has moved past resurrected \
+             retired guidance (FR-465)"
+        );
+        let recalled = recall_team(&store, None, None, &[], 10).await.unwrap();
+        assert!(
+            !recalled.iter().any(|r| r.id == id),
+            "retired guidance is being recalled again: {:?}",
+            recalled.iter().map(|r| (r.id, r.state)).collect::<Vec<_>>()
+        );
+    }
+
+    /// A row that has never been told a revision keeps converging, and starts
+    /// being ordered by revision from the first page that carries one (FR-415,
+    /// FR-712a).
+    ///
+    /// Two independent "no revision" cases, and they must not be confused:
+    ///
+    /// - **The store is new, the server is old.** A server below server
+    ///   migration 5 sends no `revision` at all, and every page it sends must
+    ///   apply exactly as it did before this column existed — ordered by
+    ///   `changed_at`, refusing nothing on revision grounds. A store rendered
+    ///   unable to synchronize with an older deployment would be a far larger
+    ///   outage than the staleness being ordered, and one caused by a repair.
+    /// - **The store is old, the server is new.** A row already in this table
+    ///   has `server_revision IS NULL`: nothing is known about which revision
+    ///   it reflects, so the fallback comparison decides its next page, and the
+    ///   revision that page carries is recorded. From then on the row is
+    ///   ordered by revision. The guard tightens; it never withholds a row a
+    ///   device would otherwise have had.
+    ///
+    /// And an unversioned page must not *erase* a revision the row already has,
+    /// or one page from an older peer would switch the revision comparison off
+    /// for that row permanently — which is what the second `COALESCE` is for.
+    ///
+    /// **Falsified by** binding `?18` directly instead of through `COALESCE`,
+    /// or by making the `CASE`'s revision arm fire when `?18 IS NULL` (which
+    /// compares `server_revision <= NULL`, refusing every older server's page).
+    #[tokio::test]
+    async fn a_server_that_sends_no_revision_still_synchronizes() {
+        let store = store().await;
+        let inst = instance();
+        let proposed = propose(&store, member(), "we tag releases", "release.tag", "yes").await;
+        let id = proposed.record.id;
+
+        let t0 = Utc::now();
+        let ratifier = admin();
+        // An authoritative page needs both halves of the ratification: the
+        // table's own `CHECK` does not let a transition be half-recorded even
+        // from a page (FR-457).
+        let older_peer_page = |at: DateTime<Utc>, content: &str| {
+            let mut page = team_page(&proposed.record, TeamState::Authoritative, Some(at));
+            page.ratified_by_user_id = Some(ratifier);
+            page.ratified_at = Some(at);
+            page.content = content.to_string();
+            page
+        };
+
+        // A row with no revision, pages with no revision: the fallback decides,
+        // and it behaves as it always has.
+        assert_eq!(stored_server_revision(&store, id).await, None);
+        let applied = merge_synced_team(&store, inst, older_peer_page(t0, "from an old server"))
+            .await
+            .unwrap();
+        assert_eq!(applied.content, "from an old server");
+        assert_eq!(
+            stored_server_revision(&store, id).await,
+            None,
+            "an unversioned page invented a revision for the row"
+        );
+        // Still ordered — by the only key either side has.
+        let stale = merge_synced_team(
+            &store,
+            inst,
+            older_peer_page(t0 - chrono::Duration::seconds(5), "an older page"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stale.content, "from an old server",
+            "the fallback comparison stopped ordering pages"
+        );
+
+        // Now the server is upgraded. The first page carrying a revision is
+        // decided by the fallback (this row has no revision to compare) and
+        // records the revision it carried.
+        let mut upgraded = older_peer_page(t0 + chrono::Duration::seconds(1), "from a new server");
+        upgraded.server_revision = Some(40);
+        merge_synced_team(&store, inst, upgraded).await.unwrap();
+        assert_eq!(stored_server_revision(&store, id).await, Some(40));
+
+        // From here the revision decides, and a page below it is refused even
+        // though its `changed_at` is newer — which is the whole point: the
+        // timestamp is not a version.
+        let mut below = older_peer_page(t0 + chrono::Duration::seconds(60), "a stale page");
+        below.server_revision = Some(39);
+        let survived = merge_synced_team(&store, inst, below).await.unwrap();
+        assert_eq!(
+            survived.content, "from a new server",
+            "the revision stopped deciding once the row had one"
+        );
+
+        // And a page from a peer that lost the column again — a rollback, or a
+        // second server held back — still applies, and still must not erase the
+        // revision this row has.
+        let mut unversioned = older_peer_page(
+            t0 + chrono::Duration::seconds(90),
+            "from an old server again",
+        );
+        unversioned.server_revision = None;
+        let applied = merge_synced_team(&store, inst, unversioned).await.unwrap();
+        assert_eq!(
+            applied.content, "from an old server again",
+            "an older peer's page must still apply"
+        );
+        assert_eq!(
+            stored_server_revision(&store, id).await,
+            Some(40),
+            "an older peer's page erased the revision this row already had, \
+             which switches the comparison off for it permanently"
+        );
     }
 
     #[tokio::test]

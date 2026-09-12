@@ -549,6 +549,281 @@ pub async fn require_member(pool: &PgPool, project_id: Uuid, user_id: Uuid) -> A
     }
 }
 
+// ---------------------------------------------------------------------------
+// Feature 005 — per-domain resolution and ownership (FR-768-FR-769a, FR-834,
+// FR-846a)
+// ---------------------------------------------------------------------------
+
+use cairn_core::domain::{KnowledgeDomain, Readership, Reference};
+
+// The four items below are the read side of this boundary and have no caller
+// until retrieval lands (US2/US5, T093-T124). They are written here, with the
+// ingest guards they belong beside, because the rule they encode is one rule:
+// a reference is resolved per domain, and a personal record is owner-only
+// whatever asks for it. Splitting the write side from the read side would
+// invite two answers to that question. The suppression is scoped to these four
+// and comes off the moment retrieval calls them.
+
+/// Whether a reference may be shown to a reader, and — when it may not — the
+/// only thing the caller is allowed to do about it.
+///
+/// Two outcomes, and the second is the interesting one. A reference the reader
+/// may not see is **withheld entirely**, not rendered as an opaque handle
+/// (FR-846a). An opaque handle still discloses that the record exists, and a
+/// briefing spans three domains, so a project member counting handles or
+/// noticing a gap in a rank sequence could enumerate a colleague's personal
+/// knowledge without ever reading a word of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Visibility {
+    /// The reader may see this reference and resolve it.
+    Visible,
+    /// The reader may not. The caller must drop it — not blank it, not
+    /// placeholder it, not leave a numbered gap where it was.
+    Withheld,
+}
+
+impl Visibility {
+    #[allow(dead_code)]
+    pub fn is_visible(&self) -> bool {
+        matches!(self, Visibility::Visible)
+    }
+}
+
+/// What the server knows about the reader, once, so a resolution loop does not
+/// re-query membership per reference.
+///
+/// Assembled from the authenticated credential (FR-769). Nothing here is read
+/// from a request body, and there is deliberately no constructor that takes a
+/// user id as a plain argument from a handler: the only way to build one is
+/// from a [`CurrentUser`] the extractor produced.
+#[derive(Debug, Clone)]
+pub struct ReaderContext {
+    user_id: Uuid,
+    /// Projects this reader belongs to.
+    projects: std::collections::BTreeSet<Uuid>,
+}
+
+impl ReaderContext {
+    /// Load the reader's memberships from the authenticated account.
+    pub async fn load(pool: &PgPool, user: &CurrentUser) -> ApiResult<Self> {
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT project_id FROM project_members WHERE user_id = $1")
+                .bind(user.id)
+                .fetch_all(pool)
+                .await?;
+        Ok(Self {
+            user_id: user.id,
+            projects: rows.into_iter().map(|(p,)| p).collect(),
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    pub fn is_member_of(&self, project_id: Uuid) -> bool {
+        self.projects.contains(&project_id)
+    }
+}
+
+/// Whether this reader may see this reference, resolved per domain.
+///
+/// Per domain because there is no single table to ask. Project knowledge is in
+/// `memories` and is checked against membership; personal knowledge is in
+/// `personal_knowledge` and is checked against ownership; team knowledge is in
+/// `team_knowledge` and is checked against the server's team, with `proposed`
+/// rows additionally requiring author-or-administrator. A `PatternRef` resolves
+/// against `shared_patterns`, whose visibility is owner-only — the table name
+/// describes where it is stored, not who can see it (data-model.md §6.2).
+///
+/// **Shared project membership does not widen a personal record.** An
+/// administrator's standing is over team guidance, not over a colleague's
+/// private notes, so `AdminUser` gets no exemption here and is not a parameter.
+#[allow(dead_code)]
+pub async fn reference_visibility(
+    pool: &PgPool,
+    reader: &ReaderContext,
+    reference: Reference,
+) -> ApiResult<Visibility> {
+    let visible = match reference {
+        Reference::Knowledge(k) => match k.domain {
+            KnowledgeDomain::Project => {
+                // The project is a property of the row, not of the request: a
+                // caller naming a project it is not a member of must not be
+                // able to make the reference visible by saying so.
+                let owner: Option<(Uuid,)> =
+                    sqlx::query_as("SELECT project_id FROM memories WHERE id = $1")
+                        .bind(k.id)
+                        .fetch_optional(pool)
+                        .await?;
+                owner.is_some_and(|(project,)| reader.is_member_of(project))
+            }
+            KnowledgeDomain::Personal => {
+                let owner: Option<(Uuid,)> = sqlx::query_as(
+                    "SELECT owner_user_id FROM personal_knowledge
+                      WHERE id = $1 AND forgotten_at IS NULL",
+                )
+                .bind(k.id)
+                .fetch_optional(pool)
+                .await?;
+                owner.is_some_and(|(owner,)| owner == reader.user_id)
+            }
+            KnowledgeDomain::Team => {
+                // Team knowledge is server-wide, so any authenticated account
+                // may read a ratified or retired row. A `proposed` row is a
+                // proposal and not yet guidance, so it is visible to its
+                // author only until an administrator acts on it (FR-825).
+                let row: Option<(String, Uuid)> = sqlx::query_as(
+                    "SELECT state, proposed_by_user_id FROM team_knowledge WHERE id = $1",
+                )
+                .bind(k.id)
+                .fetch_optional(pool)
+                .await?;
+                match row {
+                    None => false,
+                    Some((state, author)) => state != "proposed" || author == reader.user_id,
+                }
+            }
+        },
+        Reference::Pattern(p) => {
+            let owner: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT owner_user_id FROM shared_patterns
+                  WHERE pattern_id = $1 AND forgotten_at IS NULL",
+            )
+            .bind(p.0)
+            .fetch_optional(pool)
+            .await?;
+            owner.is_some_and(|(owner,)| owner == reader.user_id)
+        }
+    };
+    Ok(if visible {
+        Visibility::Visible
+    } else {
+        Visibility::Withheld
+    })
+}
+
+/// Keep only the references this reader may see, dropping the rest.
+///
+/// Dropping, not marking. The returned list carries no evidence that anything
+/// was removed — no gap, no count, no placeholder — because the existence of a
+/// withheld record is itself the disclosure FR-846a forbids.
+#[allow(dead_code)]
+pub async fn visible_references(
+    pool: &PgPool,
+    reader: &ReaderContext,
+    references: &[Reference],
+) -> ApiResult<Vec<Reference>> {
+    let mut kept = Vec::new();
+    for reference in references {
+        if reference_visibility(pool, reader, *reference)
+            .await?
+            .is_visible()
+        {
+            kept.push(*reference);
+        }
+    }
+    Ok(kept)
+}
+
+/// What a session establishes about the event that names it.
+///
+/// The project is **derived** from the session and never asserted by the
+/// caller. A caller that could name the project could attribute its events to a
+/// project it has nothing to do with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionBinding {
+    pub project_id: Uuid,
+    pub owner_user_id: Uuid,
+}
+
+/// Why a session could not establish a binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionBindingError {
+    /// The caller cannot resolve this session at all: either it does not
+    /// exist, or it exists in a project the caller does not belong to.
+    ///
+    /// **Deliberately one answer for both**, and this is the part that is easy
+    /// to get wrong. A **request-level** `403` for non-membership and a
+    /// per-item `session_not_found` for an unknown id are two visibly different
+    /// responses, so a caller who could tell them apart could enumerate which
+    /// session ids exist across the whole server, one guess at a time — which
+    /// is exactly what answering per item was supposed to prevent (FR-894a,
+    /// `contracts/safe-events.md` §7.1 step 6).
+    ///
+    /// A member who genuinely mistypes a session id therefore gets a `403`
+    /// rather than a narrower message. That is the bluntness the guarantee
+    /// costs, and it is worth it: the alternative is a probe oracle.
+    Unresolvable,
+    /// The caller is a member of the session's project, but the session is not
+    /// theirs.
+    ///
+    /// Per-item, because a member already knows this project's sessions exist —
+    /// they can list them — so nothing crosses a trust boundary here. What is
+    /// refused is *attribution*: consolidation must not produce knowledge that
+    /// credits a colleague's authorship to work they never did (FR-769a).
+    NotOwned,
+}
+
+/// Resolve and authorize the session an event names (FR-769, FR-769a).
+///
+/// An event names its session, and a session identifier is body data. Two
+/// separate things are checked here and both are required:
+///
+/// - the caller is a **member of the session's project**, which is a
+///   request-level `403` if not; and
+/// - the session **belongs to the authenticated account**, which is a per-item
+///   refusal if not.
+///
+/// The second is the one FR-769a exists for. Without it a project member could
+/// submit well-formed events naming a colleague's session, and consolidation
+/// would produce durable knowledge attributing a colleague's authorship to work
+/// they never did — the same class of defect as falsified proposal attribution,
+/// moved to a different key. Membership alone does not cover it, because the
+/// colleague is a member too.
+///
+/// A session whose `user_id` is NULL fails. It predates account binding, so
+/// nobody can be established as its owner, and "nobody owns it" is not the same
+/// as "you own it" (FR-764, Principle XI).
+pub async fn bind_session(
+    pool: &PgPool,
+    reader: &ReaderContext,
+    session_id: Uuid,
+) -> ApiResult<Result<SessionBinding, SessionBindingError>> {
+    let row: Option<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT project_id, user_id FROM sessions WHERE id = $1")
+            .bind(session_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((project_id, owner)) = row else {
+        // Indistinguishable from non-membership, on purpose. See
+        // `SessionBindingError::Unresolvable`.
+        return Ok(Err(SessionBindingError::Unresolvable));
+    };
+    if !reader.is_member_of(project_id) {
+        return Ok(Err(SessionBindingError::Unresolvable));
+    }
+    match owner {
+        Some(owner) if owner == reader.user_id => Ok(Ok(SessionBinding {
+            project_id,
+            owner_user_id: owner,
+        })),
+        // Includes a session whose `user_id` is NULL: it predates account
+        // binding, so nobody can be established as its owner, and "nobody owns
+        // it" is not "you own it" (FR-764, Principle XI).
+        _ => Ok(Err(SessionBindingError::NotOwned)),
+    }
+}
+
+/// The readership a domain declares, so a caller can state it without
+/// re-deriving it.
+#[allow(dead_code)]
+pub fn declared_readership(reference: Reference) -> Readership {
+    reference.readership()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,16 +29,26 @@ pub enum ApplicabilityRejection {
 
 /// Normalize and constrain one applicability value (FR-446, D410).
 ///
-/// Tighter than `normalize_value_key` alone. A value here is not free text the
-/// way a memory's `value_key` may loosely be — it names one discrete fact
-/// ("rust", "cargo", "graphql") and nothing else is representable. A value that
-/// fails either step causes the *creation* to be refused; it is never silently
-/// dropped, truncated, or stored with a null kind.
+/// Tighter than a memory's `value_key`, and **deliberately not built on it**. A
+/// value here names one discrete fact — "rust", "cargo", "graphql" — and
+/// nothing else is representable. A value that fails causes the *creation* to
+/// be refused; it is never silently dropped, truncated, or stored with a null
+/// kind.
+///
+/// This used to delegate to `normalize_value_key` and then re-check the result,
+/// which worked only because that function did no separator folding: `has
+/// space` and `path/like` survived unchanged and failed the `[a-z0-9_]` check
+/// afterwards. Feature 005 folds separators in value keys (FR-796a), so the
+/// same delegation would now coerce those into `has_space` and `path_like` and
+/// accept them — turning a refusal into exactly the silent repair this function
+/// exists to prevent. The rule is therefore stated here directly: case and
+/// Unicode form are normalized, and everything else must already be a single
+/// `[a-z0-9_]` token.
 pub fn normalize_applicability_value(value: &str) -> Result<String, ApplicabilityRejection> {
-    let normalized =
-        crate::knowledge::normalize_value_key(value).ok_or(ApplicabilityRejection::InvalidValue)?;
+    use unicode_normalization::UnicodeNormalization;
+    let normalized: String = value.nfc().collect::<String>().to_lowercase();
     let acceptable = !normalized.is_empty()
-        && normalized.len() <= 64
+        && normalized.chars().count() <= 64
         && normalized
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');

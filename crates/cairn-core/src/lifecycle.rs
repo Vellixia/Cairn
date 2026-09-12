@@ -75,6 +75,30 @@ impl CanonicalEvent {
         )
     }
 
+    /// The Feature 005 event kind this lifecycle event becomes (FR-744).
+    ///
+    /// Total, and that is the requirement: the seven Feature 001–003 lifecycle
+    /// events must map onto the twenty-one canonical kinds **without loss**, or
+    /// handoff generation, checkpointing and context delivery stop working the
+    /// moment events start travelling as `SafeCanonicalEvent`s.
+    ///
+    /// Every one of the seven maps to a kind of the same name. That is not a
+    /// coincidence to be relied on quietly — it is why the twenty-one were
+    /// chosen as a superset rather than a replacement, and stating the mapping
+    /// as a function is what lets a test prove it stayed total.
+    pub fn safe_event_kind(self) -> crate::event::EventKind {
+        use crate::event::EventKind;
+        match self {
+            CanonicalEvent::SessionOpened => EventKind::SessionOpened,
+            CanonicalEvent::ToolSucceeded => EventKind::ToolSucceeded,
+            CanonicalEvent::ToolFailed => EventKind::ToolFailed,
+            CanonicalEvent::AgentQuiesced => EventKind::AgentQuiesced,
+            CanonicalEvent::ContextCompacting => EventKind::ContextCompacting,
+            CanonicalEvent::ContextCompacted => EventKind::ContextCompacted,
+            CanonicalEvent::SessionClosed => EventKind::SessionClosed,
+        }
+    }
+
     /// True where the event produces a durable handoff.
     ///
     /// `AgentQuiesced` and `ContextCompacted` deliberately do not (FR-114,

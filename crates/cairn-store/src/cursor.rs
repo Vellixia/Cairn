@@ -106,6 +106,63 @@ pub async fn established(store: &Store) -> Result<Vec<SyncNamespace>> {
     Ok(keys.iter().filter_map(|k| parse(k)).collect())
 }
 
+/// The server instance this store's **team corpus is bound to**, if any.
+///
+/// **Read from the singular `team:*` lane, and from nothing else.** That lane
+/// *is* the record: `establish` writes `team:<instance>` and
+/// `establish_global_namespaces` refuses to open a second one whose instance
+/// differs from the first, because "which instance is this store's team corpus
+/// bound to?" has to have one answer (D438, FR-495, FR-496). FR-495 requires a
+/// store to record which server instance its team knowledge came from, and
+/// FR-496 makes that record the thing a merge is refused against.
+///
+/// **`personal:*` and `patterns:*` lanes are deliberately not consulted.** A
+/// store may legitimately hold several of each, from several server instances:
+/// personal knowledge is partitioned by owning account and two identities
+/// coexist, and — the case that mattered here — when a different deployment
+/// answers the configured endpoint, `establish_global_namespaces` opens its
+/// personal and patterns lanes while *refusing* it a team lane. So those lanes
+/// are namespace history and account partitioning; they are not authority.
+///
+/// This function used to scan all three kinds and return the lowest instance by
+/// namespace key. With lanes for two instances present that answer was decided
+/// by UUID spelling: a store bound to S1 reported S2 whenever S2's id happened
+/// to sort first. Every caller wants the bound instance — the binding stamped
+/// on newly spooled rows (FR-791) and the instance the spool report is measured
+/// against (FR-792) — so every caller was reading an arbitrary one.
+///
+/// `None` means no team lane has ever been established: a store that has not
+/// synchronized, or one linked to a server whose team lane it was refused.
+/// That is the state the spool's first-binding rule exists for and is
+/// deliberately not an error.
+///
+/// Two differing team lanes cannot happen through `establish`, so if they are
+/// ever seen the store is corrupt and this **fails closed** rather than
+/// choosing. Choosing is what the previous behaviour did.
+pub async fn bound_server_instance(store: &Store) -> Result<Option<Uuid>> {
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT namespace FROM sync_cursor ORDER BY namespace")
+            .fetch_all(store.pool())
+            .await?;
+    let mut bound: Option<Uuid> = None;
+    for namespace in keys.iter().filter_map(|k| parse(k)) {
+        let SyncNamespace::Team(instance) = namespace else {
+            continue;
+        };
+        match bound {
+            Some(existing) if existing != instance => {
+                return Err(crate::StoreError::Corrupt(format!(
+                    "this store holds team lanes for two server instances \
+                     ({existing} and {instance}); team knowledge is bound to one \
+                     server (FR-495, FR-496) and which one cannot be guessed"
+                )));
+            }
+            _ => bound = Some(instance),
+        }
+    }
+    Ok(bound)
+}
+
 /// Recover a [`SyncNamespace`] from its own [`SyncNamespace::key`].
 ///
 /// `key()` is one-way by intent — it is a cursor key, not a wire format — but
@@ -125,6 +182,13 @@ pub fn parse(key: &str) -> Option<SyncNamespace> {
     }
     if let Some(rest) = key.strip_prefix("team:") {
         return Some(SyncNamespace::Team(Uuid::parse_str(rest).ok()?));
+    }
+    if let Some(rest) = key.strip_prefix("patterns:") {
+        let (instance, user) = rest.split_once(':')?;
+        return Some(SyncNamespace::Patterns(
+            Uuid::parse_str(instance).ok()?,
+            Uuid::parse_str(user).ok()?,
+        ));
     }
     None
 }
@@ -283,6 +347,108 @@ mod tests {
 
     fn team_ns() -> SyncNamespace {
         SyncNamespace::Team(Uuid::now_v7())
+    }
+
+    /// Two instance ids whose text ordering is known, so a test can put the
+    /// wrong answer first on purpose.
+    fn ordered_pair() -> (Uuid, Uuid) {
+        let low = Uuid::parse_str("00000000-0000-4000-8000-000000000001").expect("uuid");
+        let high = Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").expect("uuid");
+        (low, high)
+    }
+
+    /// **A personal or patterns lane cannot decide the binding** (D438, FR-495,
+    /// FR-496).
+    ///
+    /// The store is bound to S1 and also holds S2's personal and patterns
+    /// lanes — the state `establish_global_namespaces` produces when a
+    /// different deployment answers the endpoint and is refused a team lane.
+    /// S2's id sorts first here, which is exactly what the previous
+    /// implementation answered with.
+    ///
+    /// **Falsified by** consulting `Personal`/`Patterns` lanes again: this
+    /// returns S2.
+    #[tokio::test]
+    async fn a_personal_lane_from_another_instance_does_not_decide_the_binding() {
+        let (s2, s1) = ordered_pair();
+        assert!(s2 < s1, "the fixture needs S2 to sort first");
+        let store = Store::open_memory().await.expect("store");
+        let owner = Uuid::now_v7();
+        for ns in [
+            SyncNamespace::Team(s1),
+            SyncNamespace::Personal(s1, owner),
+            SyncNamespace::Patterns(s1, owner),
+            SyncNamespace::Personal(s2, owner),
+            SyncNamespace::Patterns(s2, owner),
+        ] {
+            establish(&store, &ns).await.expect("establish");
+        }
+        assert_eq!(
+            bound_server_instance(&store).await.expect("bound"),
+            Some(s1),
+            "the binding followed a personal/patterns lane instead of the team lane"
+        );
+    }
+
+    /// The same, with the ordering reversed, so correctness cannot come from
+    /// the spelling of a UUID.
+    #[tokio::test]
+    async fn the_binding_is_the_same_whichever_instance_id_sorts_first() {
+        let (s1, s2) = ordered_pair();
+        assert!(s1 < s2, "the fixture needs S1 to sort first");
+        let store = Store::open_memory().await.expect("store");
+        let owner = Uuid::now_v7();
+        for ns in [
+            SyncNamespace::Team(s1),
+            SyncNamespace::Personal(s2, owner),
+            SyncNamespace::Patterns(s2, owner),
+        ] {
+            establish(&store, &ns).await.expect("establish");
+        }
+        assert_eq!(
+            bound_server_instance(&store).await.expect("bound"),
+            Some(s1)
+        );
+    }
+
+    /// Two team lanes is a state `establish_global_namespaces` refuses to
+    /// create, so seeing it means the store is corrupt — and the answer is an
+    /// error, never a choice.
+    ///
+    /// **Falsified by** returning either instance: choosing is what made a
+    /// relink silently merge one server's guidance into a corpus bound to
+    /// another (FR-496).
+    #[tokio::test]
+    async fn two_team_lanes_fail_closed_rather_than_picking_one() {
+        let (a, b) = ordered_pair();
+        let store = Store::open_memory().await.expect("store");
+        establish(&store, &SyncNamespace::Team(a))
+            .await
+            .expect("establish");
+        establish(&store, &SyncNamespace::Team(b))
+            .await
+            .expect("establish");
+        let error = bound_server_instance(&store)
+            .await
+            .expect_err("two team lanes must not resolve to one instance");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("two server instances"),
+            "the refusal does not say what is wrong: {rendered}"
+        );
+    }
+
+    /// A store that has never established a team lane is unbound, and that is
+    /// not an error — it is the state the spool's first-binding rule is for.
+    #[tokio::test]
+    async fn a_store_with_no_team_lane_is_unbound() {
+        let store = Store::open_memory().await.expect("store");
+        let owner = Uuid::now_v7();
+        establish(&store, &SyncNamespace::Personal(Uuid::now_v7(), owner))
+            .await
+            .expect("establish");
+        establish(&store, &project_ns()).await.expect("establish");
+        assert_eq!(bound_server_instance(&store).await.expect("bound"), None);
     }
 
     #[tokio::test]

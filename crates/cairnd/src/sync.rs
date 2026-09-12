@@ -185,7 +185,51 @@ impl NamespaceTarget {
 /// by `drain`/`drain_global` and are not retried, and never count as transient
 /// (§4a) — an ingest content refusal must never throttle the namespace it
 /// arrived in.
+/// How many spooled rows one drain pass claims.
+///
+/// Below the ingest batch bound of 256 rather than equal to it, so a full pass
+/// is comfortably inside the request body limit even with the largest events
+/// the model allows. A pass that had to be refused for size would release every
+/// row it claimed and try the identical batch again next tick, forever.
+const SPOOL_DRAIN_BATCH: i64 = 128;
+
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
+    // **Claims a previous process took to the grave, released before anything
+    // else runs** (T096).
+    //
+    // A row is claimed by setting `state = 'in_flight'` and stamping
+    // `claimed_at`, and a drainer that dies between the claim and the settle
+    // leaves it there. `claim_events` does reclaim an expired lease, so nothing
+    // is lost — but the lease is `CLAIM_LEASE_SECONDS`, and until it expires the
+    // row counts as in flight, which reads as "delivery is progressing" when no
+    // process is delivering anything. A daemon that has just started knows
+    // better than any lease can: it holds no claims, so any claim it finds is
+    // stranded by definition.
+    //
+    // Deliberately once, at start, and not on every tick. On a tick this would
+    // race the drain running beside it and release a claim whose drainer is
+    // mid-send, turning a delivery in progress into a redelivery.
+    for (kind, released) in [
+        (
+            "events",
+            cairn_store::spool::release_event_claims(&daemon.store).await,
+        ),
+        (
+            "commands",
+            cairn_store::spool::release_command_claims(&daemon.store).await,
+        ),
+    ] {
+        match released {
+            Ok(n) if n > 0 => tracing::info!(
+                spool = kind,
+                rows = n,
+                "released claims a previous daemon left in flight"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(spool = kind, error = %e, "could not release stale claims"),
+        }
+    }
+
     let mut clocks: HashMap<String, NamespaceClock> = HashMap::new();
     let mut establish_clock = NamespaceClock::due_now(Instant::now());
     loop {
@@ -282,6 +326,33 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         if establish_clock.pull_due(Instant::now()) {
             establish_clock.mark_pulled(Instant::now());
             let _ = establish_global_namespaces(&daemon).await;
+        }
+
+        // The Feature 005 spools, drained on the same tick as everything else
+        // (T039). Not a second worker and not a second process: both spools are
+        // claimed under the same drain lock the sync lanes use, so a project
+        // drain and a spool drain do not interleave, and the two-process
+        // architecture is unchanged.
+        //
+        // Errors are swallowed here rather than propagated. A drain that could
+        // not reach the server has already released every row it claimed with a
+        // backoff, so there is nothing for this loop to do about it beyond
+        // trying again next tick — and an agent must never be blocked or slowed
+        // by a server that is not there (FR-781).
+        //
+        // Capture-class events this machine dropped before they ever reached
+        // here, counted from the hook's journal (FR-749c, FR-749c1). It touches
+        // neither spool and is ordered ahead of them only for readability.
+        let _ = crate::capture::collect_capture_drops(&daemon).await;
+
+        // Events first: a command may reference knowledge a consolidated event
+        // produced, and delivering commands ahead of the events behind them
+        // would make the server see the reference before the thing referenced.
+        if let Err(e) = drain_event_spool(&daemon, SPOOL_DRAIN_BATCH).await {
+            tracing::debug!(error = %e.message, "event spool drain deferred");
+        }
+        if let Err(e) = drain_command_spool(&daemon, SPOOL_DRAIN_BATCH).await {
+            tracing::debug!(error = %e.message, "command spool drain deferred");
         }
 
         let now = Instant::now();
@@ -438,7 +509,17 @@ async fn process_global_namespace(
         // every tick; it is not the sole occasion on which a read occurs.
         clock.mark_probed(now);
         match drain_global(d, namespace).await {
-            Ok((applied, duplicate, rejected)) => {
+            // `hold` is deliberately not consulted here. A hold is *designed*
+            // behaviour rather than a failed pass — a lane whose queue belongs
+            // to a logged-out author is doing exactly what FR-594 asks — so it
+            // is reported by `sync_now` and changes nothing about what counts as
+            // a successful drain. Stated so the omission reads as a decision.
+            Ok(GlobalDrain {
+                applied,
+                duplicate,
+                rejected,
+                hold: _,
+            }) => {
                 if applied + duplicate > 0 {
                     tracing::info!(
                         namespace = %key, applied, duplicate, rejected,
@@ -500,6 +581,132 @@ fn provisional_instance(url: &str) -> Uuid {
         *slot = u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("00"), 16).unwrap_or(0);
     }
     Uuid::from_bytes(bytes)
+}
+
+/// What a bounded, read-only peer-identity probe found (FR-792a).
+///
+/// Three outcomes rather than an `Option<Uuid>`, because the three decide
+/// different reports and collapsing any two of them is how the defect this
+/// exists to fix was written in the first place. "No peer known" is not one
+/// state: an endpoint that did not answer is `server_unreachable`, and an
+/// endpoint that was never configured is not blocked on the network at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerProbe {
+    /// No endpoint or no credential is configured. Nothing was sent, and there
+    /// is no peer for a queued row to be mismatched against.
+    NotConfigured,
+    /// The endpoint answered and named this instance.
+    Peer(Uuid),
+    /// The endpoint did not answer inside [`PEER_PROBE_DEADLINE`].
+    Unreachable,
+}
+
+/// How long status waits for the endpoint to name itself (FR-792a).
+///
+/// **Stated, and much shorter than the drain's twenty seconds.** A drain is
+/// background work and can afford to wait out a slow server; a status read is
+/// somebody waiting at a terminal. The CLI allows a status exchange thirty
+/// seconds, so this cannot be what makes one time out.
+///
+/// **Five seconds, and the first guess of two was measured wrong.** Exceeding
+/// this deadline is reported as an unreachable endpoint, so the deadline decides
+/// how readily status calls a *healthy* server unreachable — and that is a false
+/// report, which is worse than a slow one. At two seconds, a 200-repetition
+/// stress of the cross-daemon lifecycle scenario on a host at load ~25 reported
+/// `server_unreachable` against a server that was up and answering in 9 runs of
+/// 132: the endpoint was fine and the probe simply lost its race for CPU. CI
+/// runners are small and run the whole suite in parallel, so they sit in exactly
+/// that regime.
+///
+/// Loopback to a live server is a sub-millisecond round trip; five seconds is
+/// therefore three orders of magnitude of headroom for scheduling noise, while
+/// still bounding the read for a person who is waiting. It is not a fix for a
+/// server that is genuinely gone — that connection is refused immediately and
+/// never approaches the deadline.
+pub(crate) const PEER_PROBE_DEADLINE: Duration = Duration::from_millis(5_000);
+
+/// Ask the configured endpoint who it is, changing nothing (FR-792a, FR-792b).
+///
+/// **Why status takes its own sample.** FR-792 asks for the reason delivery is
+/// not progressing, which is a claim about now, and the two things that decide
+/// it — whether the endpoint answers, and which deployment answers — were both
+/// read from this process's memory of an earlier delivery attempt. That memory
+/// does not survive the daemon being replaced, and the daemon is replaced
+/// routinely: `supervise` exits a daemon within one tick of another owning its
+/// socket. So the daemon that watched a replacement server appear was reliably
+/// gone by the time an operator asked what was wrong, and the survivor, having
+/// observed nothing, fell back to the store's own binding and reported that
+/// nothing was wrong — with the whole backlog queued for a deployment that no
+/// longer exists.
+///
+/// **What makes it read-only.** Everything durable is untouched by
+/// construction, not by care: this function reads the credential snapshot, does
+/// one `GET`, and returns. It never calls `establish_global_namespaces`, so no
+/// lane is opened and the `team:*` lane that *is* the binding cannot move
+/// (FR-495/FR-496, D438). It touches no cursor, no spool row, no claim, no
+/// attempt counter and no event state, because it calls nothing that can. It
+/// does not go through [`AuthenticatedContext::acquire`], which would be the
+/// tempting reuse: that path demands a proven account, waits twenty seconds and
+/// exists to be the front door for work, and a status read is none of those.
+///
+/// The instance is parsed exactly as `acquire` parses it, provisional
+/// substitution included, so a probe and a drain can never disagree about who
+/// is answering.
+pub(crate) async fn probe_peer_instance(d: &Daemon) -> PeerProbe {
+    // One read, so the endpoint and the token describe one credential by
+    // construction rather than by two reads happening to agree.
+    let (url, token) = {
+        let creds = d.server.read().await;
+        (creds.url.clone(), creds.token.clone())
+    };
+    // Not "unreachable": there is nothing to reach. An unconfigured store is
+    // not blocked on the network, and saying it was would send someone to
+    // check a server they never named.
+    let (Some(base), Some(token)) = (url, token) else {
+        return PeerProbe::NotConfigured;
+    };
+    let base = base.trim_end_matches('/').to_string();
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(PEER_PROBE_DEADLINE)
+        .build()
+    else {
+        return PeerProbe::Unreachable;
+    };
+    let response = http
+        .get(format!("{base}/api/version"))
+        .bearer_auth(&token)
+        .send()
+        .await;
+    // Any answer at all is the endpoint being there. A refusal still identifies
+    // a reachable deployment, and an unparseable body from a reachable server is
+    // the provisional-instance case rather than an outage — the same
+    // substitution `acquire` makes, so the two agree.
+    let peer = match response {
+        Ok(r) => {
+            let body: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
+            body.get("server_instance_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(|| provisional_instance(&base))
+        }
+        Err(_) => return PeerProbe::Unreachable,
+    };
+    // Telemetry only (FR-792c). Recorded because it is genuinely useful when
+    // reconstructing what a daemon saw, and it decides nothing: the report is
+    // built from the sample just taken, not from this.
+    {
+        let mut observed = d.last_observed_instance.write().await;
+        let previous = *observed;
+        *observed = Some(peer);
+        if previous != Some(peer) {
+            tracing::info!(
+                target: "cairn::observation",
+                previous = ?previous, observed = %peer, endpoint = %base,
+                "a status probe found a different server instance"
+            );
+        }
+    }
+    PeerProbe::Peer(peer)
 }
 
 /// Read this token's account id from `GET /api/auth/me` and record it.
@@ -631,10 +838,40 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     // in flight across the re-key is still recognised as the same entry and
     // applies exactly once (FR-562).
     if reported.is_some() {
+        // The spools move with the lane, and only here.
+        //
+        // A row is bound to the instance it was queued for and is never
+        // rebound — that binding is what stops a replacement deployment
+        // inheriting its predecessor's backlog (FR-791). This is the one
+        // exception, and it is not an exception to the rule so much as the
+        // same server finally able to say its own name: a peer below schema
+        // 3 reports no instance, so its lane is keyed by an id derived from
+        // the endpoint, and an in-place upgrade makes it start reporting a
+        // real one (`sync-namespaces.md` §11a).
+        //
+        // Keyed on the *provisional* id, never on the URL. A different
+        // deployment at the same address reports its own id and carries no
+        // row bearing this provisional one, so it cannot be reached by this
+        // statement.
+        match cairn_store::spool::rebind_provisional_instance(&d.store, provisional, instance).await
+        {
+            Ok(n) if n > 0 => tracing::info!(
+                rows = n,
+                from = %provisional, to = %instance,
+                "re-keyed spooled work from the provisional instance id to the reported one"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "could not re-key spooled work"),
+        }
+
         for (from, to) in [
             (
                 SyncNamespace::Personal(provisional, owner),
                 SyncNamespace::Personal(instance, owner),
+            ),
+            (
+                SyncNamespace::Patterns(provisional, owner),
+                SyncNamespace::Patterns(instance, owner),
             ),
             (
                 SyncNamespace::Team(provisional),
@@ -667,6 +904,11 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 
     let personal = SyncNamespace::Personal(instance, owner);
     let team = SyncNamespace::Team(instance);
+    // Opened with the personal lane and on the same terms. A pattern is a
+    // personal-domain record (FR-708c), so the account that may read the one may
+    // read the other, and a store holding two identities' personal knowledge side
+    // by side holds two identities' patterns the same way.
+    let patterns = SyncNamespace::Patterns(instance, owner);
 
     // **A store may hold several `personal:*` lanes and exactly one `team:*`
     // lane** (D438, FR-495, FR-496).
@@ -706,9 +948,9 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     };
 
     let lanes: Vec<&SyncNamespace> = if team_is_ours {
-        vec![&personal, &team]
+        vec![&personal, &patterns, &team]
     } else {
-        vec![&personal]
+        vec![&personal, &patterns]
     };
     for namespace in lanes {
         if let Err(e) = cursor::establish(&d.store, namespace).await {
@@ -862,7 +1104,15 @@ struct AuthenticatedContext {
     /// wrong in a way that mattered: `project.linked` says this machine once
     /// linked a project, which is a fact about this machine's past and not about
     /// whether the account now holding the token may act in that project.
-    memberships: tokio::sync::OnceCell<Vec<Uuid>>,
+    ///
+    /// `None` inside the cell is **"the question could not be answered"**, which
+    /// is not the same claim as "this account belongs to nothing". Both hold the
+    /// batch and both are right to, but only one of them is a fact about the
+    /// account — and a drain that reported the second when it meant the first
+    /// wrote `no authorization project for this account` into `last_error` about
+    /// an account that belongs to several. Kept apart so the hold can say which
+    /// it was; what the drain *does* is unchanged.
+    memberships: tokio::sync::OnceCell<Option<Vec<Uuid>>>,
 }
 
 impl AuthenticatedContext {
@@ -921,6 +1171,22 @@ impl AuthenticatedContext {
             .and_then(|v| v.as_str())
             .and_then(|s| Uuid::parse_str(s).ok())
             .unwrap_or_else(|| provisional_instance(&base));
+        // Remembered for FR-792's sake and for nothing else: the spool report
+        // needs the instance *answering*, and this is the only place the daemon
+        // learns it. Recording it adopts nothing — the binding is the `team:*`
+        // lane and a mismatching peer is still refused (FR-791).
+        {
+            let mut observed = d.last_observed_instance.write().await;
+            let previous = *observed;
+            *observed = Some(peer_instance);
+            if previous != Some(peer_instance) {
+                tracing::info!(
+                    target: "cairn::observation",
+                    previous = ?previous, observed = %peer_instance, endpoint = %base,
+                    "the endpoint reported a different server instance"
+                );
+            }
+        }
 
         Ok(AuthenticatedContext {
             generation,
@@ -948,31 +1214,32 @@ impl AuthenticatedContext {
     ///
     /// Fetched once per context and cached, so an operation that asks twice gets
     /// one answer rather than two that might differ.
-    async fn memberships(&self) -> &[Uuid] {
+    async fn memberships(&self) -> Option<&Vec<Uuid>> {
         self.memberships
             .get_or_init(|| async {
-                let Ok(body) = self.client.get("/api/projects").await else {
-                    return Vec::new();
-                };
-                body.get("projects")
-                    .and_then(|v| v.as_array())
-                    .map(|rows| {
-                        let mut ids: Vec<Uuid> = rows
-                            .iter()
-                            .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
-                            .filter_map(|s| Uuid::parse_str(s).ok())
-                            .collect();
-                        ids.sort();
-                        ids
-                    })
-                    .unwrap_or_default()
+                let body = self.client.get("/api/projects").await.ok()?;
+                let rows = body.get("projects").and_then(|v| v.as_array())?;
+                let mut ids: Vec<Uuid> = rows
+                    .iter()
+                    .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+                    .filter_map(|s| Uuid::parse_str(s).ok())
+                    .collect();
+                ids.sort();
+                Some(ids)
             })
             .await
+            .as_ref()
     }
 
     /// Whether this account is a member of `server_project_id`, per the server.
+    ///
+    /// An unanswerable question is not a membership. Fail-closed here is the
+    /// same answer the previous empty-vector fallback gave, and it is now the
+    /// answer on purpose rather than by coincidence.
     async fn is_member_of(&self, server_project_id: Uuid) -> bool {
-        self.memberships().await.contains(&server_project_id)
+        self.memberships()
+            .await
+            .is_some_and(|mine| mine.contains(&server_project_id))
     }
 
     /// Whether this operation may act on `namespace` at all — for pushing and for
@@ -986,7 +1253,7 @@ impl AuthenticatedContext {
     /// answered by the claim (FR-594), not about the lane.
     fn admits(&self, namespace: &SyncNamespace) -> bool {
         match namespace {
-            SyncNamespace::Personal(instance, owner) => {
+            SyncNamespace::Personal(instance, owner) | SyncNamespace::Patterns(instance, owner) => {
                 *owner == self.account && self.is_this_peer(*instance)
             }
             SyncNamespace::Team(instance) => self.is_this_peer(*instance),
@@ -1064,28 +1331,81 @@ async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
         return false;
     };
     match namespace {
-        SyncNamespace::Personal(_, owner) => *owner == account,
+        // Both owner-partitioned lanes answer the same question, because a
+        // server-held pattern is a personal-domain record owned by one account
+        // (FR-708d): a lane naming somebody else's account is never ours to
+        // pull, whatever it carries.
+        SyncNamespace::Personal(_, owner) | SyncNamespace::Patterns(_, owner) => *owner == account,
         SyncNamespace::Team(_) | SyncNamespace::Project(_) => true,
     }
 }
 
 /// Every global lane this store may synchronize as the account it currently
-/// holds, established first so a freshly authenticated store has lanes to return.
+/// holds, established first so a freshly authenticated store has lanes to
+/// return — **and the ones it may not**.
 ///
 /// Both entry points — `cairn sync now` and the background worker — route through
-/// this, so neither can acquire a lane the other would refuse.
-async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
+/// [`may_sync_lane`], so neither can acquire a lane the other would refuse.
+///
+/// The second half is the part that used to be dropped on the floor. A lane
+/// refused by [`may_sync_lane`] and a lane that does not exist are the same
+/// absence from a list of lanes to act on, and they are not the same fact: one
+/// is a store holding another identity's knowledge exactly as §10 intends, and
+/// the other is a store that never established a lane at all. The caller reports
+/// them, so "sync now did nothing" can say which.
+async fn global_lane_targets(d: &Daemon) -> (Vec<SyncNamespace>, Vec<String>) {
     let _ = establish_global_namespaces(d).await;
-    let mut out = Vec::new();
+    let (mut syncable, mut withheld) = (Vec::new(), Vec::new());
     for namespace in cursor::established(&d.store).await.unwrap_or_default() {
         if matches!(namespace, SyncNamespace::Project(_)) {
             continue;
         }
         if may_sync_lane(d, &namespace).await {
-            out.push(namespace);
+            syncable.push(namespace);
+        } else {
+            withheld.push(namespace.key());
         }
     }
-    out
+    (syncable, withheld)
+}
+
+/// What one pulled row's merge attempt means for the pull cursor.
+///
+/// `bool` was not enough, and the difference between its two false cases is a
+/// difference between a delay and an outage. A merge that failed *this time*
+/// must hold the cursor, or the row is never requested again and is lost on
+/// this device permanently. A row that can never be decoded at all must not
+/// hold it, or one such row stops the lane for every row behind it, forever —
+/// which is not a hypothetical: a `team_knowledge` row whose `writer_id` is not
+/// a UUID cannot be turned into a `SyncedTeamKnowledge` by any amount of
+/// retrying, and while the cursor waited for it the same page was re-applied on
+/// every pull cycle. That is how a stale page got a second, third and
+/// thousandth chance to overwrite a locally-recorded retirement.
+pub(crate) enum Merged {
+    /// The row landed in the store.
+    Landed,
+    /// The row cannot be decoded, and no later attempt would decode it
+    /// differently. Reported at `warn` where it is dropped, because a silently
+    /// discarded record is the one outcome nobody can investigate.
+    Undecodable,
+    /// The row did not land this time — a transient store failure, or a refusal
+    /// that a change of circumstances would lift. The cursor waits for it.
+    Deferred,
+}
+
+/// Report one permanently undecodable pulled row and drop it.
+///
+/// The id is logged as the raw wire value rather than a parsed one, because the
+/// id is sometimes the field that failed to parse and "which row" is the whole
+/// value of the line.
+fn undecodable(lane: &str, row: &serde_json::Value, field: &str) -> Merged {
+    tracing::warn!(
+        lane,
+        id = %row.get("id").map(ToString::to_string).unwrap_or_else(|| "absent".to_string()),
+        field,
+        "dropping a pulled row that cannot be decoded; the cursor moves past it"
+    );
+    Merged::Undecodable
 }
 
 async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
@@ -1107,6 +1427,7 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     let (path, array) = match namespace {
         SyncNamespace::Personal(..) => ("/api/sync/changes/personal", "personal"),
         SyncNamespace::Team(_) => ("/api/sync/changes/team", "team"),
+        SyncNamespace::Patterns(..) => ("/api/sync/changes/patterns", "patterns"),
         // `project:*` has its own puller with its own entity types.
         SyncNamespace::Project(_) => return Ok(0),
     };
@@ -1123,17 +1444,25 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         .unwrap_or_default();
 
     let mut landed = 0usize;
+    let mut dropped = 0usize;
     let mut all_merged = true;
     for row in &rows {
         let merged = match namespace {
             SyncNamespace::Personal(_, owner) => merge_pulled_personal(d, *owner, row).await,
             SyncNamespace::Team(instance) => merge_pulled_team(d, *instance, row).await,
-            SyncNamespace::Project(_) => false,
+            SyncNamespace::Patterns(_, owner) => merge_pulled_pattern(d, *owner, row).await,
+            // Unreachable: this function returns above for a project lane,
+            // which has its own puller and its own entity types. Deferred
+            // rather than dropped, so if it ever became reachable the failure
+            // would be a stalled lane and not a discarded record.
+            SyncNamespace::Project(_) => Merged::Deferred,
         };
-        if merged {
-            landed += 1;
-        } else {
-            all_merged = false;
+        match merged {
+            Merged::Landed => landed += 1,
+            // Counted, not held against the cursor. Already reported at `warn`
+            // by whoever decided it, with the row id.
+            Merged::Undecodable => dropped += 1,
+            Merged::Deferred => all_merged = false,
         }
     }
 
@@ -1151,11 +1480,23 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     // never rewritten, so a row that already landed is a no-op the second time.
     // Re-reading a page is the right price for never dropping one.
     //
-    // A row that can *never* merge — one whose server instance does not match
-    // this store's team binding (FR-496) — would otherwise wedge the lane here.
-    // It cannot: `pull_global` refuses to pull a lane whose peer reports a
-    // different instance before reading a single row, so a mismatched row cannot
-    // reach this loop.
+    // **"Cheap and safe" was only ever true of a page that eventually lands.**
+    // A row that can never be decoded holds the cursor forever, and the same
+    // page is then re-applied on every pull cycle for the life of the store:
+    // the re-reading stops being a price and becomes a repeated write. That is
+    // measurable damage rather than a wasted request — a stale page re-applied
+    // once a cycle will eventually land on the far side of a local transition
+    // and erase who performed it (FR-457). So [`Merged::Undecodable`] does not
+    // hold the cursor; it is logged with the row id and stepped over, and only
+    // a transient failure waits.
+    //
+    // One class of never-mergeable row was already argued away here and the
+    // argument was too narrow. A row whose server instance does not match this
+    // store's team binding (FR-496) indeed cannot reach this loop, because
+    // `pull_global` refuses such a lane before reading a single row. That says
+    // nothing about a row whose *own fields* do not parse — a `writer_id` that
+    // is not a UUID, an unparseable `created_at`, a `state` outside the
+    // vocabulary — and one of those is exactly what wedged a real lane.
     // **A cursor is a position in one caller's feed, and the `team:*` feed is
     // caller-dependent** (FR-592, `contracts/sync-namespaces.md` §1a).
     //
@@ -1225,8 +1566,9 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         tracing::warn!(
             namespace = %namespace.key(),
             landed,
+            dropped,
             of = rows.len(),
-            "holding the pull cursor: not every row in the page merged"
+            "holding the pull cursor: a row in the page may still merge later"
         );
     }
     Ok(landed)
@@ -1288,15 +1630,15 @@ fn pulled_time(row: &serde_json::Value, field: &str) -> Option<chrono::DateTime<
 /// rows to whoever happened to be current when the page landed, which is the
 /// same partition-crossing this lane key exists to prevent (FR-567, FR-568).
 /// A lane that names an account is the authority on whose rows it carries.
-async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> bool {
+async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> Merged {
     let Some(id) = pulled_uuid(row, "id") else {
-        return false;
+        return undecodable("personal", row, "id");
     };
     let Some(writer_id) = pulled_uuid(row, "writer_id") else {
-        return false;
+        return undecodable("personal", row, "writer_id");
     };
     let Some(created_at) = pulled_time(row, "created_at") else {
-        return false;
+        return undecodable("personal", row, "created_at");
     };
     let knowledge_type: MemoryType = row
         .get("knowledge_type")
@@ -1330,10 +1672,74 @@ async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value)
     };
 
     match cairn_store::global::merge_synced_personal(&d.store, incoming).await {
-        Ok(_) => true,
+        Ok(_) => Merged::Landed,
         Err(e) => {
             tracing::debug!(personal = %id, error = %e, "a pulled personal row did not merge");
-            false
+            Merged::Deferred
+        }
+    }
+}
+
+/// One pulled pattern row into this store's cache.
+///
+/// **The owner comes from the lane, never from the row** — the same rule
+/// `merge_pulled_personal` states just above, and it binds harder here. A
+/// server-held pattern is visible only to its owner (FR-708d), so a row that
+/// could name its own owner would be a row that could name somebody else's, and
+/// the cache would hold a pattern this account is not entitled to read. The lane
+/// key already carries the account whose feed this is; that is the authority.
+///
+/// The cached row is not authority either way. Losing it loses nothing the
+/// server accepted (FR-703), and the merge that writes it lets the server
+/// correct what is already there (FR-712a).
+async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> Merged {
+    let Some(pattern_id) = pulled_uuid(row, "pattern_id") else {
+        return undecodable("patterns", row, "pattern_id");
+    };
+    let Some(created_at) = pulled_time(row, "created_at") else {
+        return undecodable("patterns", row, "created_at");
+    };
+    let Some(updated_at) = pulled_time(row, "updated_at") else {
+        return undecodable("patterns", row, "updated_at");
+    };
+    let text = |field: &str| {
+        row.get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let strings = |field: &str| {
+        row.get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let incoming = cairn_store::global::SyncedPattern {
+        pattern_id,
+        owner_user_id: owner,
+        title: text("title"),
+        problem: text("problem"),
+        root_cause: text("root_cause"),
+        approach: text("approach"),
+        constraints: strings("constraints"),
+        applicability: strings("applicability"),
+        content_key: text("content_key"),
+        created_at,
+        updated_at,
+        forgotten_at: pulled_time(row, "forgotten_at"),
+    };
+
+    match cairn_store::global::merge_synced_pattern(&d.store, incoming).await {
+        Ok(()) => Merged::Landed,
+        Err(e) => {
+            tracing::debug!(pattern = %pattern_id, error = %e, "a pulled pattern row did not merge");
+            Merged::Deferred
         }
     }
 }
@@ -1346,18 +1752,26 @@ async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value)
 /// deployment, and blending two servers' ratification histories is exactly what
 /// must not happen silently (`sync-namespaces.md` §10). It is logged and the row
 /// is skipped, so the lane keeps working for everything else.
-async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) -> bool {
+pub(crate) async fn merge_pulled_team(
+    d: &Daemon,
+    instance: Uuid,
+    row: &serde_json::Value,
+) -> Merged {
     let Some(id) = pulled_uuid(row, "id") else {
-        return false;
+        return undecodable("team", row, "id");
     };
+    // The row that wedged a real lane. `writer_id` is a `TEXT` column on the
+    // server and a `Uuid` on the mirror, so a value some other client invented
+    // is unrepresentable here — and no retry changes that. It is dropped with
+    // its id said out loud, and the lane keeps moving.
     let Some(writer_id) = pulled_uuid(row, "writer_id") else {
-        return false;
+        return undecodable("team", row, "writer_id");
     };
     let Some(created_at) = pulled_time(row, "created_at") else {
-        return false;
+        return undecodable("team", row, "created_at");
     };
     let Some(proposed_by_user_id) = pulled_uuid(row, "proposed_by_user_id") else {
-        return false;
+        return undecodable("team", row, "proposed_by_user_id");
     };
     let Ok(state) = row
         .get("state")
@@ -1365,7 +1779,7 @@ async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) 
         .unwrap_or("proposed")
         .parse::<TeamState>()
     else {
-        return false;
+        return undecodable("team", row, "state");
     };
     let knowledge_type: MemoryType = row
         .get("knowledge_type")
@@ -1400,49 +1814,67 @@ async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) 
         superseded_by_id: pulled_uuid(row, "superseded_by_id"),
         retired_by_user_id: pulled_uuid(row, "retired_by_user_id"),
         retired_at: pulled_time(row, "retired_at"),
+        // **The version the server ordered this page by** (FR-457). Absent
+        // when the peer predates the field, which the merge treats as "this
+        // page cannot be ordered, so it applies" — see `merge_synced_team`.
+        // Not defaulted to `created_at` or to now: a fabricated version is
+        // worse than none, because none is honest about what is not known.
+        server_changed_at: pulled_time(row, "changed_at"),
+        // **The monotonic version, which is what actually orders two pages**
+        // (FR-456, FR-457, FR-465). `changed_at` above is the server's
+        // `GREATEST` over lifecycle columns stamped with transaction-start
+        // `now()`, so a retirement can leave it byte-for-byte where the
+        // preceding ratification left it — two states, one value. `revision`
+        // comes from a sequence and every server-side write advances it.
+        //
+        // Absent when the peer is below server migration 5, which the merge
+        // treats as "order this page by `changed_at` as before" — not as
+        // revision zero. Read with `as_i64` so a JSON `null` and a missing key
+        // are the same answer.
+        server_revision: row.get("revision").and_then(|v| v.as_i64()),
     };
 
     match cairn_store::global::merge_synced_team(&d.store, instance, incoming).await {
-        Ok(_) => true,
+        Ok(_) => Merged::Landed,
         Err(e) => {
             tracing::debug!(team = %id, error = %e, "a pulled team row did not merge");
-            false
+            Merged::Deferred
         }
     }
 }
 
-/// Recover a `personal:*`/`team:*` namespace from the plain string
+/// Recover a non-project namespace from the plain string
 /// `outbox::known_namespaces` returns.
 ///
-/// `SyncNamespace` has no public parser (`key()` is one-way, by design — it is
-/// a cursor key, not a wire format), so this reads the same three shapes
-/// `key()` produces rather than adding one to `cairn_core` (out of this task's
-/// file ownership). `project:*` rows are excluded: `run_worker` already builds
-/// project targets from `repo::list_projects`, which is the authoritative
-/// source for a project's *current* `server_project_id` — parsing it back out
-/// of a namespace string here would risk drifting from that if a project were
-/// ever re-linked to a different server project.
+/// **The parsing itself is `cairn_store::cursor::parse`'s**, and this is a
+/// filter over it rather than a second reader of the same keys. It was written
+/// as its own parser when `SyncNamespace` had no public one; `cursor::parse`
+/// exists now because `sync_cursor` stores only the key and reading the table
+/// back requires exactly one parser. Keeping both meant a lane added to one was
+/// silently invisible to the other — which is what happened when the fourth
+/// lane arrived: the outbox walk simply stopped seeing it, with nothing to
+/// report.
+///
+/// `project:*` rows are excluded here, and that is this function's whole
+/// remaining job. `run_worker` already builds project targets from
+/// `repo::list_projects`, the authoritative source for a project's *current*
+/// `server_project_id`; parsing one back out of a namespace string would risk
+/// drifting from that if a project were ever re-linked to a different server
+/// project.
 fn parse_global_namespace(key: &str) -> Option<SyncNamespace> {
-    if let Some(rest) = key.strip_prefix("personal:") {
-        let (instance, user) = rest.split_once(':')?;
-        return Some(SyncNamespace::Personal(
-            Uuid::parse_str(instance).ok()?,
-            Uuid::parse_str(user).ok()?,
-        ));
+    match cairn_store::cursor::parse(key) {
+        Some(SyncNamespace::Project(_)) | None => None,
+        other => other,
     }
-    if let Some(rest) = key.strip_prefix("team:") {
-        return Some(SyncNamespace::Team(Uuid::parse_str(rest).ok()?));
-    }
-    None
 }
 
-struct Client {
+pub(crate) struct Client {
     base: String,
     token: String,
     http: reqwest::Client,
 }
 
-async fn client(d: &Daemon) -> Result<Client, WireError> {
+pub(crate) async fn client(d: &Daemon) -> Result<Client, WireError> {
     let creds = d.server.read().await.clone();
     let base = creds.url.ok_or_else(|| {
         WireError::new(
@@ -1468,7 +1900,7 @@ async fn client(d: &Daemon) -> Result<Client, WireError> {
 }
 
 impl Client {
-    async fn post(
+    pub(crate) async fn post(
         &self,
         path: &str,
         body: &serde_json::Value,
@@ -1484,7 +1916,55 @@ impl Client {
         decode(response).await
     }
 
-    async fn get(&self, path: &str) -> Result<serde_json::Value, WireError> {
+    /// POST, distinguishing a **server answer** from a **transport failure**.
+    ///
+    /// `post` collapses the two: a refusal and an unreachable server both come
+    /// back as `Err(WireError)`, and the drain that used them could not tell a
+    /// `409 unsupported_kind` from a dropped connection. It spent an attempt on
+    /// a row an upgrade would have delivered, and retried a permanent refusal
+    /// forever. The difference is not cosmetic, so it is in the type.
+    ///
+    /// Any HTTP response at all — success or refusal — is a server answer. Only
+    /// a failure to get one is transport.
+    async fn post_for_outcome(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<ServerAnswer, WireError> {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(unreachable_err)?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+        if status.is_success() {
+            return Ok(ServerAnswer::Ok);
+        }
+        // The structured code, kept: it is what tells a deferral from a
+        // permanent refusal, and losing it is what made every refusal look
+        // alike. A response with no code still yields one, because a status
+        // with no body is still the server having answered.
+        let code = body
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| match status.as_u16() {
+                401 => "unauthorized".to_string(),
+                403 => "forbidden".to_string(),
+                // A 5xx is the server failing rather than refusing, so it is
+                // transient by code as well as by status.
+                s if (500..600).contains(&s) => "server_error".to_string(),
+                s => format!("http_{s}"),
+            });
+        Ok(ServerAnswer::Refused { code })
+    }
+
+    pub(crate) async fn get(&self, path: &str) -> Result<serde_json::Value, WireError> {
         let response = self
             .http
             .get(format!("{}{path}", self.base))
@@ -1983,6 +2463,146 @@ async fn stale_if_changed(
 /// `POST /api/team/{id}/retire` (T121, T133). Same admin gate and
 /// compare-and-swap shape as [`team_ratify_remote`].
 /// As [`team_ratify_remote`], for retirement, and for the same reason (FR-606).
+/// Take the server's answer for a team entry the local CAS could not apply.
+///
+/// **The gap this closes.** `ratify` and `retire` write locally with a
+/// compare-and-swap on the state they expect, and when that swap loses they
+/// return the server's answer and leave the local row exactly as it was. The
+/// caller is told the transition happened — it did, on the server — while this
+/// device goes on showing `proposed` for guidance the whole deployment is now
+/// following, and `retired_by_user_id` stays empty on the very machine that
+/// retired it.
+///
+/// The swap loses for ordinary reasons: the ratification that made the row
+/// authoritative had not landed locally yet, or a pull re-merged it in between.
+/// Neither is an error, and neither is a reason to keep a stale copy — under
+/// FR-712a the local row is a cache and the server's answer is the correct
+/// content for it. This is that rule applied to the one path that predates it.
+///
+/// **Failure refuses, and no longer reports success.** What stood here said the
+/// failure was logged and swallowed, because "the transition already happened on
+/// the server, so refusing the caller now would report a failure that did not
+/// occur; the next pull repairs the row." Both halves of that were wrong in the
+/// same direction. The command's whole job on this path is to record the
+/// transition locally, so a caller told `ok` when nothing was written is told
+/// the opposite of what happened — and the local half of FR-457 ("who acted,
+/// inspectable after the transition") is exactly what did not get recorded. The
+/// next pull *may* repair the row; it may also be the pull that overwrote it,
+/// and it is not something the caller can see either way.
+///
+/// So this reports what [`stale_if_changed`] reports for the same shape of
+/// half-completed write: the server's effect stands, this device recorded
+/// nothing, and `cairn sync now` is the way to reconcile. A refusal naming the
+/// server-side success is strictly more information than a success naming
+/// nothing.
+pub(crate) async fn adopt_team_answer(
+    d: &Daemon,
+    reply: &serde_json::Value,
+) -> Result<(), WireError> {
+    let row = reply.get("entry").unwrap_or(reply);
+    // **Not `merge_pulled_team`**, which was the first attempt and could never
+    // have worked. That function builds a whole `SyncedTeamKnowledge` and needs
+    // `writer_id`, `created_at` and the content; a transition reply carries the
+    // id, the new state, who acted and when, and nothing else. So the merge
+    // failed on every call, logged a line nobody read, and left exactly the
+    // stale row this function exists to repair.
+    //
+    // A reply this device cannot read is a reply this device cannot apply, which
+    // is the same outcome as a failed write and is reported as one. Returning
+    // silently here was the other half of the same hole.
+    let Some(state) = row
+        .get("state")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<cairn_core::domain::TeamState>().ok())
+    else {
+        return Err(not_recorded_locally(
+            "the server's answer could not be read",
+        ));
+    };
+    let actor = ["retired_by_user_id", "ratified_by_user_id"]
+        .iter()
+        .find_map(|k| row.get(k).and_then(|v| v.as_str()))
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let at = ["retired_at", "ratified_at"]
+        .iter()
+        .find_map(|k| row.get(k).and_then(|v| v.as_str()));
+    // The monotonic version this transition was assigned, straight from the
+    // reply that made it — see [`team_transition_version`], which extracts the
+    // same two facts for the swap path. Absent from a server below server
+    // migration 5, which leaves the adoption ordered by `at` as before.
+    let revision = row.get("revision").and_then(|v| v.as_i64());
+    if let Err(e) =
+        cairn_store::global::adopt_team_transition(&d.store, id_of(row), state, actor, at, revision)
+            .await
+    {
+        tracing::warn!(error = %e, "the server's team answer did not apply locally");
+        return Err(not_recorded_locally(&e.to_string()));
+    }
+    Ok(())
+}
+
+/// The refusal for a transition the server made and this device did not record.
+///
+/// Worded as [`stale_if_changed`]'s is, because it is the same situation
+/// reached by a different route: the server-side effect stands and was
+/// authorized, the local record does not exist, and the caller needs to know
+/// which of the two it is holding.
+fn not_recorded_locally(why: &str) -> WireError {
+    WireError::new(
+        codes::STORAGE_UNAVAILABLE,
+        format!(
+            "the transition was applied on the server but not recorded locally ({why}) — run `cairn sync now`"
+        ),
+    )
+}
+
+/// The server version a transition reply carries, if any.
+///
+/// **Extraction only — the write belongs in the transition's own transaction.**
+/// The row's version and the transition itself have to be recorded together:
+/// written as two transactions, there is a window in which the row already
+/// holds the new actor while `server_changed_at` still names the previous
+/// page's version, and a page fetched before the transition is admitted through
+/// [`cairn_store::global::merge_synced_team`]'s guard and erases the actor —
+/// the same defect, through a much narrower door. So this hands the value to
+/// `retire_team_at_version` / `ratify_team_at_version` and writes nothing
+/// itself.
+///
+/// **Both halves, and the revision is the one that decides.** `revision` is
+/// `team_knowledge.revision` as the server assigned it to this very write — a
+/// sequence value taken at statement time, monotonic in the order the writes
+/// happened. `changed_at` is reconstructed from the transition's own timestamp,
+/// which is also the server's older ordering key for the row after it
+/// (`GREATEST(created_at, ratified_at, retired_at, superseded_at)`), so a reply
+/// saying "retired at T" is a reply saying "this row's `changed_at` is now T".
+///
+/// The timestamp is kept because a server below server migration 5 sends no
+/// revision and must still work; it cannot replace one, because those columns
+/// are stamped with transaction-start `now()` and a retirement can therefore
+/// leave that `GREATEST` exactly where the preceding ratification left it.
+///
+/// A half the reply did not carry, or that this store cannot read, is `None`
+/// and leaves that mark alone rather than guessing.
+pub(crate) fn team_transition_version(
+    reply: &serde_json::Value,
+) -> cairn_store::global::ServerVersion {
+    let row = reply.get("entry").unwrap_or(reply);
+    cairn_store::global::ServerVersion {
+        changed_at: ["retired_at", "ratified_at"]
+            .iter()
+            .find_map(|k| pulled_time(row, k)),
+        revision: row.get("revision").and_then(|v| v.as_i64()),
+    }
+}
+
+/// The id a transition reply names.
+fn id_of(row: &serde_json::Value) -> Uuid {
+    row.get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(Uuid::nil)
+}
+
 pub async fn team_retire_remote(
     d: &Daemon,
     id: Uuid,
@@ -2470,11 +3090,43 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         .server_project_id
         .ok_or_else(|| WireError::new(codes::NOT_LINKED, "linked project has no server id"))?;
 
+    // **A credential that no longer belongs to this project is a state, not a
+    // failed command** (FR-595).
+    //
+    // The project lane is one of three this command drains, and it is the only
+    // one whose failure used to end the whole call: the global loop below
+    // deliberately ignores a lane's error, while this `?` returned before the
+    // loop was reached. A store linked as A and then authenticated as B is
+    // exactly that case — B is not a member of A's project, the batch route
+    // refuses it, and B's own personal and team knowledge then never moved
+    // either, because the command stopped one line above where they are sent.
+    //
+    // Only a refusal. Any other error still ends the call, because a store that
+    // cannot reach its own server has nothing useful to say about the rest.
+    let mut project_refused = false;
     let (mut applied, mut duplicate, mut rejected) =
-        drain(d, r.project.id, server_project_id).await?;
-    let mut pulled = pull(d, r.project.id, server_project_id).await.unwrap_or(0);
+        match drain(d, r.project.id, server_project_id).await {
+            Ok(counts) => counts,
+            Err(e) if e.code == codes::FORBIDDEN => {
+                tracing::info!(
+                    project = %r.project.id,
+                    "this account may not push this project's work; \
+                     draining the account's own lanes instead (FR-595)"
+                );
+                project_refused = true;
+                (0, 0, 0)
+            }
+            Err(e) => return Err(e),
+        };
+    let mut pulled = if project_refused {
+        0
+    } else {
+        pull(d, r.project.id, server_project_id).await.unwrap_or(0)
+    };
 
-    if rejected == 0 {
+    // Not a success for a lane that was refused: recording one would mark this
+    // project synchronized as of now, and nothing of it was sent.
+    if rejected == 0 && !project_refused {
         cursor::record_success(&d.store, &SyncNamespace::Project(r.project.id))
             .await
             .map_err(storage_err)?;
@@ -2489,13 +3141,44 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
     //
     // Lanes are established first, because a store authenticated since the last
     // establish window has none yet and there would be nothing to drain.
-    for namespace in syncable_global_lanes(d).await {
-        if let Ok((a, dup, rej)) = drain_global(d, &namespace).await {
-            applied += a;
-            duplicate += dup;
-            rejected += rej;
-        }
-        pulled += pull_global(d, &namespace).await.unwrap_or(0);
+    // **Per lane, and said rather than inferred from a zero** (FR-792's rule
+    // applied to the command that does the delivering). Four of the five ways a
+    // global lane can move nothing are a delivery that did not happen, and the
+    // aggregate counts below cannot tell any of them from an empty queue — nor
+    // from a lane this command never looked at, which is its own answer and the
+    // one that is invisible without this. A test or an operator asking "why did
+    // my proposal not go out" reads this; before it, there was nothing to read.
+    let mut lanes: Vec<serde_json::Value> = Vec::new();
+    let (syncable, withheld) = global_lane_targets(d).await;
+    for namespace in syncable {
+        let key = namespace.key();
+        let (drained, error) = match drain_global(d, &namespace).await {
+            Ok(drained) => {
+                applied += drained.applied;
+                duplicate += drained.duplicate;
+                rejected += drained.rejected;
+                (Some(drained), None)
+            }
+            // Still not fatal to the command — one lane's unreachable server
+            // says nothing about the next lane — but no longer discarded
+            // either: a push that failed is not a push that found nothing.
+            Err(e) => (None, Some(e.message)),
+        };
+        let lane_pulled = pull_global(d, &namespace).await.unwrap_or(0);
+        pulled += lane_pulled;
+        lanes.push(json!({
+            "namespace": key,
+            "applied": drained.as_ref().map(|d| d.applied).unwrap_or(0),
+            "duplicate": drained.as_ref().map(|d| d.duplicate).unwrap_or(0),
+            "rejected": drained.as_ref().map(|d| d.rejected).unwrap_or(0),
+            "pulled": lane_pulled,
+            "hold": drained
+                .as_ref()
+                .map(|d| d.hold)
+                .unwrap_or(LaneHold::None)
+                .as_str(),
+            "error": error,
+        }));
     }
 
     Ok(json!({
@@ -2503,6 +3186,20 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         "duplicate": duplicate,
         "rejected": rejected,
         "pulled": pulled,
+        // Said rather than inferred from a zero: "this project's work stayed
+        // put because this credential may not push it" and "there was nothing
+        // to push" are different answers.
+        "project_forbidden": project_refused,
+        // The account every lane above was routed and filtered by. `null` means
+        // this machine could not establish who it is, which is the one state in
+        // which *every* global lane is skipped and the list above is empty for a
+        // reason that has nothing to do with any lane (FR-603).
+        "account": d.account_identity().await.map(|a| a.to_string()),
+        "lanes": lanes,
+        // Lanes this store holds and this credential may not act on. Reported
+        // because "the lane was skipped" and "the lane had nothing" are
+        // different answers and both used to render as silence (FR-593).
+        "lanes_withheld": withheld,
     }))
 }
 
@@ -2512,6 +3209,31 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
 /// at the same time as this one works on a disjoint set rather than re-sending
 /// the same rows. A transient failure releases the claim; a permanent rejection
 /// records the row `failed` (FR-056, FR-058).
+/// Push whatever this project has queued, once, so the server knows about it.
+///
+/// Retrieval binds its project from a **session the server holds**, and a
+/// session that has only just been created has not reached the server yet — the
+/// background worker moves it on its own cadence, which is measured against
+/// nothing in particular and certainly not against a hook's deadline. Without
+/// this, automatic delivery at session open could never work: the first thing a
+/// new session does is ask for context about a session the server has never
+/// seen, and the honest answer to that is "no briefing", every time.
+///
+/// One drain pass, and its failure is not an error. If the session still is not
+/// there, retrieval degrades exactly as it does for any other unreachable
+/// server, and the next delivery point will have it.
+pub(crate) async fn push_pending(d: &Daemon, resolved: &Resolved) -> Result<(), WireError> {
+    if !resolved.project.linked {
+        return Ok(());
+    }
+    let Some(server_project_id) = resolved.project.server_project_id else {
+        return Ok(());
+    };
+    drain(d, resolved.project.id, server_project_id)
+        .await
+        .map(|_| ())
+}
+
 async fn drain(
     d: &Daemon,
     project_id: Uuid,
@@ -2531,8 +3253,18 @@ async fn drain(
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
 
+    // Once this store has begun migrating, its project *knowledge* belongs to
+    // the migration's transfer path and stops going out through this one. Work
+    // tracking and continuity — tasks, sessions, handoffs, criteria, blockers —
+    // are untouched and keep syncing exactly as before (FR-877).
+    let excluded: &[&str] = if legacy_writes_are_open(d).await {
+        &[]
+    } else {
+        KNOWLEDGE_BEARING
+    };
+
     loop {
-        let batch = outbox::claim(&d.store, project_id, BATCH)
+        let batch = outbox::claim_excluding(&d.store, project_id, excluded, BATCH)
             .await
             .map_err(storage_err)?;
         if batch.is_empty() {
@@ -2683,7 +3415,7 @@ async fn drain(
 /// and the drain holds its work rather than sending a batch that cannot be
 /// authorized.
 async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Option<Uuid> {
-    let mine = context.memberships().await;
+    let mine = context.memberships().await?;
     if mine.is_empty() {
         return None;
     }
@@ -2701,6 +3433,399 @@ async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Op
         .copied()
 }
 
+// ---------------------------------------------------------------------------
+// The shared spool drain primitive (T039)
+// ---------------------------------------------------------------------------
+//
+// One drain shape for two spools. The event spool and the command spool differ
+// in what they claim and where they post it, and in nothing else that matters
+// here: both claim in order under an exact account, both get per-item outcomes
+// back, both have to tell a permanent refusal from a transient failure and from
+// a version the server cannot hold yet, and both settle every claimed row
+// before returning.
+//
+// Written once because the interesting part is the *settling*, and settling is
+// where a second implementation goes wrong quietly. A row claimed and not
+// settled is a row in flight until its lease expires — recoverable, but it
+// looks like progress while nothing is happening.
+
+/// Whether the server answered at all, and what it said if it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ServerAnswer {
+    Ok,
+    Refused { code: String },
+}
+
+/// What one delivered item's outcome was, in the vocabulary both spools share.
+///
+/// Four outcomes, and the third is the one that needs a name of its own. A
+/// *permanent refusal* and a *version the server cannot hold yet* are both a
+/// "no" from the server, and treating them alike either strands work an upgrade
+/// would deliver or retries forever something that will never be accepted
+/// (FR-772, FR-774, FR-775).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemOutcome {
+    /// The server stored it, or already had it. A `duplicate` is a success:
+    /// it is what the retry was for (FR-770, FR-786).
+    Delivered,
+    /// Permanent. Never retried, and it stays visible (FR-772, FR-784).
+    Refused,
+    /// The server cannot hold this contract version or kind yet. Deferred, not
+    /// failed: an upgrade delivers it (FR-775).
+    Deferred,
+    /// Transport, or a response that said nothing about this item. Retried
+    /// under the spool's backoff.
+    Transient,
+}
+
+/// What a drain pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DrainReport {
+    pub delivered: usize,
+    pub refused: usize,
+    pub deferred: usize,
+    pub transient: usize,
+}
+
+impl DrainReport {
+    fn record(&mut self, outcome: ItemOutcome) {
+        match outcome {
+            ItemOutcome::Delivered => self.delivered += 1,
+            ItemOutcome::Refused => self.refused += 1,
+            ItemOutcome::Deferred => self.deferred += 1,
+            ItemOutcome::Transient => self.transient += 1,
+        }
+    }
+
+    /// Every row the pass settled, which must equal every row it claimed.
+    ///
+    /// The invariant a drain is easiest to get wrong: a claimed row that is
+    /// neither delivered nor released is in flight until its lease expires, and
+    /// for that minute it looks like progress while nothing is happening.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn settled(&self) -> usize {
+        self.delivered + self.refused + self.deferred + self.transient
+    }
+}
+
+/// Map a server's per-item error code to an outcome.
+///
+/// The deferral set is the existing capability-refusal set plus the two the
+/// event contract adds. Sharing the set rather than restating it is the point:
+/// a code the sync boundary defers and this one fails would be the drift
+/// FR-760 forbids for rejection classes, moved to the delivery path.
+pub(crate) fn outcome_for(code: Option<&str>) -> ItemOutcome {
+    match code {
+        None => ItemOutcome::Transient,
+        Some(code)
+            if codes::CAPABILITY_REFUSALS.contains(&code)
+                || code == "contract_version_unsupported"
+                || code == "unsupported_kind" =>
+        {
+            ItemOutcome::Deferred
+        }
+        // The server failed rather than refused. Transient, and it consumes an
+        // attempt like any other transport-class failure — a 500 is not a
+        // statement about the request.
+        Some("server_error") | Some("storage_unavailable") => ItemOutcome::Transient,
+        Some(_) => ItemOutcome::Refused,
+    }
+}
+
+/// Settle one claimed spool row according to its outcome.
+///
+/// A `Deferred` row is released back to `pending` with a backoff rather than
+/// being marked `refused`: the server will accept it after an upgrade, and
+/// burning its attempt budget on a deferral would eventually declare an
+/// upgradeable row permanently undeliverable.
+async fn settle_event(
+    d: &Daemon,
+    event_id: uuid::Uuid,
+    outcome: ItemOutcome,
+    reason: &str,
+) -> Result<(), WireError> {
+    use cairn_store::spool;
+    match outcome {
+        ItemOutcome::Delivered => spool::mark_event_delivered(&d.store, event_id).await,
+        ItemOutcome::Refused => spool::mark_event_refused(&d.store, event_id, reason).await,
+        // Deferral costs no attempt. Routing it through the failure path was
+        // the defect this replaces: `attempts` increments at claim time, so
+        // every probe of an old server spent one, and a long enough old-server
+        // period drove an upgradeable row to `retry_exhausted`.
+        ItemOutcome::Deferred => {
+            spool::mark_event_deferred(&d.store, event_id, spool::DEFERRED_AWAITING_CAPABILITY)
+                .await
+        }
+        ItemOutcome::Transient => spool::mark_event_failed(&d.store, event_id, reason).await,
+    }
+    .map_err(storage_err)
+}
+
+async fn settle_command(
+    d: &Daemon,
+    command_id: uuid::Uuid,
+    outcome: ItemOutcome,
+    reason: &str,
+) -> Result<(), WireError> {
+    use cairn_store::spool;
+    match outcome {
+        ItemOutcome::Delivered => spool::mark_command_delivered(&d.store, command_id).await,
+        ItemOutcome::Refused => spool::mark_command_refused(&d.store, command_id, reason).await,
+        ItemOutcome::Deferred => {
+            spool::mark_command_deferred(&d.store, command_id, spool::DEFERRED_AWAITING_CAPABILITY)
+                .await
+        }
+        ItemOutcome::Transient => spool::mark_command_failed(&d.store, command_id, reason).await,
+    }
+    .map_err(storage_err)
+}
+
+/// Drain the event spool once, in claim order, settling every claimed row.
+///
+/// **Every claimed row is settled before this returns, including on the error
+/// paths.** A claimed row that is neither delivered nor released is in flight
+/// until its lease expires — recoverable, but for a minute it looks like
+/// progress while nothing is happening, and a drain that returned early on a
+/// transport error used to leave exactly that.
+///
+/// The account and the server come from one credential read, so a switch mid-
+/// drain cannot route as one identity and authenticate as another (FR-597), and
+/// rows stay bound to the account that authored them (FR-790).
+pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
+    use cairn_store::spool;
+    let _drain_guard = d.sync_drain.lock().await;
+    // Acquiring the context reads `/api/version`, so its failure is where an
+    // outage first stops this drain. It is only returned, never recorded: what
+    // status reports about reachability comes from status's own bounded sample
+    // (FR-792a), because a flag left in this process's memory is gone the next
+    // time a daemon is replaced — which is exactly when an operator asks.
+    let context = AuthenticatedContext::acquire(d).await?;
+
+    let claimed = spool::claim_events(&d.store, context.account, context.peer_instance, limit)
+        .await
+        .map_err(storage_err)?;
+    let mut report = DrainReport::default();
+    if claimed.is_empty() {
+        return Ok(report);
+    }
+
+    let events: Vec<serde_json::Value> = claimed
+        .iter()
+        .map(|c| serde_json::to_value(&c.event).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let body = serde_json::json!({
+        "contract_version": cairn_core::event::CONTRACT_VERSION,
+        "events": events,
+    });
+
+    let response = match context.client.post("/api/events/batch", &body).await {
+        Ok(response) => response,
+        Err(e) => {
+            // Transport. Every claimed row is released with a backoff rather
+            // than left in flight, because the alternative is a minute of
+            // apparent progress after a failure that already happened.
+            for c in &claimed {
+                settle_event(d, c.event_id, ItemOutcome::Transient, "transport").await?;
+                report.record(ItemOutcome::Transient);
+            }
+            return Err(e);
+        }
+    };
+
+    let results = response
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for c in &claimed {
+        let found = results
+            .iter()
+            .find(|r| r.get("event_id").and_then(|v| v.as_str()) == Some(&c.event_id.to_string()));
+        // An item with no result in the response is transient, not delivered.
+        // Assuming success for a silence would mark a row delivered that the
+        // server may never have seen.
+        let outcome = match found.and_then(|r| r.get("status").and_then(|s| s.as_str())) {
+            Some("accepted") | Some("duplicate") => ItemOutcome::Delivered,
+            Some("rejected") => {
+                outcome_for(found.and_then(|r| r.get("reason").and_then(|s| s.as_str())))
+            }
+            _ => ItemOutcome::Transient,
+        };
+        let reason = found
+            .and_then(|r| r.get("reason").and_then(|s| s.as_str()))
+            .unwrap_or("no result for item");
+        settle_event(d, c.event_id, outcome, reason).await?;
+        report.record(outcome);
+    }
+    Ok(report)
+}
+
+/// Drain the command spool once, in scope order.
+///
+/// Ordering is the difference from the event drain and it is enforced by the
+/// claim, not here: a supersede queued after its target has to reach the server
+/// after it, and `claim_commands` will not hand out a row whose scope has an
+/// earlier unsettled one.
+pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
+    use cairn_store::spool;
+    let _drain_guard = d.sync_drain.lock().await;
+    let context = AuthenticatedContext::acquire(d).await?;
+
+    let claimed = spool::claim_commands(&d.store, context.account, context.peer_instance, limit)
+        .await
+        .map_err(storage_err)?;
+    let mut report = DrainReport::default();
+
+    // One at a time, in the order claimed. Batching would deliver a scope's
+    // commands concurrently and lose the ordering the claim just established.
+    for c in &claimed {
+        // **The local project id is not the server's, and only the server's
+        // means anything on the wire.**
+        //
+        // `projects.id` is this store's own identifier and `server_project_id`
+        // is the shared one; linking records the second without adopting it,
+        // because a project can be re-linked and the local rows must keep
+        // pointing at something stable. A command spooled with the local id and
+        // posted verbatim named a project the server has never heard of, so
+        // every project-scoped command queued under server authority was
+        // undeliverable — and the refusal it drew was classified as permanent,
+        // which turned an addressing mistake into the user's instruction being
+        // dropped.
+        //
+        // Translated here rather than at the point the command is queued: at
+        // queue time the project may not be linked yet, and burning the wrong id
+        // into a durable row would outlive the mistake.
+        let envelope = match resolve_command_project(d, c).await {
+            CommandRoute::Ready(envelope) => envelope,
+            CommandRoute::NotLinked => {
+                // Deferred, not refused. An unlinked project sends nothing
+                // (FR-053), but linking it later is an ordinary thing to do and
+                // the command should survive to be delivered then. A deferral
+                // spends no attempt budget, which is what stops a long unlinked
+                // period driving the row to `retry_exhausted`.
+                settle_command(d, c.command_id, ItemOutcome::Deferred, "project_not_linked")
+                    .await?;
+                report.record(ItemOutcome::Deferred);
+                continue;
+            }
+        };
+        let (outcome, reason) = match context
+            .client
+            .post_for_outcome(COMMAND_ENVELOPE_PATH, &envelope)
+            .await
+        {
+            // A structured refusal from the server is **not** a transport
+            // failure, and conflating them was the defect this replaces: a
+            // `409 unsupported_kind` read as transport spent an attempt on a
+            // row an upgrade would have delivered, and a `400` read as
+            // transport retried a refusal forever.
+            Ok(ServerAnswer::Ok) => (ItemOutcome::Delivered, "accepted".to_string()),
+            Ok(ServerAnswer::Refused { code }) => (outcome_for(Some(&code)), code),
+            Err(_) => (ItemOutcome::Transient, "transport".to_string()),
+        };
+        settle_command(d, c.command_id, outcome, &reason).await?;
+        report.record(outcome);
+        if outcome == ItemOutcome::Transient {
+            // Stop the pass. The next command in this scope must not be
+            // attempted before this one settles, and a server that is not
+            // answering will not answer the next one either.
+            break;
+        }
+    }
+    Ok(report)
+}
+
+/// A claimed command's envelope, or the reason it cannot be addressed yet.
+enum CommandRoute {
+    Ready(serde_json::Value),
+    /// The command names a project this store has not linked, so there is no
+    /// server identifier to address it by.
+    NotLinked,
+}
+
+/// Build one command's envelope, translating the project it names.
+///
+/// The only place a local project id becomes a server project id. A command
+/// naming no project needs no translation and is always `Ready`.
+async fn resolve_command_project(
+    d: &Daemon,
+    command: &cairn_store::spool::SpooledCommand,
+) -> CommandRoute {
+    let Some(local) = command.project_id else {
+        return CommandRoute::Ready(command_envelope(command, None));
+    };
+    match repo::project(&d.store, local).await {
+        Ok(project) => match project.server_project_id {
+            Some(server_project_id) if project.linked => {
+                CommandRoute::Ready(command_envelope(command, Some(server_project_id)))
+            }
+            _ => CommandRoute::NotLinked,
+        },
+        // A project row that is gone cannot be linked either, and the answer is
+        // the same: hold the command rather than refuse it. Deleting a project
+        // locally is not the user withdrawing an instruction about it.
+        Err(e) => {
+            tracing::debug!(project = %local, error = %e, "a queued command names an unknown project");
+            CommandRoute::NotLinked
+        }
+    }
+}
+
+/// What one queued command needs to say on the wire.
+///
+/// Everything a command is, in one object: its deterministic identity, its
+/// kind, whatever it targets, and its intent. The first version of this drain
+/// posted `payload` alone to a path derived from the kind, which lost the
+/// `command_id` — so nothing was idempotent — and named several paths the
+/// server does not serve, so nothing arrived either. Both were the same
+/// mistake: the wire form did not carry the command.
+///
+/// The account is **not** here. It comes from the credential the request is
+/// made with, and there is deliberately no field for it: a daemon that could
+/// name an account could attribute one identity's writes to another
+/// (Principle XI).
+fn command_envelope(
+    command: &cairn_store::spool::SpooledCommand,
+    server_project_id: Option<uuid::Uuid>,
+) -> serde_json::Value {
+    use cairn_store::spool::CommandKind;
+    // What the command applies to. A project for the commands that create
+    // within one, a record for the commands that act on one, neither for the
+    // account-scoped domains — which is why both are optional rather than one
+    // widened field that means different things per kind.
+    let (project_id, target_id) = match command.kind {
+        CommandKind::Remember | CommandKind::Relate => (server_project_id, None),
+        CommandKind::Supersede
+        | CommandKind::Reinforce
+        | CommandKind::Pin
+        | CommandKind::Forget
+        | CommandKind::PersonalForget
+        | CommandKind::PatternForget => (
+            server_project_id,
+            command
+                .payload
+                .get("target_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok()),
+        ),
+        CommandKind::PersonalCreate
+        | CommandKind::TeamPropose
+        | CommandKind::PatternPromote
+        | CommandKind::VerificationRun
+        | CommandKind::VerificationAttestation => (None, None),
+    };
+    serde_json::json!({
+        "command_id": command.command_id,
+        "kind": command.kind.as_str(),
+        "project_id": project_id,
+        "target_id": target_id,
+        "payload": command.payload,
+    })
+}
+
+/// The one route every queued command is delivered to.
+const COMMAND_ENVELOPE_PATH: &str = "/api/commands";
+
 /// [`drain`], for a `personal:*`/`team:*` namespace (T093, T100, T106, T107).
 ///
 /// Same claim → send → record-outcome shape as `drain`, over
@@ -2714,10 +3839,128 @@ async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Op
 /// namespace's backoff, because the outcome only ever reads as
 /// [`NamespaceOutcome::Transient`] when the *request itself* failed, never
 /// when an item in a successful response was refused.
-async fn drain_global(
-    d: &Daemon,
-    namespace: &SyncNamespace,
-) -> Result<(usize, usize, usize), WireError> {
+/// Whether the pre-005 dual-authority write path may still carry knowledge
+/// from this store.
+///
+/// **Only while the store has not begun migrating.** Once `authority_mode`
+/// leaves `feature_004`, the migration owns the transfer of durable knowledge
+/// and this path must stop competing with it. Two things go wrong when it does
+/// not, and both were observed rather than imagined: the worker delivers a
+/// legacy row with its un-normalized keys while the migration is re-keying,
+/// and the pull then merges that server copy back over the corrected local
+/// row — so `topic_key` reverts and the collision detection SC-750 measures
+/// silently stops working against exactly the corpus it is about.
+///
+/// It is also what the server will say anyway once the fleet cuts over: these
+/// same shapes are refused with `upgrade_required`, and a store that has
+/// migrated has no business asking. Stopping here means a migrated store stops
+/// emitting them rather than learning not to from a refusal.
+///
+/// A store that cannot answer is treated as still `feature_004`: that is the
+/// path that works without a server, and guessing the other way would strand
+/// queued work on a store that never migrates.
+async fn legacy_writes_are_open(d: &Daemon) -> bool {
+    cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m == cairn_store::authority::AuthorityMode::Feature004)
+        .unwrap_or(true)
+}
+
+/// The entity types the migration owns once it has begun (`migration-cutover.md`
+/// §3.1, §4.2). The same list the server refuses after cutover, and
+/// deliberately so: the two must not diverge.
+const KNOWLEDGE_BEARING: &[&str] = &[
+    "memory",
+    "memory_relation",
+    "personal_knowledge",
+    "personal_knowledge_relation",
+    "team_knowledge",
+    "team_knowledge_relation",
+];
+
+/// Why a global lane moved nothing, when it moved nothing.
+///
+/// **`applied 0` had five meanings and no way to tell them apart.** A lane this
+/// store has begun migrating past, a lane this credential may not touch, a lane
+/// whose only queued work belongs to a logged-out identity, a batch held because
+/// the account belongs to no project the route would authorize, and a lane with
+/// an empty queue all reported the same two words. Four of those are a delivery
+/// that did not happen; the fifth is nothing to deliver. Principle X does not
+/// let a report say "nothing happened" when what it means is "I declined to act
+/// and did not say so".
+///
+/// It is also what makes the FR-594 hold *observable*: a proposal held for its
+/// absent author and a proposal silently skipped look identical from outside,
+/// and only one of them is the behaviour that requirement asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneHold {
+    /// Nothing was withheld. Either work went out, or the lane's queue is empty
+    /// for this account and for everyone else.
+    None,
+    /// This store has begun migrating, so the pre-005 write path is closed and
+    /// the migration owns the transfer (FR-877).
+    Migrating,
+    /// The credential does not admit this lane: another account's `personal:*`,
+    /// or a lane bound to another server instance (FR-495, FR-496, FR-598).
+    NotAdmitted,
+    /// Rows are queued here and none of them are this account's to send
+    /// (FR-594). The lane is *held*, not idle, and it moves the moment its
+    /// author is authenticated again.
+    AnotherAuthor,
+    /// The authenticated account belongs to no project `POST /api/sync/batch`
+    /// would authorize, so the batch went back to `pending` (FR-595).
+    NoAuthorizationProject,
+    /// The server could not be asked which projects this account belongs to, so
+    /// the batch went back to `pending` for a reason that is about the network
+    /// and not about the account.
+    ///
+    /// The drain does the same thing in both cases and should: the rows are not
+    /// at fault either way. What differs is what a person reading
+    /// `cairn sync now` is told, and "this account belongs to no project" about
+    /// an account that belongs to several sends them to look at memberships
+    /// instead of at the server.
+    MembershipUnknown,
+}
+
+impl LaneHold {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LaneHold::None => "none",
+            LaneHold::Migrating => "migrating",
+            LaneHold::NotAdmitted => "not_admitted",
+            LaneHold::AnotherAuthor => "another_author",
+            LaneHold::NoAuthorizationProject => "no_authorization_project",
+            LaneHold::MembershipUnknown => "membership_unknown",
+        }
+    }
+}
+
+/// What one global lane's drain did, and what it withheld.
+pub(crate) struct GlobalDrain {
+    pub(crate) applied: usize,
+    pub(crate) duplicate: usize,
+    pub(crate) rejected: usize,
+    pub(crate) hold: LaneHold,
+}
+
+impl GlobalDrain {
+    fn held(hold: LaneHold) -> Self {
+        GlobalDrain {
+            applied: 0,
+            duplicate: 0,
+            rejected: 0,
+            hold,
+        }
+    }
+}
+
+async fn drain_global(d: &Daemon, namespace: &SyncNamespace) -> Result<GlobalDrain, WireError> {
+    // A `personal:*` or `team:*` lane carries nothing but knowledge, so the
+    // whole lane stops once this store has begun migrating.
+    if !legacy_writes_are_open(d).await {
+        return Ok(GlobalDrain::held(LaneHold::Migrating));
+    }
+
     // Same single-drainer discipline `drain` uses, and the same lock: claiming
     // is what makes two concurrent drains correct, this is what keeps them
     // orderly, and there is no reason a project drain and a global drain
@@ -2740,7 +3983,7 @@ async fn drain_global(
     let context = AuthenticatedContext::acquire(d).await?;
     if !context.admits(namespace) {
         context.refuse(namespace, "pushing");
-        return Ok((0, 0, 0));
+        return Ok(GlobalDrain::held(LaneHold::NotAdmitted));
     }
 
     let capability = capability_from(&context.version, d, namespace).await;
@@ -2763,12 +4006,32 @@ async fn drain_global(
     let mut auth_project: Option<Uuid> = None;
 
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
+    let mut hold = LaneHold::None;
 
     loop {
         let batch = outbox::claim_namespace_for_author(&d.store, &key, author, BATCH)
             .await
             .map_err(storage_err)?;
         if batch.is_empty() {
+            // **An empty claim is two different states** (FR-594). A lane with
+            // nothing queued and a lane whose whole queue belongs to an account
+            // that is not signed in both claim nothing, and only the second is a
+            // held delivery. Asked once, and only when the claim came back
+            // empty, so an ordinary idle lane pays one local `COUNT` and a busy
+            // one pays nothing.
+            if applied + duplicate + rejected == 0 {
+                let (pending, _) = outbox::counts_namespace(&d.store, &key)
+                    .await
+                    .map_err(storage_err)?;
+                if pending > 0 {
+                    hold = LaneHold::AnotherAuthor;
+                    tracing::info!(
+                        namespace = %key, account = %author, pending,
+                        "holding this lane's queued work: none of it was authored \
+                         by the authenticated account"
+                    );
+                }
+            }
             break;
         }
 
@@ -2777,7 +4040,9 @@ async fn drain_global(
         // (FR-597).
         let c = &context.client;
 
+        let mut membership_known = true;
         if auth_project.is_none() {
+            membership_known = context.memberships().await.is_some();
             auth_project = authorization_project(&context, d).await;
         }
         let Some(project_id) = auth_project else {
@@ -2785,12 +4050,28 @@ async fn drain_global(
             // `pending` rather than counting as failures: the account will belong
             // to a project, or a different account will log in, and neither is
             // this row's fault.
-            tracing::debug!(
-                namespace = %key,
-                "holding this batch: the authenticated account belongs to no project \
-                 the sync route would authorize"
+            // **`info`, not `debug`.** This is a delivery that silently did not
+            // happen: the rows go back to `pending`, the drain reports success,
+            // and nothing else anywhere says the queue did not move. A default
+            // log level that omits the one line naming the reason is the same
+            // silence FR-792 exists to remove.
+            let (reason, why) = if membership_known {
+                (
+                    LaneHold::NoAuthorizationProject,
+                    "no authorization project for this account",
+                )
+            } else {
+                (
+                    LaneHold::MembershipUnknown,
+                    "could not read this account's project membership from the server",
+                )
+            };
+            tracing::info!(
+                namespace = %key, account = %author, hold = reason.as_str(),
+                "holding this batch: {why}"
             );
-            release(d, &batch, "no authorization project for this account").await?;
+            release(d, &batch, why).await?;
+            hold = reason;
             break;
         };
 
@@ -2874,7 +4155,12 @@ async fn drain_global(
             "work retained for a server that cannot hold it yet"
         );
     }
-    Ok((applied, duplicate, rejected))
+    Ok(GlobalDrain {
+        applied,
+        duplicate,
+        rejected,
+        hold,
+    })
 }
 
 /// Ask the server what it can hold, and release anything it now can (T111,
@@ -3667,6 +4953,192 @@ async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) ->
     .is_ok()
 }
 
+// ---------------------------------------------------------------------------
+// Migration eligibility (T141; FR-864a, FR-867b)
+//
+// Who is allowed to hand a legacy row to the server, decided as two pure
+// functions so the rule can be read, tested and mutated on its own rather than
+// inferred from a `WHERE` clause several call sites away.
+//
+// This is not a second claim path. `outbox::claim_namespace_for_author` still
+// does the claiming; these say which claim a namespace calls for, and name the
+// reason when a row is not eligible so `--status` can report it individually
+// (contract §4.3) instead of leaving it silently pending.
+// ---------------------------------------------------------------------------
+
+/// Why a queued legacy row is, or is not, this account's to drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eligibility {
+    /// Claimable by this account, through the claim its namespace calls for.
+    Eligible,
+    /// A global row with no author recorded against it.
+    ///
+    /// Drained by **no one's** migration. A missing author is not a wildcard:
+    /// treating it as one would deliver the row under whichever account happens
+    /// to be signed in during migration, which is the misattribution
+    /// `outbox.rs` records as introduced and fixed twice already. The row stays
+    /// pending and is reported.
+    NoRecordedAuthor,
+    /// A global row authored by somebody else. Held, not refused — it goes out
+    /// unchanged the moment its own author resumes their migration.
+    AuthorMismatch { recorded: Uuid },
+}
+
+/// Whether `account` may drain a queued row in `namespace` authored by
+/// `authored_by`.
+///
+/// **A `project:*` row carries no author and needs none.** Its authorization is
+/// membership of the project, which the server checks on arrival; the local
+/// CHECK on `outbox` requires exactly that split, so a project row with an
+/// author is as impossible as a global row without one. Reading the namespace
+/// rather than the entity type is deliberate: the namespace is the column the
+/// claim itself keys on, so this cannot disagree with what the claim will do.
+pub fn legacy_row_eligibility(
+    namespace: &str,
+    authored_by: Option<Uuid>,
+    account: Uuid,
+) -> Eligibility {
+    if namespace.starts_with("project:") {
+        return Eligibility::Eligible;
+    }
+    match authored_by {
+        Some(a) if a == account => Eligibility::Eligible,
+        Some(recorded) => Eligibility::AuthorMismatch { recorded },
+        None => Eligibility::NoRecordedAuthor,
+    }
+}
+
+/// Why a legacy pattern is, or is not, deliverable by this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternEligibility {
+    /// A persisted claim by this account exists. Both values come from the
+    /// claim, never recomputed from the credential active at retry time.
+    Eligible {
+        pattern_id: Uuid,
+        content_key: String,
+    },
+    /// Nobody has claimed it. It stays local and is reported individually;
+    /// the active account can never substitute for a missing claim.
+    OwnerUnclaimed,
+    /// Claimed by a different account. Reported until that account resumes its
+    /// own migration, and never re-keyed to this one.
+    AuthorMismatch { owner: Uuid },
+}
+
+/// Whether `account` may deliver the pattern behind `claim`.
+///
+/// The whole point of taking the persisted claim rather than the local pattern
+/// is that a credential switch must not change the answer's *identity*: a
+/// claimed row keeps the `pattern_id` its claim recorded, so no sequence of
+/// sign-ins can produce a second owner or a second canonical pattern.
+pub fn pattern_eligibility(
+    claim: Option<&cairn_store::migrate::PatternClaim>,
+    account: Uuid,
+) -> PatternEligibility {
+    match claim {
+        None => PatternEligibility::OwnerUnclaimed,
+        Some(c) if c.owner_user_id == account => PatternEligibility::Eligible {
+            pattern_id: c.pattern_id,
+            content_key: c.content_key.clone(),
+        },
+        Some(c) => PatternEligibility::AuthorMismatch {
+            owner: c.owner_user_id,
+        },
+    }
+}
+
+#[cfg(test)]
+mod migration_eligibility_tests {
+    use super::*;
+    use cairn_store::migrate::PatternClaim;
+
+    fn claim(owner: Uuid, pattern: Uuid) -> PatternClaim {
+        PatternClaim {
+            local_pattern_id: Uuid::now_v7(),
+            owner_user_id: owner,
+            content_key: "ck".into(),
+            pattern_id: pattern,
+            claimed_at: "2026-08-01T09:00:00Z".into(),
+        }
+    }
+
+    /// A project row's authorization is membership of the project, which the
+    /// server checks on arrival, so it carries no author and needs none.
+    #[test]
+    fn a_project_row_is_eligible_without_an_author() {
+        let account = Uuid::now_v7();
+        assert_eq!(
+            legacy_row_eligibility("project:0191", None, account),
+            Eligibility::Eligible
+        );
+    }
+
+    /// **A missing author is not a wildcard.**
+    ///
+    /// The filter once read `authored_by_user_id IS NULL OR = ?`, on the
+    /// reasonable-looking ground that a row predating the column should keep
+    /// working. "No recorded author" then meant "deliverable under whichever
+    /// account is logged in", which is the misattribution the filter exists to
+    /// prevent, spelled as backward compatibility.
+    #[test]
+    fn a_global_row_with_no_author_is_nobodys_to_drain() {
+        let account = Uuid::now_v7();
+        for namespace in ["personal:0191:abc", "team:0191"] {
+            assert_eq!(
+                legacy_row_eligibility(namespace, None, account),
+                Eligibility::NoRecordedAuthor,
+                "{namespace} treated a missing author as permission"
+            );
+        }
+    }
+
+    /// Held, not refused: the row is simply not this account's to send.
+    #[test]
+    fn a_global_row_someone_else_authored_is_held() {
+        let account = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        assert_eq!(
+            legacy_row_eligibility("team:0191", Some(other), account),
+            Eligibility::AuthorMismatch { recorded: other }
+        );
+        assert_eq!(
+            legacy_row_eligibility("team:0191", Some(account), account),
+            Eligibility::Eligible
+        );
+    }
+
+    /// The active account can never substitute for a missing claim.
+    #[test]
+    fn an_unclaimed_pattern_belongs_to_no_account() {
+        assert_eq!(
+            pattern_eligibility(None, Uuid::now_v7()),
+            PatternEligibility::OwnerUnclaimed
+        );
+    }
+
+    /// Identity comes from the **persisted** claim, so a credential change
+    /// cannot produce a second owner or a second canonical pattern.
+    #[test]
+    fn a_claimed_pattern_keeps_the_identity_its_claim_recorded() {
+        let owner = Uuid::now_v7();
+        let pattern = Uuid::now_v7();
+        let c = claim(owner, pattern);
+        assert_eq!(
+            pattern_eligibility(Some(&c), owner),
+            PatternEligibility::Eligible {
+                pattern_id: pattern,
+                content_key: "ck".into()
+            }
+        );
+        let someone_else = Uuid::now_v7();
+        assert_eq!(
+            pattern_eligibility(Some(&c), someone_else),
+            PatternEligibility::AuthorMismatch { owner },
+            "a different account signing in re-keyed a claimed pattern"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3711,6 +5183,150 @@ mod tests {
     /// then a single success clears it back to `BACKOFF_MIN` outright — not
     /// merely halved, so a namespace that just recovered is as eligible as one
     /// that never failed (Invariant 2).
+    /// A "no" from the server is three different answers, and mixing any two
+    /// of them loses work or retries forever.
+    #[test]
+    fn a_refusal_a_deferral_and_a_transient_failure_are_told_apart() {
+        // Permanent: an absolute path will never become acceptable, and
+        // retaining it would turn a privacy refusal into a pending delivery.
+        assert_eq!(
+            super::outcome_for(Some("repo_file_absolute")),
+            super::ItemOutcome::Refused
+        );
+        assert_eq!(
+            super::outcome_for(Some("content_screening_failed")),
+            super::ItemOutcome::Refused
+        );
+        // Deferrable: an upgrade delivers these, so failing them strands work
+        // (FR-775).
+        assert_eq!(
+            super::outcome_for(Some("contract_version_unsupported")),
+            super::ItemOutcome::Deferred
+        );
+        assert_eq!(
+            super::outcome_for(Some("unsupported_kind")),
+            super::ItemOutcome::Deferred
+        );
+        // No code at all is a silence, and a silence is not a success: assuming
+        // delivery would mark a row delivered the server may never have seen.
+        assert_eq!(super::outcome_for(None), super::ItemOutcome::Transient);
+    }
+
+    #[test]
+    fn the_capability_refusals_the_sync_boundary_defers_are_deferred_here_too() {
+        // A code one boundary defers and the other fails is the drift FR-760
+        // forbids for rejection classes, moved onto the delivery path.
+        for code in cairn_core::wire::codes::CAPABILITY_REFUSALS {
+            assert_eq!(
+                super::outcome_for(Some(code)),
+                super::ItemOutcome::Deferred,
+                "{code} is deferred by sync and not by the spool drain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_settles_every_outcome_it_records() {
+        let mut report = super::DrainReport::default();
+        for outcome in [
+            super::ItemOutcome::Delivered,
+            super::ItemOutcome::Delivered,
+            super::ItemOutcome::Refused,
+            super::ItemOutcome::Deferred,
+            super::ItemOutcome::Transient,
+        ] {
+            report.record(outcome);
+        }
+        assert_eq!(report.delivered, 2);
+        assert_eq!(report.refused, 1);
+        assert_eq!(report.deferred, 1);
+        assert_eq!(report.transient, 1);
+        assert_eq!(
+            report.settled(),
+            5,
+            "a settled row went uncounted, which is how a claimed row is left in flight"
+        );
+    }
+
+    /// Every command kind produces an envelope the server can dispatch.
+    ///
+    /// The envelope replaced a per-kind path table, and the reason is worth
+    /// keeping: that table named several routes the server does not serve, and
+    /// posting the payload alone lost the `command_id` — so nothing was
+    /// delivered and nothing was idempotent. A compile-time enum-to-string
+    /// check passed throughout, which is why this asserts the *shape* the
+    /// server reads rather than a mapping.
+    #[test]
+    fn every_command_kind_produces_a_dispatchable_envelope() {
+        use cairn_store::spool::{CommandKind, CommandScope, SpooledCommand};
+        let all = [
+            CommandKind::Remember,
+            CommandKind::Supersede,
+            CommandKind::Reinforce,
+            CommandKind::Relate,
+            CommandKind::Pin,
+            CommandKind::Forget,
+            CommandKind::PersonalCreate,
+            CommandKind::PersonalForget,
+            CommandKind::TeamPropose,
+            CommandKind::PatternPromote,
+            CommandKind::PatternForget,
+            CommandKind::VerificationRun,
+            CommandKind::VerificationAttestation,
+        ];
+        let payload = serde_json::json!({ "content": "an intent" });
+        let mut kinds = std::collections::BTreeSet::new();
+        for kind in all {
+            let command = SpooledCommand {
+                command_id: uuid::Uuid::now_v7(),
+                scope: CommandScope::Store(uuid::Uuid::now_v7()),
+                session_id: None,
+                project_id: Some(uuid::Uuid::now_v7()),
+                account_id: uuid::Uuid::now_v7(),
+                command_seq: 1,
+                kind,
+                payload: payload.clone(),
+                attempts: 0,
+            };
+            // The server's id, not the local one — which is the whole reason
+            // this argument exists. A local `project_id` on the row and a
+            // different id on the wire is the correct pairing, and passing the
+            // same value for both would let the translation regress unnoticed.
+            let server_project_id = uuid::Uuid::now_v7();
+            let envelope = super::command_envelope(&command, Some(server_project_id));
+            // The four things the wire form has to carry.
+            assert_eq!(
+                envelope["command_id"],
+                serde_json::json!(command.command_id)
+            );
+            assert_eq!(envelope["kind"], kind.as_str());
+            assert_eq!(envelope["payload"], payload);
+            assert!(envelope.get("target_id").is_some());
+            // **Never the local id.** A project-scoped kind carries the
+            // server's; an account-scoped one carries none. Either way the row's
+            // own `project_id` must not appear, because the server cannot
+            // resolve it — that mistake made every queued project command
+            // undeliverable and its refusal terminal.
+            assert_ne!(
+                envelope["project_id"],
+                serde_json::json!(command.project_id),
+                "`{}` put the local project id on the wire",
+                kind.as_str()
+            );
+            // And the one thing it must not: nothing that decides who is
+            // acting. The account travels as the credential, not as a field.
+            for forbidden in ["account_id", "owner_user_id", "verification_authority"] {
+                assert!(
+                    envelope.get(forbidden).is_none(),
+                    "the envelope carries `{forbidden}`, which a daemon must not name"
+                );
+            }
+            kinds.insert(kind.as_str());
+        }
+        assert_eq!(kinds.len(), all.len(), "two kinds share a wire name");
+        assert_eq!(super::COMMAND_ENVELOPE_PATH, "/api/commands");
+    }
+
     #[test]
     fn backoff_doubles_to_a_ceiling_and_a_success_clears_it_entirely() {
         let now = Instant::now();
@@ -4214,10 +5830,36 @@ mod tests {
     ///
     /// Deterministic because it does not race: the lookup's commit is replayed
     /// **after** the switch has completed, which is precisely the interleaving
+    /// Serialize the tests that touch this process's **shared** credential
+    /// files.
+    ///
+    /// `cairn_core::paths::config_path()` and `token_path()` are process-global:
+    /// every test in this binary reads and writes the same two files, however
+    /// many `Daemon` fixtures they build. Run in parallel they interfere —
+    /// `a_credential_change_that_cannot_be_persisted_changes_nothing` makes the
+    /// config read-only for a window, and its neighbours rewrite it — so the
+    /// failures land wherever the scheduler happens to put them and look like
+    /// credential defects rather than test interference.
+    ///
+    /// A mutex rather than one merged test, because the tests are about
+    /// genuinely different transitions and merging them would lose the names
+    /// that say which one broke.
+    ///
+    /// `tokio`'s mutex and not `std`'s: the guard is held across the `await`s
+    /// that do the work, and a `std` guard held across an await can park the
+    /// whole runtime thread with the lock still taken.
+    async fn credentials_serially() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     /// the gap allowed. It is refused because the generation it was taken under
     /// is gone.
     #[tokio::test]
     async fn a_lookup_from_the_old_credential_cannot_restore_the_old_account() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         let account_a = Uuid::now_v7();
         d.mutate_credentials(|c| {
@@ -4270,6 +5912,7 @@ mod tests {
     /// concurrency at all (FR-610).
     #[tokio::test]
     async fn a_token_switch_leaves_the_token_file_and_the_account_agreeing() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         let account_a = Uuid::now_v7();
         d.mutate_credentials(|c| {
@@ -4309,6 +5952,7 @@ mod tests {
     /// finds neither.
     #[tokio::test]
     async fn a_logout_leaves_no_token_and_no_account_for_a_restart_to_find() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -4349,6 +5993,7 @@ mod tests {
     /// credential commits as though it were still current.
     #[tokio::test]
     async fn a_credential_switched_away_and_back_is_not_the_same_credential() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -4394,6 +6039,7 @@ mod tests {
     /// of failure this mechanism exists to prevent.
     #[tokio::test]
     async fn learning_an_account_does_not_advance_the_credential_generation() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -4421,6 +6067,7 @@ mod tests {
     /// Re-applying an unchanged credential does not advance the generation.
     #[tokio::test]
     async fn rewriting_the_same_credential_does_not_advance_the_generation() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -4448,6 +6095,7 @@ mod tests {
     /// whether the daemon had restarted since (FR-605).
     #[tokio::test]
     async fn a_credential_change_that_cannot_be_persisted_changes_nothing() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());

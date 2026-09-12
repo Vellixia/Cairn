@@ -1,0 +1,59 @@
+{
+  "criterion_of": "SC-701",
+  "fixed_before": "T064, and every run that has graded against it since",
+  "why": "SC-701 makes accuracy a reviewed judgement recorded as such. A rubric written after the run would be one written to fit its answer, so the criteria are fixed here and the automated portion asserts existence, provenance resolution and rubric completion \u2014 never accuracy itself.",
+  "agents": [
+    "claude_code",
+    "codex",
+    "opencode"
+  ],
+  "criteria": [
+    {
+      "id": "kind_is_one_of_five",
+      "statement": "The record's kind is one of fact, decision, convention, failure or procedure. Feature 005 introduces no sixth kind (FR-795).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "claim_is_non_empty",
+      "statement": "The record states something. An empty claim is not knowledge.",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "keys_are_canonical",
+      "statement": "The stored topic and value keys are already in their own canonical form, so a syntactic variant of the same subject collides with this record rather than creating a second (FR-796a).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "provenance_resolves",
+      "statement": "Every cited source event exists and belongs to the session the record was derived from; zero citations are unresolvable (SC-702).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "nothing_asked_for_it",
+      "statement": "No explicit record and no supersession appears in a session that invoked no Cairn tool.",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "claim_is_supported_by_its_evidence",
+      "statement": "A reader given only the cited safe events would judge the claim true of this project. This is the accuracy judgement itself, and it belongs to an independent reviewer: an automated check would be the test agreeing with itself.",
+      "evaluated": "by_review"
+    },
+    {
+      "id": "claim_says_no_more_than_the_events_establish",
+      "statement": "The claim does not assert reasoning, intent or a cause that the event stream does not carry. Baseline 005 learns that a decision was taken and about what, never why (contracts/extraction.md \u00a713.9).",
+      "evaluated": "by_review"
+    }
+  ],
+  "reviewer": {
+    "requirement": "independent of the process being graded",
+    "may_be": [
+      "a person",
+      "an external agent"
+    ],
+    "may_not_be": "the implementation or test process whose output is under review, which is self-grading whatever performs it",
+    "sees": "the durable claim and the safe events it cites, and nothing else",
+    "recorded": "reviewer type and date, beside the verdict, in acceptance-results.md",
+    "note": "This said 'a human's'. Humanity was never the property that made the rule work \u2014 independence was, and the wording is corrected to say so (spec.md SC-701)."
+  },
+  "not_claimed": "fixed before *implementation*. This file was added in a497805, after extraction (ec43064) and capture (00e7881), so the stronger claim would be false. What is true is that the criteria were fixed before the runs they grade, which is what SC-701 asks for \u2014 a rubric written after a run would be one written to fit its answer."
+}
