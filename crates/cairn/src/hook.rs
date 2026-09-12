@@ -90,8 +90,25 @@ fn capture_pass(
         return Captured::default();
     }
 
+    let mut vocabulary_missed_its_deadline = false;
     let (vocabulary, established) = if cairn_integrate::carries_semantic_material(agent, event) {
-        fetch_vocabulary(agent, cwd, &key, deadline)
+        match fetch_vocabulary(agent, cwd, &key, deadline) {
+            Ok(pair) => pair,
+            // **A vocabulary Cairn could not fetch is not an empty one**
+            // (FR-749c). The mapping declines either way, and correctly — an
+            // unchecked claim must not be recorded — but the two declines are
+            // different findings and used to render identically as
+            // `declined_by_policy/insufficient_vocabulary`. One is a lexicon
+            // that is genuinely too thin, which repeats on every run of a frozen
+            // corpus; the other is this machine's own deadline, which is load
+            // and says nothing about the content. Journalled as the drop it is,
+            // so the decline's cause is readable instead of guessed at.
+            Err(reason) => {
+                journal_capture_drop(agent, cwd, event, None, &reason);
+                vocabulary_missed_its_deadline = true;
+                Default::default()
+            }
+        }
     } else {
         Default::default()
     };
@@ -103,6 +120,13 @@ fn capture_pass(
     };
 
     let output = cairn_integrate::capture(agent, event, &payload, &env);
+    // The declines this pass produced are about the material *unless* the
+    // vocabulary they were judged against never arrived (FR-749c2).
+    let output = if vocabulary_missed_its_deadline {
+        output.caused_by_deadline()
+    } else {
+        output
+    };
     Captured {
         key,
         output: (!output.is_empty()).then_some(output),
@@ -120,17 +144,21 @@ fn fetch_vocabulary(
     cwd: &str,
     key: &str,
     deadline: Duration,
-) -> (
-    cairn_core::vocabulary::SessionVocabulary,
-    std::collections::BTreeMap<String, String>,
-) {
+) -> Result<
+    (
+        cairn_core::vocabulary::SessionVocabulary,
+        std::collections::BTreeMap<String, String>,
+    ),
+    String,
+> {
     let request = Request::CaptureVocabulary {
         cwd: cwd.to_string(),
         agent: agent.as_str().to_string(),
         agent_session_key: key.to_string(),
     };
-    let Ok(value) = client::send_blocking(&request, deadline) else {
-        return Default::default();
+    let value = match client::send_blocking(&request, deadline) {
+        Ok(value) => value,
+        Err(e) => return Err(e.message),
     };
     let vocabulary = value
         .get("vocabulary")
@@ -142,7 +170,7 @@ fn fetch_vocabulary(
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    (vocabulary, established)
+    Ok((vocabulary, established))
 }
 
 /// The repository root an absolute path is relativized against.
@@ -252,7 +280,7 @@ pub fn run_blocking(event: &str) -> bool {
         },
     };
     if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
-        log_drop(event, &e.message);
+        journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
     }
     true
 }
@@ -293,7 +321,7 @@ pub async fn run(event: &str) {
                 output,
             };
             if let Err(e) = client::send_oneway(&request, capture_deadline(&config)).await {
-                log_drop(event, &e.message);
+                journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
             }
         }
         return;
@@ -322,7 +350,7 @@ pub async fn run(event: &str) {
         // Capture class: fire and forget. A missed deadline is a dropped
         // event, not a failure (FR-015, FR-193).
         if let Err(e) = client::send_oneway(&request, deadline).await {
-            log_drop(event, &e.message);
+            journal_capture_drop(agent, &cwd, event, dropped_kind(&request), &e.message);
         }
         return;
     }
@@ -697,6 +725,62 @@ fn log_drop(event: &str, reason: &str) {
             "{} hook {event} dropped: {reason}",
             chrono::Utc::now().to_rfc3339()
         );
+    }
+}
+
+/// A capture-class event this process could not hand to the daemon in time.
+///
+/// **The half of FR-749b that FR-749c is about.** Dropping the event is
+/// permitted and the hook still exits zero; being quiet about it is not. A line
+/// in `cairn.log` is not a record — nothing reads it, no counter moves, and
+/// capture health reports the agent's success with no trace of Cairn's loss. It
+/// is journalled here so the daemon can count it as
+/// `capture_deadline_exceeded`, which is the vocabulary the whole funnel already
+/// speaks (`data-model.md` §4).
+///
+/// Best-effort by construction, and it must be: this runs on the path where
+/// something was already unreachable, and a hook that failed to report a drop
+/// must still not fail the agent (FR-749b). Every error is swallowed for that
+/// reason and for no other.
+///
+/// Carries no payload content (FR-749d): the agent, the vendor event name, the
+/// canonical kind where the adapter determined one, and the working directory
+/// the daemon resolves to a project.
+fn journal_capture_drop(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    vendor_event: &str,
+    kind: Option<&str>,
+    reason: &str,
+) {
+    use std::io::Write;
+    log_drop(vendor_event, reason);
+    let _ = cairn_core::paths::ensure_home();
+    let line = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "cwd": cwd,
+        "agent": agent.as_str(),
+        "vendor_event": vendor_event,
+        "kind": kind,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cairn_core::paths::capture_drop_journal_path())
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// The canonical kind a request would have carried, for a drop record.
+///
+/// `None` for a capture-only request: the adapter produced no lifecycle event,
+/// so there is no single canonical kind to name and inventing one would file the
+/// loss under something that never existed.
+fn dropped_kind(request: &Request) -> Option<&'static str> {
+    match request {
+        Request::CanonicalEvent { event, .. } => Some(event.event.as_str()),
+        _ => None,
     }
 }
 

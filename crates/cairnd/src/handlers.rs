@@ -1559,7 +1559,7 @@ async fn integration_mode(d: &Daemon) -> String {
 /// underscores because that is what a key-shaped wire value reads well — and
 /// this is the one place the two meet. Both spellings are accepted so a caller
 /// need not know which side of the boundary it is on.
-fn event_agent(name: &str) -> Option<cairn_core::event::EventAgent> {
+pub(crate) fn event_agent(name: &str) -> Option<cairn_core::event::EventAgent> {
     use cairn_core::event::EventAgent;
     match name {
         "claude-code" | "claude_code" => Some(EventAgent::ClaudeCode),

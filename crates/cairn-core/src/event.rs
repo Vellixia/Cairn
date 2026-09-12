@@ -832,6 +832,24 @@ pub struct CaptureDecline {
     pub kind: EventKind,
     pub stage: PipelineStage,
     pub reason: DeclineReason,
+    /// This decline was caused by Cairn's own deadline, not by the material
+    /// (FR-749c2).
+    ///
+    /// **The same reason, two findings.** A mapping declines with
+    /// `insufficient_vocabulary` when the session's derived vocabulary cannot
+    /// justify a token — and it declines with the *same* reason when the
+    /// vocabulary could not be fetched at all, because an unfetched vocabulary
+    /// justifies nothing. One of those is a lexicon that is genuinely too thin,
+    /// which repeats on every run of a frozen corpus and is a real finding about
+    /// the content; the other is this machine being slow, which says nothing
+    /// about the content and is the loss FR-749c requires Cairn to own. Counting
+    /// both as `declined_by_policy` makes the decline rate uninterpretable,
+    /// which is precisely what FR-749c exists to prevent.
+    ///
+    /// Absent on the wire when false, so a decline that was about the content
+    /// serializes exactly as it did before this field existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deadline_exceeded: bool,
 }
 
 /// Everything one vendor event produced.
@@ -867,7 +885,28 @@ impl CaptureOutput {
             kind,
             stage: PipelineStage::EventParsed,
             reason,
+            // The adapter cannot know: it is handed a vocabulary and has no way
+            // to tell an empty one from an unfetched one. The caller that
+            // fetched it does, and marks the declines it caused
+            // ([`CaptureOutput::caused_by_deadline`]).
+            deadline_exceeded: false,
         });
+        self
+    }
+
+    /// Mark every `insufficient_vocabulary` decline as this machine's own
+    /// deadline rather than a judgement about the material (FR-749c2).
+    ///
+    /// Applied by the process that *attempted the fetch*, because it is the only
+    /// one that knows the attempt failed. Scoped to that one reason on purpose:
+    /// a decline the adapter reached for any other cause is a decision about the
+    /// content and stays one, whatever else was slow at the time.
+    pub fn caused_by_deadline(mut self) -> Self {
+        for decline in &mut self.declines {
+            if decline.reason == DeclineReason::InsufficientVocabulary {
+                decline.deadline_exceeded = true;
+            }
+        }
         self
     }
 
@@ -887,6 +926,14 @@ impl CaptureDecline {
     /// different actions — one is a rule working, the other is a lexicon or a
     /// vocabulary that is too thin to be useful.
     pub fn disposition(&self) -> Disposition {
+        // Cairn's own deadline outranks the reason (FR-749c, FR-749c2). The
+        // reason vocabulary is closed by `data-model.md` §4 and has no member
+        // for a deadline, so the honest place to say it is the disposition —
+        // which is the field capture health, the funnel and the
+        // `capture_declined` event all read.
+        if self.deadline_exceeded {
+            return Disposition::CaptureDeadlineExceeded;
+        }
         match self.reason {
             DeclineReason::NoSafeSemanticMapping => Disposition::NoSafeSemanticMapping,
             DeclineReason::PolicyExcluded => Disposition::DeclinedByPolicy,
@@ -914,5 +961,110 @@ impl CaptureDecline {
                 decline_reason: self.reason,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod capture_decline_tests {
+    use super::*;
+
+    fn declined(reason: DeclineReason) -> CaptureOutput {
+        CaptureOutput::default().declined(EventKind::DecisionSignal, reason)
+    }
+
+    /// A decline caused by Cairn's own deadline is reported as Cairn's loss,
+    /// not as a judgement about the material (FR-749c, FR-749c2).
+    ///
+    /// The reason vocabulary is closed by `data-model.md` §4 and has no member
+    /// for a deadline, so `insufficient_vocabulary` is what a mapping says
+    /// whether the vocabulary was thin or never arrived. The disposition is
+    /// where the two are told apart, and it is the field capture health, the
+    /// funnel and the `capture_declined` event all read.
+    ///
+    /// Falsified by dropping the `deadline_exceeded` arm from `disposition()`:
+    /// a deadline drop is reported as `declined_by_policy` and the decline rate
+    /// stops being interpretable, which is the state FR-749c forbids.
+    #[test]
+    fn a_deadline_caused_decline_is_not_reported_as_a_policy_decline() {
+        let content = declined(DeclineReason::InsufficientVocabulary);
+        assert_eq!(
+            content.declines[0].disposition(),
+            Disposition::DeclinedByPolicy,
+            "a vocabulary that is genuinely too thin is a decision about the material"
+        );
+
+        let deadline = declined(DeclineReason::InsufficientVocabulary).caused_by_deadline();
+        assert_eq!(
+            deadline.declines[0].disposition(),
+            Disposition::CaptureDeadlineExceeded,
+            "a decline reached because the vocabulary never arrived was reported as a \
+             decision about the material"
+        );
+        assert_eq!(
+            deadline.declines[0].reason,
+            DeclineReason::InsufficientVocabulary,
+            "the closed reason vocabulary was altered to carry the deadline"
+        );
+    }
+
+    /// Marking the pass does not reclassify declines that were never about the
+    /// vocabulary.
+    ///
+    /// The mark is applied to a whole capture pass, and a pass can produce more
+    /// than one decline. A policy exclusion or a mapping that found nothing safe
+    /// to say is a decision about the content whatever else was slow at the
+    /// time, and relabelling it would trade one uninterpretable rate for
+    /// another.
+    ///
+    /// Falsified by marking every decline instead of the
+    /// `insufficient_vocabulary` ones.
+    #[test]
+    fn a_content_decline_keeps_its_disposition_when_the_vocabulary_was_late() {
+        let out = CaptureOutput::default()
+            .declined(
+                EventKind::DecisionSignal,
+                DeclineReason::InsufficientVocabulary,
+            )
+            .declined(EventKind::DecisionSignal, DeclineReason::PolicyExcluded)
+            .declined(
+                EventKind::DecisionSignal,
+                DeclineReason::NoSafeSemanticMapping,
+            )
+            .caused_by_deadline();
+        let dispositions: Vec<Disposition> = out
+            .declines
+            .iter()
+            .map(CaptureDecline::disposition)
+            .collect();
+        assert_eq!(
+            dispositions,
+            vec![
+                Disposition::CaptureDeadlineExceeded,
+                Disposition::DeclinedByPolicy,
+                Disposition::NoSafeSemanticMapping,
+            ],
+            "a decline about the content was relabelled as this machine's deadline"
+        );
+    }
+
+    /// The field is absent on the wire when it is false (FR-749c2).
+    ///
+    /// A decline that was about the content must serialize exactly as it did
+    /// before the field existed: `CaptureDecline` is `deny_unknown_fields`, so a
+    /// field that always appeared would be refused by any peer that predates it.
+    #[test]
+    fn an_ordinary_decline_serializes_without_the_deadline_field() {
+        let ordinary = declined(DeclineReason::PolicyExcluded);
+        let text = serde_json::to_string(&ordinary.declines[0]).expect("serializes");
+        assert!(
+            !text.contains("deadline_exceeded"),
+            "a content decline carried the deadline field on the wire: {text}"
+        );
+        let marked = declined(DeclineReason::InsufficientVocabulary).caused_by_deadline();
+        let text = serde_json::to_string(&marked.declines[0]).expect("serializes");
+        assert!(
+            text.contains("\"deadline_exceeded\":true"),
+            "a deadline-caused decline did not carry the fact on the wire: {text}"
+        );
     }
 }

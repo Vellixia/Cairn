@@ -481,6 +481,12 @@ struct AgentReport {
     /// assertions, and only when one fails.
     trials_without_record: Vec<usize>,
     evidence_at_close: Vec<String>,
+    /// Capture-class events this machine dropped during the run (FR-749c).
+    ///
+    /// Asserted to be zero before the trials are graded, and carried into the
+    /// shortfall as well: a reader looking at "only 9/10" should not have to
+    /// take on faith that Cairn lost nothing.
+    dropped_by_cairn: String,
 }
 
 impl AgentReport {
@@ -488,8 +494,10 @@ impl AgentReport {
     /// consolidation was started on.
     fn shortfall(&self) -> String {
         format!(
-            "\n  trials without a record: {:?}\n  evidence held when the sessions were closed:\n    {}",
+            "\n  trials without a record: {:?}\n  capture-class events Cairn itself dropped: {}\n  \
+             evidence held when the sessions were closed:\n    {}",
             self.trials_without_record,
+            self.dropped_by_cairn,
             self.evidence_at_close.join("\n    ")
         )
     }
@@ -609,6 +617,50 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
             "trial {trial}: seq {span} complete={complete} [{kinds}]{declines}"
         ));
     }
+
+    // **A run in which Cairn lost a capture-class event is not a measurement of
+    // SC-701** (FR-749b, FR-749c).
+    //
+    // FR-749b permits the drop outright: a capture-class event that misses its
+    // deadline is dropped, the hook still exits zero, and the agent never
+    // learns. SC-701 says a session produces at least one durable record. Both
+    // cannot be unconditionally true, and the gap between them is what "only
+    // 9/10" was: one dropped `PostToolUse` costs the session its `file_changed`,
+    // R1 has no change between the failing and the passing test and emits
+    // nothing, the session's vocabulary is thinner so the closing semantic
+    // signal declines too — and the stream that arrives is *dense* and
+    // *terminated*, so the completeness check below cannot see it. A dropped
+    // event never receives a `session_seq`, so the sequence closes over the gap.
+    //
+    // `spec.md` §SC-701 now states the population: the criterion is measured
+    // over sessions in which Cairn dropped nothing of its own, and a run with a
+    // Cairn-side loss is **inconclusive** rather than a pass or an accuracy
+    // failure. Inconclusive has to fail a gate — a criterion that was not
+    // measured cannot be merged on — but it fails *by name*, which is the whole
+    // difference from the number this file used to report.
+    //
+    // It is answerable at all only because FR-749c is implemented now: the hook
+    // journals the drop and the daemon counts it as `capture_deadline_exceeded`
+    // (`cairnd::capture::collect_capture_drops`). Before that the disposition
+    // existed in every vocabulary and was produced by nothing, which is exactly
+    // why the historical decline reason was never recoverable.
+    let dropped = device
+        .sandbox
+        .query_column(
+            "SELECT CAST(COALESCE(SUM(n), 0) AS TEXT) FROM capture_disposition_counts               WHERE disposition = 'capture_deadline_exceeded'",
+        )
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "0".to_string());
+    let uncollected = device
+        .sandbox
+        .cairn_home()
+        .join("capture-drops.ndjson")
+        .exists();
+    assert!(
+        dropped == "0" && !uncollected,
+        "{agent}: inconclusive — this machine dropped {dropped} capture-class event(s)          before they reached the daemon (uncollected journal: {uncollected}), so the          evidence SC-701 measures was incomplete through no fault of capture or          extraction. FR-749b permits the drop; SC-701 is measured over sessions          without one. Re-run; if it repeats, the capture deadline is too tight for          this machine (FR-749a)."
+    );
 
     // **The invariant the forced completion below depends on, asserted where it
     // matters.**
@@ -818,6 +870,7 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         review_records,
         trials_without_record,
         evidence_at_close,
+        dropped_by_cairn: dropped,
     })
 }
 

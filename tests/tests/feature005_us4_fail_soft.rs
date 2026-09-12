@@ -385,3 +385,196 @@ fn an_outage_mid_session_costs_freshness_and_never_authority() {
          proved nothing"
     );
 }
+
+/// A capture-class event Cairn drops is still counted as Cairn's own loss
+/// (FR-749b, FR-749c, FR-749c1, SC-715).
+///
+/// **The pair this file exists for, in its sharpest form.** FR-749b says the
+/// hook must exit successfully, must not block the agent and may drop the event.
+/// FR-749c says the drop is nonetheless a capture failure in Cairn's account of
+/// itself and must not be silent: a local disposition distinguishing it from
+/// every other outcome, surfaced in capture health and counters. Satisfying the
+/// first alone is trivial — drop and say nothing — and that is exactly what was
+/// shipped: `capture_deadline_exceeded` existed in `data-model.md` §4's
+/// vocabulary, in both schemas' CHECK constraints, in the wire types and in the
+/// health funnel's own column, and **no code path anywhere produced one**. The
+/// only test that touched the value POSTed it at the API by hand, which proves
+/// the name is accepted and nothing about whether a drop is ever recorded.
+///
+/// The consequence was not theoretical. A dropped `PostToolUse` costs the
+/// session its `file_changed`, R1 then has no change between the failing and
+/// passing test and emits nothing, the session's vocabulary is thinner so the
+/// closing semantic signal declines as well — and a reviewer looking at why that
+/// session produced no durable record finds a stream that is *dense* and
+/// *terminated* and a health report that says capture is fine. This is the row
+/// that says otherwise.
+///
+/// The drop is made to happen rather than waited for: this one hook is pointed
+/// at an address nothing can bind, so its delivery fails on every machine and
+/// every run. No sleep is load-bearing.
+///
+/// Falsified by removing the journal append in `hook::journal_capture_drop`, or
+/// the `capture::collect_capture_drops` call from the worker tick: the hook
+/// still exits 0 and the count stays at zero, which is the shipped defect.
+#[test]
+fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
+    let s = Sandbox::new();
+    // Short, so the unreachable address is refused promptly rather than waited
+    // out. The deadline under test is Cairn's own; its value is not the claim.
+    s.set_deadlines(400, 15_000);
+
+    // A project to count against. `resolve` creates it from the repository, so
+    // no server and no link are involved: this is entirely a local-honesty
+    // claim, and it holds on a machine that has never seen a server.
+    s.must(&["init"]);
+
+    // An address nothing can reach **and nothing can bind**, which is the second
+    // half and the one that is platform-specific. A hook that finds no socket
+    // starts a daemon and waits for it, so an address the daemon could
+    // successfully bind would make this test pass by delivering the event. On
+    // Unix a path inside a directory that does not exist can be neither
+    // connected to nor bound; on Windows a pipe name containing a separator
+    // after the `\\.\pipe\` prefix is invalid for both.
+    #[cfg(unix)]
+    let unreachable = s.cairn_home().join("no-such-directory").join("socket");
+    #[cfg(windows)]
+    let unreachable = std::path::PathBuf::from(r"\\.\pipe\cairn-e2e\unbindable");
+    let before = s.query_column(
+        "SELECT CAST(COALESCE(SUM(n), 0) AS TEXT) FROM capture_disposition_counts \
+          WHERE disposition = 'capture_deadline_exceeded'",
+    );
+    assert_eq!(
+        before,
+        vec!["0".to_string()],
+        "this store already counted a deadline drop, so the assertion below \
+         would not be about this one"
+    );
+
+    let out = s.hook_in_with_env(
+        &s.repo_dir(),
+        "claude-code",
+        "PostToolUse",
+        json!({
+            "session_id": "faildrop-1",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/widget/parser.rs" },
+            "tool_response": { "exit_code": 0 },
+        }),
+        &[("CAIRN_SOCKET", unreachable.display().to_string().as_str())],
+    );
+
+    // FR-749b: the agent sees success.
+    assert_eq!(
+        out.code, 0,
+        "a capture hook whose delivery missed its deadline exited non-zero, \
+         which FR-749b forbids: stdout={} stderr={}",
+        out.stdout, out.stderr
+    );
+
+    // FR-749c: and Cairn knows it lost the event.
+    s.settle_within(
+        "the daemon to count the capture-class event this machine dropped",
+        Duration::from_secs(30),
+        |s| {
+            s.query_column(
+                "SELECT CAST(COALESCE(SUM(n), 0) AS TEXT) FROM capture_disposition_counts \
+                  WHERE disposition = 'capture_deadline_exceeded'",
+            ) != vec!["0".to_string()]
+        },
+    );
+    // Once, not once per tick. **Asserted as an exact count and by the
+    // mechanism**, rather than by waiting a while and looking again: the
+    // collector reads the journal and removes it, so a journal that is gone is
+    // proof no later tick can count the same loss — which a sleep of any length
+    // would only make probable.
+    assert_eq!(
+        s.query_column(
+            "SELECT CAST(COALESCE(SUM(n), 0) AS TEXT) FROM capture_disposition_counts \
+              WHERE disposition = 'capture_deadline_exceeded'",
+        ),
+        vec!["1".to_string()],
+        "one dropped event, counted a different number of times"
+    );
+
+    // FR-749d: the record carries the kind, the agent and nothing from the
+    // payload. `tool_input.file_path` is the one piece of content this payload
+    // had; the whole table is counts, so the assertion is that the columns are
+    // the four the requirement names and the path is in none of them.
+    let counted = s.query_column(
+        "SELECT agent || '/' || kind || '/' || disposition FROM capture_disposition_counts \
+          WHERE disposition = 'capture_deadline_exceeded'",
+    );
+    assert_eq!(
+        counted,
+        vec!["claude_code/tool_succeeded/capture_deadline_exceeded".to_string()],
+        "the drop was counted under the wrong agent, kind or disposition"
+    );
+
+    assert!(
+        !cairn_e2e::journal_exists(&s),
+        "the hook's drop journal survived collection, so every later tick would \
+         count the same loss again"
+    );
+}
+
+/// A decline about the *content* is never reported as a deadline drop.
+///
+/// The other half of FR-749c/FR-749c1's "distinguishing it from other outcomes", and the
+/// half a one-sided fix would break: if every decline were counted as a deadline
+/// drop the funnel would be honest about loss and useless about cause. A
+/// reachable daemon and an ordinary capture produce no
+/// `capture_deadline_exceeded` row at all.
+///
+/// Falsified by counting a drop unconditionally rather than on the delivery
+/// failure: this turns red while the test above still passes.
+#[test]
+fn an_ordinary_capture_records_no_deadline_drop() {
+    let s = Sandbox::new();
+    s.must(&["init"]);
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "faildrop-2", "source": "startup" }),
+    );
+    let out = s.hook(
+        "PostToolUse",
+        json!({
+            "session_id": "faildrop-2",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/widget/parser.rs" },
+            "tool_response": { "exit_code": 0 },
+        }),
+    );
+    assert_eq!(out.code, 0, "the hook failed: {}", out.stderr);
+
+    // The daemon actually received it, so this is not vacuous: a capture that
+    // never arrived would also record no deadline drop, and that is the state
+    // this test has to be able to tell apart from a healthy one. A disposition
+    // counted against the event is the daemon's own receipt for it — which one
+    // it is does not matter here, only that the daemon wrote it.
+    s.settle_within(
+        "the daemon to record a disposition for the delivered event",
+        Duration::from_secs(20),
+        |s| {
+            !s.query_column(
+                "SELECT disposition FROM capture_disposition_counts WHERE kind = 'file_changed'",
+            )
+            .is_empty()
+        },
+    );
+    // No sleep before this. The hook journals a drop only when a delivery
+    // failed, so a delivery that succeeded leaves nothing for any later tick to
+    // collect — the absent journal is the proof, and waiting would only make the
+    // same claim weaker.
+    assert!(
+        !cairn_e2e::journal_exists(&s),
+        "a capture that was delivered nonetheless left a drop in the journal"
+    );
+    assert_eq!(
+        s.query_column(
+            "SELECT CAST(COALESCE(SUM(n), 0) AS TEXT) FROM capture_disposition_counts \
+              WHERE disposition = 'capture_deadline_exceeded'",
+        ),
+        vec!["0".to_string()],
+        "a capture that was delivered was nonetheless counted as a deadline drop"
+    );
+}

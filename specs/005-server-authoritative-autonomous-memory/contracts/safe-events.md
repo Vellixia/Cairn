@@ -280,6 +280,25 @@ not what Cairn is permitted to know about itself.
 The disposition record carries the kind, agent and session, and nothing from the payload being
 processed when the deadline expired (FR-749d).
 
+**Where the record comes from** (FR-749c1). The drop is detected by the hook, which is a
+short-lived process with no store; the counters live in the daemon, which never received the
+delivery that failed. Neither can record it alone, and for one release neither did: the
+`capture_deadline_exceeded` value existed in this vocabulary, in both schemas' CHECK
+constraints and in the health funnel's own column while no code path anywhere produced one. So
+the hook appends the drop to a local journal — an append is the one write that still works when
+the daemon is gone — and the daemon collects it on its next tick into the same
+`capture_disposition_counts` every other outcome uses. Journalling never fails the hook
+(FR-749b), and collection is read-then-remove so a drop is counted once.
+
+**A decline Cairn's own deadline caused is not a decline about the content** (FR-749c2). A
+semantic mapping declines with `insufficient_vocabulary` both when the session's vocabulary is
+genuinely too thin and when it could not be fetched in time, because an unfetched vocabulary
+justifies nothing. The reason vocabulary is closed (`data-model.md` §4) and has no member for a
+deadline, so the *disposition* is where the two are told apart: a decline reached because the
+fetch missed its deadline is counted `capture_deadline_exceeded`, and the `capture_declined`
+event carries that disposition. Without the distinction the decline rate cannot be read — a
+frozen corpus's repeatable refusal and one slow machine look identical.
+
 ## 10. What never crosses
 
 Raw vendor payloads, conversation transcripts, raw tool output, secrets, absolute local paths,

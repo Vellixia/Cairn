@@ -340,6 +340,11 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         // trying again next tick — and an agent must never be blocked or slowed
         // by a server that is not there (FR-781).
         //
+        // Capture-class events this machine dropped before they ever reached
+        // here, counted from the hook's journal (FR-749c, FR-749c1). It touches
+        // neither spool and is ordered ahead of them only for readability.
+        let _ = crate::capture::collect_capture_drops(&daemon).await;
+
         // Events first: a command may reference knowledge a consolidated event
         // produced, and delivering commands ahead of the events behind them
         // would make the server see the reference before the thing referenced.
@@ -504,7 +509,17 @@ async fn process_global_namespace(
         // every tick; it is not the sole occasion on which a read occurs.
         clock.mark_probed(now);
         match drain_global(d, namespace).await {
-            Ok((applied, duplicate, rejected)) => {
+            // `hold` is deliberately not consulted here. A hold is *designed*
+            // behaviour rather than a failed pass — a lane whose queue belongs
+            // to a logged-out author is doing exactly what FR-594 asks — so it
+            // is reported by `sync_now` and changes nothing about what counts as
+            // a successful drain. Stated so the omission reads as a decision.
+            Ok(GlobalDrain {
+                applied,
+                duplicate,
+                rejected,
+                hold: _,
+            }) => {
                 if applied + duplicate > 0 {
                     tracing::info!(
                         namespace = %key, applied, duplicate, rejected,
@@ -1089,7 +1104,15 @@ struct AuthenticatedContext {
     /// wrong in a way that mattered: `project.linked` says this machine once
     /// linked a project, which is a fact about this machine's past and not about
     /// whether the account now holding the token may act in that project.
-    memberships: tokio::sync::OnceCell<Vec<Uuid>>,
+    ///
+    /// `None` inside the cell is **"the question could not be answered"**, which
+    /// is not the same claim as "this account belongs to nothing". Both hold the
+    /// batch and both are right to, but only one of them is a fact about the
+    /// account — and a drain that reported the second when it meant the first
+    /// wrote `no authorization project for this account` into `last_error` about
+    /// an account that belongs to several. Kept apart so the hold can say which
+    /// it was; what the drain *does* is unchanged.
+    memberships: tokio::sync::OnceCell<Option<Vec<Uuid>>>,
 }
 
 impl AuthenticatedContext {
@@ -1191,31 +1214,32 @@ impl AuthenticatedContext {
     ///
     /// Fetched once per context and cached, so an operation that asks twice gets
     /// one answer rather than two that might differ.
-    async fn memberships(&self) -> &[Uuid] {
+    async fn memberships(&self) -> Option<&Vec<Uuid>> {
         self.memberships
             .get_or_init(|| async {
-                let Ok(body) = self.client.get("/api/projects").await else {
-                    return Vec::new();
-                };
-                body.get("projects")
-                    .and_then(|v| v.as_array())
-                    .map(|rows| {
-                        let mut ids: Vec<Uuid> = rows
-                            .iter()
-                            .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
-                            .filter_map(|s| Uuid::parse_str(s).ok())
-                            .collect();
-                        ids.sort();
-                        ids
-                    })
-                    .unwrap_or_default()
+                let body = self.client.get("/api/projects").await.ok()?;
+                let rows = body.get("projects").and_then(|v| v.as_array())?;
+                let mut ids: Vec<Uuid> = rows
+                    .iter()
+                    .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+                    .filter_map(|s| Uuid::parse_str(s).ok())
+                    .collect();
+                ids.sort();
+                Some(ids)
             })
             .await
+            .as_ref()
     }
 
     /// Whether this account is a member of `server_project_id`, per the server.
+    ///
+    /// An unanswerable question is not a membership. Fail-closed here is the
+    /// same answer the previous empty-vector fallback gave, and it is now the
+    /// answer on purpose rather than by coincidence.
     async fn is_member_of(&self, server_project_id: Uuid) -> bool {
-        self.memberships().await.contains(&server_project_id)
+        self.memberships()
+            .await
+            .is_some_and(|mine| mine.contains(&server_project_id))
     }
 
     /// Whether this operation may act on `namespace` at all — for pushing and for
@@ -1317,22 +1341,32 @@ async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
 }
 
 /// Every global lane this store may synchronize as the account it currently
-/// holds, established first so a freshly authenticated store has lanes to return.
+/// holds, established first so a freshly authenticated store has lanes to
+/// return — **and the ones it may not**.
 ///
 /// Both entry points — `cairn sync now` and the background worker — route through
-/// this, so neither can acquire a lane the other would refuse.
-async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
+/// [`may_sync_lane`], so neither can acquire a lane the other would refuse.
+///
+/// The second half is the part that used to be dropped on the floor. A lane
+/// refused by [`may_sync_lane`] and a lane that does not exist are the same
+/// absence from a list of lanes to act on, and they are not the same fact: one
+/// is a store holding another identity's knowledge exactly as §10 intends, and
+/// the other is a store that never established a lane at all. The caller reports
+/// them, so "sync now did nothing" can say which.
+async fn global_lane_targets(d: &Daemon) -> (Vec<SyncNamespace>, Vec<String>) {
     let _ = establish_global_namespaces(d).await;
-    let mut out = Vec::new();
+    let (mut syncable, mut withheld) = (Vec::new(), Vec::new());
     for namespace in cursor::established(&d.store).await.unwrap_or_default() {
         if matches!(namespace, SyncNamespace::Project(_)) {
             continue;
         }
         if may_sync_lane(d, &namespace).await {
-            out.push(namespace);
+            syncable.push(namespace);
+        } else {
+            withheld.push(namespace.key());
         }
     }
-    out
+    (syncable, withheld)
 }
 
 /// What one pulled row's merge attempt means for the pull cursor.
@@ -3107,13 +3141,44 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
     //
     // Lanes are established first, because a store authenticated since the last
     // establish window has none yet and there would be nothing to drain.
-    for namespace in syncable_global_lanes(d).await {
-        if let Ok((a, dup, rej)) = drain_global(d, &namespace).await {
-            applied += a;
-            duplicate += dup;
-            rejected += rej;
-        }
-        pulled += pull_global(d, &namespace).await.unwrap_or(0);
+    // **Per lane, and said rather than inferred from a zero** (FR-792's rule
+    // applied to the command that does the delivering). Four of the five ways a
+    // global lane can move nothing are a delivery that did not happen, and the
+    // aggregate counts below cannot tell any of them from an empty queue — nor
+    // from a lane this command never looked at, which is its own answer and the
+    // one that is invisible without this. A test or an operator asking "why did
+    // my proposal not go out" reads this; before it, there was nothing to read.
+    let mut lanes: Vec<serde_json::Value> = Vec::new();
+    let (syncable, withheld) = global_lane_targets(d).await;
+    for namespace in syncable {
+        let key = namespace.key();
+        let (drained, error) = match drain_global(d, &namespace).await {
+            Ok(drained) => {
+                applied += drained.applied;
+                duplicate += drained.duplicate;
+                rejected += drained.rejected;
+                (Some(drained), None)
+            }
+            // Still not fatal to the command — one lane's unreachable server
+            // says nothing about the next lane — but no longer discarded
+            // either: a push that failed is not a push that found nothing.
+            Err(e) => (None, Some(e.message)),
+        };
+        let lane_pulled = pull_global(d, &namespace).await.unwrap_or(0);
+        pulled += lane_pulled;
+        lanes.push(json!({
+            "namespace": key,
+            "applied": drained.as_ref().map(|d| d.applied).unwrap_or(0),
+            "duplicate": drained.as_ref().map(|d| d.duplicate).unwrap_or(0),
+            "rejected": drained.as_ref().map(|d| d.rejected).unwrap_or(0),
+            "pulled": lane_pulled,
+            "hold": drained
+                .as_ref()
+                .map(|d| d.hold)
+                .unwrap_or(LaneHold::None)
+                .as_str(),
+            "error": error,
+        }));
     }
 
     Ok(json!({
@@ -3125,6 +3190,16 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         // put because this credential may not push it" and "there was nothing
         // to push" are different answers.
         "project_forbidden": project_refused,
+        // The account every lane above was routed and filtered by. `null` means
+        // this machine could not establish who it is, which is the one state in
+        // which *every* global lane is skipped and the list above is empty for a
+        // reason that has nothing to do with any lane (FR-603).
+        "account": d.account_identity().await.map(|a| a.to_string()),
+        "lanes": lanes,
+        // Lanes this store holds and this credential may not act on. Reported
+        // because "the lane was skipped" and "the lane had nothing" are
+        // different answers and both used to render as silence (FR-593).
+        "lanes_withheld": withheld,
     }))
 }
 
@@ -3340,7 +3415,7 @@ async fn drain(
 /// and the drain holds its work rather than sending a batch that cannot be
 /// authorized.
 async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Option<Uuid> {
-    let mine = context.memberships().await;
+    let mine = context.memberships().await?;
     if mine.is_empty() {
         return None;
     }
@@ -3803,14 +3878,87 @@ const KNOWLEDGE_BEARING: &[&str] = &[
     "team_knowledge_relation",
 ];
 
-async fn drain_global(
-    d: &Daemon,
-    namespace: &SyncNamespace,
-) -> Result<(usize, usize, usize), WireError> {
+/// Why a global lane moved nothing, when it moved nothing.
+///
+/// **`applied 0` had five meanings and no way to tell them apart.** A lane this
+/// store has begun migrating past, a lane this credential may not touch, a lane
+/// whose only queued work belongs to a logged-out identity, a batch held because
+/// the account belongs to no project the route would authorize, and a lane with
+/// an empty queue all reported the same two words. Four of those are a delivery
+/// that did not happen; the fifth is nothing to deliver. Principle X does not
+/// let a report say "nothing happened" when what it means is "I declined to act
+/// and did not say so".
+///
+/// It is also what makes the FR-594 hold *observable*: a proposal held for its
+/// absent author and a proposal silently skipped look identical from outside,
+/// and only one of them is the behaviour that requirement asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaneHold {
+    /// Nothing was withheld. Either work went out, or the lane's queue is empty
+    /// for this account and for everyone else.
+    None,
+    /// This store has begun migrating, so the pre-005 write path is closed and
+    /// the migration owns the transfer (FR-877).
+    Migrating,
+    /// The credential does not admit this lane: another account's `personal:*`,
+    /// or a lane bound to another server instance (FR-495, FR-496, FR-598).
+    NotAdmitted,
+    /// Rows are queued here and none of them are this account's to send
+    /// (FR-594). The lane is *held*, not idle, and it moves the moment its
+    /// author is authenticated again.
+    AnotherAuthor,
+    /// The authenticated account belongs to no project `POST /api/sync/batch`
+    /// would authorize, so the batch went back to `pending` (FR-595).
+    NoAuthorizationProject,
+    /// The server could not be asked which projects this account belongs to, so
+    /// the batch went back to `pending` for a reason that is about the network
+    /// and not about the account.
+    ///
+    /// The drain does the same thing in both cases and should: the rows are not
+    /// at fault either way. What differs is what a person reading
+    /// `cairn sync now` is told, and "this account belongs to no project" about
+    /// an account that belongs to several sends them to look at memberships
+    /// instead of at the server.
+    MembershipUnknown,
+}
+
+impl LaneHold {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LaneHold::None => "none",
+            LaneHold::Migrating => "migrating",
+            LaneHold::NotAdmitted => "not_admitted",
+            LaneHold::AnotherAuthor => "another_author",
+            LaneHold::NoAuthorizationProject => "no_authorization_project",
+            LaneHold::MembershipUnknown => "membership_unknown",
+        }
+    }
+}
+
+/// What one global lane's drain did, and what it withheld.
+pub(crate) struct GlobalDrain {
+    pub(crate) applied: usize,
+    pub(crate) duplicate: usize,
+    pub(crate) rejected: usize,
+    pub(crate) hold: LaneHold,
+}
+
+impl GlobalDrain {
+    fn held(hold: LaneHold) -> Self {
+        GlobalDrain {
+            applied: 0,
+            duplicate: 0,
+            rejected: 0,
+            hold,
+        }
+    }
+}
+
+async fn drain_global(d: &Daemon, namespace: &SyncNamespace) -> Result<GlobalDrain, WireError> {
     // A `personal:*` or `team:*` lane carries nothing but knowledge, so the
     // whole lane stops once this store has begun migrating.
     if !legacy_writes_are_open(d).await {
-        return Ok((0, 0, 0));
+        return Ok(GlobalDrain::held(LaneHold::Migrating));
     }
 
     // Same single-drainer discipline `drain` uses, and the same lock: claiming
@@ -3835,7 +3983,7 @@ async fn drain_global(
     let context = AuthenticatedContext::acquire(d).await?;
     if !context.admits(namespace) {
         context.refuse(namespace, "pushing");
-        return Ok((0, 0, 0));
+        return Ok(GlobalDrain::held(LaneHold::NotAdmitted));
     }
 
     let capability = capability_from(&context.version, d, namespace).await;
@@ -3858,12 +4006,32 @@ async fn drain_global(
     let mut auth_project: Option<Uuid> = None;
 
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
+    let mut hold = LaneHold::None;
 
     loop {
         let batch = outbox::claim_namespace_for_author(&d.store, &key, author, BATCH)
             .await
             .map_err(storage_err)?;
         if batch.is_empty() {
+            // **An empty claim is two different states** (FR-594). A lane with
+            // nothing queued and a lane whose whole queue belongs to an account
+            // that is not signed in both claim nothing, and only the second is a
+            // held delivery. Asked once, and only when the claim came back
+            // empty, so an ordinary idle lane pays one local `COUNT` and a busy
+            // one pays nothing.
+            if applied + duplicate + rejected == 0 {
+                let (pending, _) = outbox::counts_namespace(&d.store, &key)
+                    .await
+                    .map_err(storage_err)?;
+                if pending > 0 {
+                    hold = LaneHold::AnotherAuthor;
+                    tracing::info!(
+                        namespace = %key, account = %author, pending,
+                        "holding this lane's queued work: none of it was authored \
+                         by the authenticated account"
+                    );
+                }
+            }
             break;
         }
 
@@ -3872,7 +4040,9 @@ async fn drain_global(
         // (FR-597).
         let c = &context.client;
 
+        let mut membership_known = true;
         if auth_project.is_none() {
+            membership_known = context.memberships().await.is_some();
             auth_project = authorization_project(&context, d).await;
         }
         let Some(project_id) = auth_project else {
@@ -3880,12 +4050,28 @@ async fn drain_global(
             // `pending` rather than counting as failures: the account will belong
             // to a project, or a different account will log in, and neither is
             // this row's fault.
-            tracing::debug!(
-                namespace = %key,
-                "holding this batch: the authenticated account belongs to no project \
-                 the sync route would authorize"
+            // **`info`, not `debug`.** This is a delivery that silently did not
+            // happen: the rows go back to `pending`, the drain reports success,
+            // and nothing else anywhere says the queue did not move. A default
+            // log level that omits the one line naming the reason is the same
+            // silence FR-792 exists to remove.
+            let (reason, why) = if membership_known {
+                (
+                    LaneHold::NoAuthorizationProject,
+                    "no authorization project for this account",
+                )
+            } else {
+                (
+                    LaneHold::MembershipUnknown,
+                    "could not read this account's project membership from the server",
+                )
+            };
+            tracing::info!(
+                namespace = %key, account = %author, hold = reason.as_str(),
+                "holding this batch: {why}"
             );
-            release(d, &batch, "no authorization project for this account").await?;
+            release(d, &batch, why).await?;
+            hold = reason;
             break;
         };
 
@@ -3969,7 +4155,12 @@ async fn drain_global(
             "work retained for a server that cannot hold it yet"
         );
     }
-    Ok((applied, duplicate, rejected))
+    Ok(GlobalDrain {
+        applied,
+        duplicate,
+        rejected,
+        hold,
+    })
 }
 
 /// Ask the server what it can hold, and release anything it now can (T111,

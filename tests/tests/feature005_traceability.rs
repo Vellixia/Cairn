@@ -264,7 +264,16 @@ fn the_fr_and_sc_inventories_are_unique_and_the_recorded_counts() {
     // strictly increasing version, which a sequence satisfies while still
     // letting a client advance its cursor past a change that commits later.
     // 278 -> 279.
-    const EXPECTED_FR: usize = 279;
+    // FR-749c1/FR-749c2 added with the deadline-drop record. FR-749c required a
+    // `capture_deadline_exceeded` disposition surfaced in capture health, and
+    // the value existed in every vocabulary, both schemas' CHECK constraints and
+    // the health funnel's own column while **no code path produced one** — the
+    // hook that detects the drop holds no store and the daemon never saw the
+    // delivery that failed, and the requirement said nothing about the gap
+    // between them. FR-749c1 states it (journal, collect, idempotent, never
+    // fails the hook); FR-749c2 states that a decline caused by Cairn's own
+    // deadline is not a decline about the content. 279 -> 281.
+    const EXPECTED_FR: usize = 281;
     const EXPECTED_SC: usize = 64;
     assert_eq!(
         fr_list.len(),

@@ -627,3 +627,109 @@ pub async fn spool_safe_events(
     }
     Ok(summary)
 }
+
+// ---------------------------------------------------------------------------
+// Capture drops the hook could not report (FR-749c)
+// ---------------------------------------------------------------------------
+
+/// Count every capture drop the hook journalled, then clear the journal.
+///
+/// **Where `capture_deadline_exceeded` comes from.** The disposition is named
+/// by FR-749c, is in `data-model.md` §4's closed vocabulary, is admitted by both
+/// schemas' CHECK constraints and has a column of its own in the health funnel —
+/// and until this function existed nothing in the product ever produced one. A
+/// capture-class event that missed its deadline was dropped (which FR-749b
+/// permits), the hook exited zero (which FR-749b requires), and Cairn's own
+/// account of itself recorded nothing at all (which FR-749c forbids). The agent
+/// saw success; so did capture health.
+///
+/// The hook cannot count it — it is a short-lived process with no store — and
+/// the daemon cannot count what never reached it, so the two are joined by a
+/// journal file the hook appends to and this drains.
+///
+/// **Read-then-truncate, and the window is stated rather than hidden.** A line
+/// appended between the read and the truncate is lost, and losing a *count* of
+/// drops is a smaller harm than double-counting one or than holding a lock on
+/// the capture fast path: the hook's append must never block on this, because
+/// the hook runs when something is already unreachable. The file is removed
+/// rather than emptied so an ordinary session leaves nothing behind.
+///
+/// Every failure here is swallowed. A daemon that cannot collect drop records
+/// must not stop draining the spools beside it.
+pub async fn collect_capture_drops(d: &crate::state::Daemon) -> usize {
+    let path = cairn_core::paths::capture_drop_journal_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    if std::fs::remove_file(&path).is_err() {
+        // Could not clear it: stop rather than count the same drops again on
+        // every tick forever.
+        return 0;
+    }
+
+    let mut counted = 0usize;
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let cwd = entry
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let Some(project_id) = d.resolve(cwd).await.ok().map(|r| r.project.id) else {
+            // No project for that directory any more. The drop is real and
+            // there is nowhere honest to count it, so it is reported here and
+            // not filed under some other project.
+            tracing::info!(
+                "a journalled capture drop names a directory this store no longer \
+                 resolves to a project; it is not counted"
+            );
+            continue;
+        };
+        // **The funnel's own spelling, not the CLI's.** `AgentId::as_str` is
+        // `claude-code` and `EventAgent::as_str` is `claude_code`, and every
+        // other row in this table carries the second. Writing the first here
+        // would file a drop under an agent the rest of capture health does not
+        // recognize — a loss recorded in a place nobody looks is the silence
+        // FR-749c is about, arrived at one step later. An agent outside the
+        // capture population is reported rather than invented.
+        let Some(agent) = entry
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .and_then(crate::handlers::event_agent)
+        else {
+            tracing::info!("a journalled capture drop names an agent this build does not capture from; it is not counted");
+            continue;
+        };
+        let agent = agent.as_str();
+        // The canonical kind when the adapter had already determined one, and
+        // the vendor event name when it had not. Never invented: a capture-only
+        // drop genuinely has no canonical kind, and filing it under one would
+        // put a loss in a row that describes something else.
+        let kind = entry
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .or_else(|| entry.get("vendor_event").and_then(|v| v.as_str()))
+            .unwrap_or("unknown");
+        if spool::record_disposition(
+            &d.store,
+            project_id,
+            agent,
+            kind,
+            Disposition::CaptureDeadlineExceeded,
+        )
+        .await
+        .is_ok()
+        {
+            counted += 1;
+        }
+    }
+    if counted > 0 {
+        tracing::info!(
+            drops = counted,
+            "counted capture-class events this machine dropped before they reached \
+             the daemon (FR-749c)"
+        );
+    }
+    counted
+}

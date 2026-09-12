@@ -650,6 +650,16 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
     // B logs in on this machine while A's proposal is still undelivered.
     attach_server(&a.sandbox, &server, &b.token);
 
+    // **And every drain that was running as A has finished.** Waiting for the
+    // delivery above settles what had already been *queued*; it does not settle
+    // a drain that is still inside `AuthenticatedContext` holding A's
+    // credential, which by design keeps acting as A until it returns (FR-597).
+    // Such a drain claiming after the reset below would deliver the proposal as
+    // A — correct behaviour, and a second state for this fixture to have to
+    // account for. `sync now` takes the same per-process drain lock, so when it
+    // returns there is no drain left holding the previous credential.
+    a.sandbox.must(&["sync", "now"]);
+
     // That precondition is *constructed* rather than raced for. Undoing the
     // delivery on both sides restores exactly the state the defect needs: a
     // queued proposal authored by A, on a shared lane, with B authenticated.
@@ -701,7 +711,13 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
 
     // A returns, and the proposal goes out under its own author.
     attach_server(&a.sandbox, &server, &a.token);
-    a.sandbox.must(&["sync", "now"]);
+    // **The command's own answer, kept.** `must` throws the reply away, and the
+    // reply is where the first incorrect transition would be visible: which
+    // account the drain filtered by, which lanes it looked at, and what each one
+    // withheld. Without it, "the row is not on the server" is the earliest
+    // observation available and it is already several steps downstream of
+    // whatever went wrong.
+    let synced = a.sandbox.json(&["sync", "now"]);
     let now_there = server.query_column(&format!(
         "SELECT proposed_by_user_id::text FROM team_knowledge WHERE id = '{id}'"
     ));
@@ -709,9 +725,14 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
         now_there,
         vec![a_id],
         "the held proposal did not go out as A once A was authenticated again\n  \
+         sync now: {}\n  \
          outbox: {:?}\n  config_account: {:?}\n  lanes: {:?}",
+        synced,
         a.sandbox.query_column(&format!(
             "SELECT state || ' attempts=' || CAST(attempts AS TEXT)
+                    || ' ns=' || namespace
+                    || ' author=' || COALESCE(authored_by_user_id, '<none>')
+                    || ' key=' || idempotency_key
                     || ' claimed_at=' || COALESCE(claimed_at, '<none>')
                     || ' delivered_at=' || COALESCE(delivered_at, '<none>')
                     || ' blocked=' || COALESCE(blocked_reason, '<none>')
@@ -1064,6 +1085,23 @@ fn a_queue_of_only_foreign_work_is_never_drained() {
     // this is the assertion — not worth attempting.
     attach_server(&a.sandbox, &server, &b.token);
 
+    // **Quiesced before the precondition is built, not merely switched.**
+    //
+    // `AuthenticatedContext` snapshots the credential once per drain (FR-597),
+    // which is correct and is exactly what makes the fixture racy: a drain that
+    // acquired its context a moment before `auth token set` goes on running as
+    // A, and if its claim lands after the reset below it delivers A's proposal
+    // under A's own token — legitimately, and hours after this test decided the
+    // proposal was held. Nothing is wrong in production when that happens; the
+    // *fixture* is then measuring two states instead of one, and the vacuity
+    // guard at the end reports it as the queue draining under B.
+    //
+    // `sync now` takes the same per-process `sync_drain` lock the worker's drain
+    // takes, so when it returns no drain started under A's credential is still
+    // in flight. No sleep, and nothing about the assertion changes: the state
+    // this test starts from is one state.
+    a.sandbox.must(&["sync", "now"]);
+
     // The undelivered state is constructed, not raced for: A's own daemon
     // delivers this proposal within a tick of it being written, correctly, so a
     // test that proposed and then switched would be measuring which happened
@@ -1107,7 +1145,24 @@ fn a_queue_of_only_foreign_work_is_never_drained() {
     );
     assert!(
         pending_on(&a.sandbox, &team) > 0,
-        "A's held proposal left the queue while B was authenticated"
+        "A's held proposal left the queue while B was authenticated\n  \
+         outbox: {:?}\n  on the server: {:?}\n  config_account: {:?}",
+        a.sandbox.query_column(&format!(
+            "SELECT state || ' attempts=' || CAST(attempts AS TEXT)
+                    || ' author=' || COALESCE(authored_by_user_id, '<none>')
+                    || ' claimed_at=' || COALESCE(claimed_at, '<none>')
+                    || ' delivered_at=' || COALESCE(delivered_at, '<none>')
+                    || ' blocked=' || COALESCE(blocked_reason, '<none>')
+                    || ' last_error=' || COALESCE(last_error, '<none>')
+               FROM outbox WHERE entity_id = '{id}'"
+        )),
+        server.query_column(&format!(
+            "SELECT proposed_by_user_id::text FROM team_knowledge WHERE id = '{id}'"
+        )),
+        std::fs::read_to_string(a.sandbox.cairn_home().join("config.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .map(|c| c["server_account_id"].clone()),
     );
 }
 

@@ -558,6 +558,21 @@ privacy boundary has already approved, and is specified under Consolidation.
   in capture health and counters. Fail-soft describes what the agent experiences, not what Cairn
   is permitted to know: a drop the agent never notices is exactly the drop Principle X forbids
   Cairn from reporting as health.
+- **FR-749c1**: The process that detects the drop is the hook, and it holds no durable store;
+  the process that keeps the counters is the daemon, and a delivery that failed never reached
+  it. The record MUST therefore survive that gap: the detecting process MUST journal the drop
+  durably and the daemon MUST collect it into the same disposition counters every other outcome
+  uses, so a drop is counted in the place capture health already reads rather than in a place of
+  its own. Journalling MUST NOT be able to fail the hook (FR-749b), and collection MUST be
+  idempotent — a drop counted twice overstates loss exactly as a drop counted never understates
+  it. A disposition value that exists in the vocabulary and in no code path does not satisfy
+  FR-749c.
+- **FR-749c2**: A decline caused by Cairn's own deadline MUST NOT be reported as a decline about
+  the content. A semantic mapping that declines because the session vocabulary could not be
+  fetched in time and one that declines because the vocabulary is genuinely too thin are
+  different findings — the first is load and says nothing about the material, the second repeats
+  on every run of a frozen corpus — and reporting both as `declined_by_policy` makes the decline
+  rate uninterpretable, which is the outcome FR-749c exists to prevent.
 - **FR-749d**: The record of a deadline drop MUST carry no rejected or raw content. It carries
   the disposition, the event kind where already determined, the agent and the session — nothing
   from the payload that was being processed when the deadline expired.
@@ -1462,6 +1477,34 @@ feature's tests, and a single counterexample fails it.
   automatic capture — Claude Code, Codex CLI and OpenCode. Accuracy is a reviewed judgement
   recorded as such; the automated portion asserts existence, provenance resolution and rubric
   completion, and fails if any is missing.
+
+  **Measured over sessions Cairn did not lose evidence from.** FR-749b permits a
+  capture-class event that misses its deadline to be dropped, with the hook still
+  exiting successfully and the agent never learning; this criterion says a session
+  produces a durable record. Unqualified, the two contradict each other, and the
+  contradiction is reachable rather than theoretical: one dropped tool event costs
+  a session the file change between its failing and passing test, so the rule that
+  carries this criterion emits nothing, and the event stream that arrives is
+  *dense* and *terminated* — a dropped event is never assigned a session ordinal,
+  so the sequence closes over the gap and no completeness check can see it.
+
+  So the population is stated. A session in which Cairn dropped or could not
+  deliver a capture-class event of its own is **inconclusive** for this criterion:
+  it is neither a pass nor an accuracy failure, and it MUST be reported as
+  inconclusive with the count of what was dropped, never counted as a session that
+  produced nothing. A gate MUST fail on an inconclusive run — a criterion that was
+  not measured cannot be merged on — and MUST name the loss as the reason rather
+  than reporting a shortfall in accuracy. Repeated inconclusive runs on the same
+  machine are the measurement FR-749a asks for: the deadline budget does not fit
+  and MUST be restated explicitly rather than absorbed as a lower score.
+
+  This exclusion is not available to an implementation that cannot observe the
+  loss. It rests on FR-749c: the drop is recorded as a `capture_deadline_exceeded`
+  disposition and surfaced in capture health, so "Cairn lost evidence" is a fact a
+  test can read rather than a hypothesis it can offer. An implementation that
+  records nothing MUST NOT claim this exclusion, because it cannot tell an
+  inconclusive run from a failing one — which is precisely the state that made an
+  observed shortfall here unexplainable.
 
   **Independent means not the process being graded.** The requirement was written as "a human
   reviewer", and humanity was never the property that made it work — independence was. A
