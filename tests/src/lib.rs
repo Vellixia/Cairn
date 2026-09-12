@@ -1856,6 +1856,33 @@ fn drop_database(url: &str) {
     });
 }
 
+/// Run SQL against a server database on a connection of its own.
+///
+/// Public because proving the revision allocator needs two *concurrent*
+/// transactions, and `Server::execute` gives no way to hold one open while
+/// another runs. A caller that wants overlap runs this on its own thread.
+///
+/// Multiple statements are sent as one simple query, so `BEGIN; …; COMMIT;`
+/// works and runs on a single connection — which is the whole point here, since
+/// a transaction split across pooled connections would prove nothing.
+pub fn run_server_sql(url: &str, sql: &str) {
+    let (url, sql) = (url.to_string(), sql.to_string());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+        // `raw_sql`, not `query`: the prepared-statement path refuses more than
+        // one command, and a transaction is three.
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        pool.close().await;
+    });
+}
+
 fn run_sql(url: &str, sql: &str) {
     let (url, sql) = (url.to_string(), sql.to_string());
     let runtime = tokio::runtime::Builder::new_current_thread()

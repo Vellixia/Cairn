@@ -1277,6 +1277,135 @@ fn both_team_readers_put_the_revision_on_the_wire_beside_changed_at() {
 
 /// One proposed `team_knowledge` row, owned by the fixture's owner so every
 /// state of it is visible to that account (FR-464).
+/// A revision a client has not seen cannot end up behind its cursor
+/// (FR-791a, FR-791a1).
+///
+/// # The property, which is not monotonicity
+///
+/// The feed pages `WHERE revision > cursor ORDER BY revision`, so a client that
+/// has seen revision R will never ask for anything at or below R again. That is
+/// only safe if every revision below R was already *visible* when R was. A
+/// monotonic allocator does not give that: `nextval` hands out numbers at
+/// statement time and rows become visible at commit, so
+///
+/// ```text
+/// tx A takes 100 and stays open
+/// tx B takes 101 and commits
+/// a pull sees 101 and advances its cursor
+/// tx A commits — 100 is now permanently behind the cursor
+/// ```
+///
+/// Reproduced against this database before the repair: the reader saw only the
+/// second row, and the first was invisible to every later pull. Losing a
+/// retirement that way is silent and permanent.
+///
+/// The allocator is therefore a counter row, and the allocation *is* the row
+/// lock: a writer holding a revision holds that lock until it commits or rolls
+/// back, so the next writer cannot take a number until the previous one is
+/// visible. This drives that ordering directly — one writer takes a revision
+/// and holds its transaction open while a second tries to take one — and
+/// asserts the second waited, which is what makes allocation order equal commit
+/// order.
+///
+/// **Falsified by** allocating from a sequence again: the second writer returns
+/// immediately with a higher number while the first is still uncommitted.
+#[test]
+fn a_revision_cannot_be_allocated_while_an_earlier_one_is_uncommitted() {
+    let pg = pg!();
+    let url = pg.server.database_url.clone();
+
+    // One writer takes a revision and holds it. Its transaction stays open for
+    // long enough that a second writer returning promptly can only mean the
+    // allocation did not wait for it.
+    let holder = std::thread::spawn({
+        let url = url.clone();
+        move || {
+            cairn_e2e::run_server_sql(
+                &url,
+                "BEGIN; SELECT next_team_revision(); SELECT pg_sleep(4); COMMIT;",
+            )
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(750));
+
+    let started = std::time::Instant::now();
+    cairn_e2e::run_server_sql(&url, "SELECT next_team_revision();");
+    let waited = started.elapsed();
+    holder.join().expect("the holding transaction");
+
+    assert!(
+        waited >= std::time::Duration::from_secs(2),
+        "a second writer allocated a revision in {waited:?} while the first was \
+         still uncommitted, so allocation order is not commit order and a pull \
+         can advance its cursor past a change that has not committed yet \
+         (FR-791a)"
+    );
+}
+
+/// A rolled-back write returns its revision rather than burning it (FR-791a1).
+///
+/// A sequence leaves a hole, and a hole in the feed is indistinguishable from a
+/// row that has not committed yet — which is the ambiguity the counter exists to
+/// remove. Nothing here depends on gaps being absent for correctness; it is
+/// asserted because it is the observable difference between the two allocators
+/// and it keeps the feed's numbering honest.
+///
+/// **Falsified by** allocating from a sequence, which keeps the number.
+#[test]
+fn a_rolled_back_write_returns_its_revision() {
+    let pg = pg!();
+    let before = pg
+        .server
+        .count("SELECT next_revision FROM team_revision_counter");
+    cairn_e2e::run_server_sql(
+        &pg.server.database_url,
+        "BEGIN; SELECT next_team_revision(); ROLLBACK;",
+    );
+    let after = pg
+        .server
+        .count("SELECT next_revision FROM team_revision_counter");
+    assert_eq!(
+        before, after,
+        "a rolled-back allocation consumed revision {before}, leaving a gap the \
+         feed cannot tell from an uncommitted row"
+    );
+}
+
+/// There is exactly one allocator, and it is the counter row (FR-791a1).
+///
+/// The repair replaced a sequence; a sequence left behind would be a second
+/// mechanism assigning the same column, and which one won would depend on
+/// whether a later statement named it. **Falsified by** reintroducing
+/// `team_knowledge_revision_seq`, or by giving `revision` a column default.
+#[test]
+fn the_revision_has_one_allocator_and_no_column_default() {
+    let pg = pg!();
+    assert_eq!(
+        pg.server.count(
+            "SELECT COUNT(*) FROM pg_class WHERE relkind = 'S'
+               AND relname = 'team_knowledge_revision_seq'"
+        ),
+        0,
+        "the sequence the counter row replaced still exists, so two mechanisms \
+         can assign `revision`"
+    );
+    assert_eq!(
+        pg.server.count(
+            "SELECT COUNT(*) FROM information_schema.columns
+              WHERE table_name = 'team_knowledge' AND column_name = 'revision'
+                AND column_default IS NOT NULL"
+        ),
+        0,
+        "`revision` has a column default as well as the trigger"
+    );
+    assert_eq!(
+        pg.server
+            .count("SELECT COUNT(*) FROM team_revision_counter"),
+        1,
+        "the allocator is not exactly one row"
+    );
+}
+
 fn seed_team_row(pg: &Pg, content: &str) -> (uuid::Uuid, String) {
     let id = uuid::Uuid::now_v7();
     let writer = format!("writer-{id}");

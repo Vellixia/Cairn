@@ -619,16 +619,59 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
     ]);
     let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
 
+    // **Let the delivery finish before undoing it**, so the state this test
+    // starts from is one state rather than two.
+    //
+    // A's daemon delivers this proposal within a tick, correctly and as A, and
+    // the passage below undoes that delivery. Racing it meant the fixture
+    // sometimes undid a delivery that had happened and sometimes undid nothing —
+    // and only the first of those leaves the server holding an applied
+    // idempotency key, so the bug the deletion had to account for appeared in
+    // about one run in a hundred. Waiting for the delivery first makes the
+    // precondition the same every time, which is what "constructed rather than
+    // raced for" is supposed to mean.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline
+        && server.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+        )) != 1
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        server.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+        )),
+        1,
+        "A's daemon never delivered the proposal, so there is no delivery for \
+         the fixture to undo and the rest of this test measures nothing"
+    );
+
     // B logs in on this machine while A's proposal is still undelivered.
     attach_server(&a.sandbox, &server, &b.token);
 
-    // That precondition is *constructed* rather than raced for. A's own daemon
-    // legitimately delivers this proposal to the server within a tick of it being
-    // written — correctly, as A — so a test that merely proposed and then switched
-    // was measuring which of the two happened first. Undoing the delivery on both
-    // sides restores exactly the state the defect needs: a queued proposal
-    // authored by A, on a shared lane, with B authenticated.
+    // That precondition is *constructed* rather than raced for. Undoing the
+    // delivery on both sides restores exactly the state the defect needs: a
+    // queued proposal authored by A, on a shared lane, with B authenticated.
     server.execute(&format!("DELETE FROM team_knowledge WHERE id = '{id}'"));
+    // **And the server's memory that it already applied this item.**
+    //
+    // Deleting the row alone undoes half a delivery. Ingest is idempotent by
+    // `idempotency_key` and records every applied key in `sync_state`, which is
+    // exactly what FR-786 requires — a replay must not produce a second
+    // canonical effect. So a re-push of the same item is answered "already
+    // applied", the client marks its outbox row `delivered`, and no row
+    // appears: the server is behaving correctly and the fixture has constructed
+    // a state that cannot exist in the field, where nothing deletes canonical
+    // rows behind the server's back.
+    //
+    // Observed as a 1-in-100 failure whose evidence read
+    // `delivered attempts=2 … blocked=<none> last_error=<none>` against an empty
+    // server — a push the client made, the server accepted, and neither party
+    // was wrong about. Whether it bites depends on whether A's daemon delivered
+    // the proposal before this passage ran, which is the race the deletion was
+    // added to remove in the first place.
+    server.execute(&format!("DELETE FROM sync_state WHERE entity_id = '{id}'"));
     a.sandbox.execute_sql(&format!(
         "UPDATE outbox SET state = 'pending', delivered_at = NULL, claimed_at = NULL \
           WHERE entity_id = '{id}'"
@@ -666,10 +709,11 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
         now_there,
         vec![a_id],
         "the held proposal did not go out as A once A was authenticated again\n  \
-         outbox: {:?}\n  config_account: {:?}",
+         outbox: {:?}\n  config_account: {:?}\n  lanes: {:?}",
         a.sandbox.query_column(&format!(
             "SELECT state || ' attempts=' || CAST(attempts AS TEXT)
-                    || ' next_attempt_at=' || COALESCE(next_attempt_at, '<none>')
+                    || ' claimed_at=' || COALESCE(claimed_at, '<none>')
+                    || ' delivered_at=' || COALESCE(delivered_at, '<none>')
                     || ' blocked=' || COALESCE(blocked_reason, '<none>')
                     || ' last_error=' || COALESCE(last_error, '<none>')
                FROM outbox WHERE entity_id = '{id}'"
@@ -678,6 +722,10 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .map(|c| c["server_account_id"].clone()),
+        a.sandbox.query_column(
+            "SELECT namespace || ' last_success=' || COALESCE(last_success_at, '<none>')
+               FROM sync_cursor ORDER BY namespace",
+        ),
     );
 }
 

@@ -605,7 +605,7 @@ row is written and never re-decided.
 
 ---
 
-## 5c. A team row's version is a sequence, not a clock
+## 5c. A team row's version is allocated in commit order, not read off a clock
 
 `team_knowledge` rows are mirrored locally and refreshed from the server's change
 feed, so both sides need to agree which of two pictures of one row is newer. The
@@ -635,13 +635,42 @@ consequences, and the second is the worse one:
   re-sent past a cursor already there. Other devices never learn about that
   retirement at all. Silent divergence, with nothing later to contradict it.
 
-So team rows carry `revision BIGINT NOT NULL UNIQUE`, assigned from
-`team_knowledge_revision_seq` by a `BEFORE INSERT OR UPDATE` trigger. The trigger
-rather than four call sites, because the defect being repaired is precisely a
-writer that forgot to advance the version, and a fifth writer added later would
-reintroduce it silently. Over-bumping is the safe direction: a revision that moved
-when nothing semantically changed re-delivers a row once, and every importer is
-idempotent by id; a revision that failed to move loses the change permanently.
+So team rows carry `revision BIGINT NOT NULL UNIQUE`, assigned by a
+`BEFORE INSERT OR UPDATE` trigger. The trigger rather than four call sites,
+because the defect being repaired is precisely a writer that forgot to advance
+the version, and a fifth writer added later would reintroduce it silently.
+Over-bumping is the safe direction: a revision that moved when nothing
+semantically changed re-delivers a row once, and every importer is idempotent by
+id; a revision that failed to move loses the change permanently.
+
+**The allocator is a counter row, and a sequence would not do.** `nextval` is
+monotonic, which is not the property the feed needs. It hands out numbers at
+*statement* time while rows become visible at *commit*, so:
+
+```text
+tx A takes revision 100 and stays open
+tx B takes revision 101 and commits
+a pull sees 101 and advances its cursor to 101
+tx A commits — revision 100 is now behind the cursor, forever
+```
+
+Reproduced against this project's own PostgreSQL: the reader saw only the second
+row, and the first was invisible to every later pull. The property required is
+that *a client cannot advance its cursor past a change that becomes visible
+later*, and that is what `UPDATE team_revision_counter SET next_revision =
+next_revision + 1 RETURNING next_revision - 1` provides: the allocation is the
+row lock, so a writer holding a revision holds it until it commits or rolls
+back, and the next writer cannot take a number until the previous one is
+visible. Allocation order therefore *is* commit order. Measured: a second writer
+blocked for the whole of the first's transaction, 200 races with zero orderings
+out of sequence.
+
+A rolled-back write returns its number rather than burning it, so the feed has no
+gaps — and a gap is otherwise indistinguishable from a row that has not committed
+yet. The cost is that team writes serialize on one row; team knowledge is
+proposed, ratified and retired by administrators rather than by capture traffic,
+so the contention is measured in operations per hour, while losing a retirement
+is permanent.
 
 The change feed orders and pages on `revision` alone — unique, so a keyset scan
 needs no id tie-break. The local mirror stores it as `server_revision` (local
@@ -649,7 +678,7 @@ schema v12) and both stale-rejection paths prefer it:
 
 | Comparison | Equality | Why |
 | --- | --- | --- |
-| `server_revision` | **admitted** | a revision comes from a sequence, so an equal revision is the same server change arriving again — idempotent redelivery, which is ordinary after a lost reply or a cursor reset |
+| `server_revision` | **admitted** | a revision is allocated once per write, so an equal revision is the same server change arriving again — idempotent redelivery, which is ordinary after a lost reply or a cursor reset |
 | `server_changed_at` (fallback) | **refused** on transition adoption | a tie there is two *different* states sharing a `GREATEST` over transaction-start stamps; nothing can order them, and the stored one is preferred because a wrongly declined adoption is repaired by the next pull while a wrongly applied resurrection is not self-correcting |
 
 A server too old to send a revision still synchronizes: the comparison falls back

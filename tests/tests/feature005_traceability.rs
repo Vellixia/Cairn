@@ -260,7 +260,11 @@ fn the_fr_and_sc_inventories_are_unique_and_the_recorded_counts() {
     // feed keyed on it can drop a change entirely. Two FRs, no new SC: SC-718a
     // already grades the report, and the divergence is graded by the server
     // schema target rather than by a criterion of its own. 276 -> 278.
-    const EXPECTED_FR: usize = 278;
+    // FR-791a1 added with the commit-order allocator: FR-791a asked for a
+    // strictly increasing version, which a sequence satisfies while still
+    // letting a client advance its cursor past a change that commits later.
+    // 278 -> 279.
+    const EXPECTED_FR: usize = 279;
     const EXPECTED_SC: usize = 64;
     assert_eq!(
         fr_list.len(),

@@ -741,6 +741,15 @@ privacy boundary has already approved, and is specified under Consolidation.
   different states. Two failures follow and both MUST be closed — a state comparison that
   cannot order the two, and a feed that never re-sends a change whose key did not move, which
   leaves other devices permanently unaware of it.
+- **FR-791a1**: That version MUST be allocated in commit order, not merely monotonically. A
+  client pages the feed by asking for versions above the highest it has seen, so it may never
+  be able to observe a version *below* one already delivered to it. An allocator that issues
+  numbers at statement time does not satisfy this even though it is monotonic: a writer holding
+  an earlier number uncommitted while a later number commits lets a client advance past a change
+  that has not landed yet, and that change is then invisible to it permanently. The allocation
+  MUST therefore be serialized against commit — a transactional counter satisfies this, a
+  non-transactional sequence does not — and a rolled-back write MUST NOT leave a number that
+  can be confused with one still in flight.
 - **FR-791b**: A mirrored team row MUST refuse an incoming page or transition reply that is
   older than the version the row already reflects, whatever the row's own state. Equality
   under a sequence-assigned version is the same change arriving again and MUST be admitted as

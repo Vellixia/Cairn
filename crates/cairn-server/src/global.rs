@@ -1617,11 +1617,23 @@ struct TeamWireRow {
     /// the pull feed — keyed on the same value — never re-sends the row, so no
     /// other device learns of the retirement at all.
     ///
-    /// `revision` comes from `team_knowledge_revision_seq`, assigned at
-    /// statement time by a trigger on every row write. It is monotonic in the
-    /// order the writes happened, whatever their transactions' start times
-    /// were, and no write can leave it unchanged. Gaps mean nothing; only the
-    /// order does.
+    /// `revision` is allocated from `team_revision_counter` by a trigger on
+    /// every row write, and the allocation *is* a row lock: a writer holding a
+    /// revision holds that lock until it commits or rolls back, so the next
+    /// writer cannot take a number until the previous one is visible.
+    ///
+    /// That is stronger than monotonic, and the difference is the whole reason
+    /// it is not a sequence. `nextval` is monotonic too, but it hands out
+    /// numbers at *statement* time while rows become visible at *commit* — so a
+    /// writer holding revision 100 uncommitted while another takes 101 and
+    /// commits lets a pull see 101, advance its cursor, and never see 100 once
+    /// it lands. Reproduced against a real database before the repair. What the
+    /// feed needs is that a client cannot advance past a change that becomes
+    /// visible later, and only commit-ordered allocation gives it.
+    ///
+    /// A rolled-back write returns its number rather than burning it, so there
+    /// are no gaps — and a gap would otherwise be indistinguishable from a row
+    /// that has not committed yet.
     ///
     /// `None` only on a deployment held below [`TEAM_REVISION_SCHEMA`], which
     /// has no such column. It is **not** revision zero: the mirror reads

@@ -29,23 +29,56 @@
 --    nothing later contradicts it — the feed is keyed by the value that failed
 --    to move.
 --
--- So the ordering key stops being a clock reading and becomes a sequence.
+-- So the ordering key stops being a clock reading and becomes an allocated
+-- revision. In the trace above the revisions are 1 (insert), 2 (ratify),
+-- 3 (retire): correct where the timestamps are not.
 --
--- **Why a sequence and not a clock.** `nextval` is evaluated at *statement*
--- time and is monotonic across concurrent transactions by construction — it is
--- non-transactional, which is exactly the property wanted here: two writes
--- get two revisions in the order the writes actually happened, whatever their
--- transactions' start times were. In the trace above the revisions are
--- 1 (insert), 2 (ratify), 3 (retire): correct where the timestamps are not.
--- Gaps are expected and carry no meaning — a rolled-back write, or the
--- `ON CONFLICT DO NOTHING` in the proposal ingest, consumes a value and keeps
--- nothing. Only the *order* is load-bearing.
+-- **What the feed actually needs is not monotonicity.** It is that a client
+-- cannot advance its cursor past a change that commits later — and monotonic
+-- allocation does not give that, because allocation happens at statement time
+-- and visibility at commit. The allocator below is chosen for the stronger
+-- property; the paragraph on it says why, and what it costs.
 --
 -- `changed_at` is not removed and still travels on the wire. It remains
 -- meaningful provenance ("when did this last change"), it is what the human
 -- listing sorts by, and a store upgraded before its server still has nothing
 -- else to compare against.
-CREATE SEQUENCE IF NOT EXISTS team_knowledge_revision_seq AS BIGINT MINVALUE 1;
+-- **The allocator is a row, not a sequence, and that is the whole point.**
+--
+-- `nextval` hands out numbers at statement time and says nothing about commit
+-- order, so two writers interleave like this:
+--
+--     tx A takes revision 100 and stays open
+--     tx B takes revision 101 and commits
+--     a pull sees 101, advances its cursor to 101
+--     tx A commits; revision 100 is now behind the cursor, forever
+--
+-- Reproduced against this database: the reader saw only the second row, and the
+-- first became invisible to every later pull. A sequence is monotonic, which is
+-- not the property the feed needs. The property the feed needs is that a client
+-- cannot advance its cursor past a committed change that becomes visible later.
+--
+-- A counter row gives exactly that, because the allocation is the row lock. A
+-- writer that has taken a revision holds that lock until it commits or rolls
+-- back, so the next writer cannot take a number until the previous one is
+-- visible. Allocation order therefore *is* commit order, and a reader holding
+-- revision R has necessarily seen every revision below it.
+--
+-- Two further properties fall out. A rollback returns the number rather than
+-- burning it, so the feed has no gaps to reason about — unlike a sequence,
+-- where a rolled-back allocation leaves a hole that looks identical to a row
+-- that has not committed yet. And the counter cannot drift from the table,
+-- because nothing else writes it.
+--
+-- The cost is that team writes serialize on one row. Team knowledge is
+-- proposed, ratified and retired by administrators, not by capture traffic, so
+-- the contention is measured in operations per hour; losing a retirement
+-- permanently is not.
+CREATE TABLE IF NOT EXISTS team_revision_counter (
+    -- One row, enforced by the type system rather than by convention.
+    only_row      BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (only_row),
+    next_revision BIGINT NOT NULL
+);
 
 -- **Backfilled in `changed_at` order, deliberately, and not by the default.**
 -- `ALTER TABLE ... ADD COLUMN DEFAULT nextval(...)` would assign a revision to
@@ -72,8 +105,11 @@ UPDATE team_knowledge t
 
 -- The sequence starts after the backfill, so the first row written by this
 -- deployment sorts after every row it already held.
-SELECT setval('team_knowledge_revision_seq',
-              COALESCE((SELECT MAX(revision) FROM team_knowledge), 0) + 1, false);
+INSERT INTO team_revision_counter (only_row, next_revision)
+VALUES (TRUE, COALESCE((SELECT MAX(revision) FROM team_knowledge), 0) + 1)
+ON CONFLICT (only_row) DO UPDATE
+    SET next_revision = GREATEST(team_revision_counter.next_revision,
+                                 EXCLUDED.next_revision);
 
 -- **One assignor, and it cannot be forgotten.** A `BEFORE INSERT OR UPDATE`
 -- trigger rather than a `revision = nextval(...)` clause in each statement,
@@ -91,9 +127,24 @@ SELECT setval('team_knowledge_revision_seq',
 -- semantically changed re-delivers the row once, and every importer is
 -- idempotent by id; a revision that failed to advance loses the change
 -- permanently.
+-- `UPDATE … RETURNING` rather than a read then a write: the update takes the
+-- row lock, and the value returned is the one this transaction owns until it
+-- ends. A `SELECT` followed by an `UPDATE` would let two writers read the same
+-- number.
+CREATE OR REPLACE FUNCTION next_team_revision() RETURNS BIGINT AS $$
+DECLARE
+    allocated BIGINT;
+BEGIN
+    UPDATE team_revision_counter
+       SET next_revision = next_revision + 1
+     RETURNING next_revision - 1 INTO allocated;
+    RETURN allocated;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION team_knowledge_bump_revision() RETURNS trigger AS $$
 BEGIN
-    NEW.revision := nextval('team_knowledge_revision_seq');
+    NEW.revision := next_team_revision();
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
