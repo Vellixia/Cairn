@@ -61,7 +61,6 @@ fn a_non_repository_fails_cleanly_and_creates_no_state() {
 #[test]
 fn a_corrupt_database_is_detected_and_reported() {
     let s = Sandbox::new();
-    s.must(&["daemon", "stop"]);
 
     // Wait for the daemon *process* to be gone, not merely for its socket to
     // stop answering. SQLite checkpoints the write-ahead log into the main
@@ -69,6 +68,18 @@ fn a_corrupt_database_is_detected_and_reported() {
     // listening but is still shutting down will write a valid database back
     // over the garbage below — and `status` then succeeds, which is what made
     // this test fail about a third of the time.
+    //
+    // **Taken before anything stops it**, which is the half the first repair
+    // missed. There was a `daemon stop` above this line, so by the time the
+    // processes were identified the daemon had usually stopped answering — and
+    // the two platforms then disagree about what that means. On Unix
+    // `daemons_for_socket` scans processes by name and environment, so it still
+    // finds a daemon that is shutting down and the wait below does its job. On
+    // Windows it asks the named pipe who is serving it, and a pipe that has
+    // already gone answers nothing: the list came back empty, the loop below
+    // iterated over nothing, and the garbage was written straight into a
+    // checkpoint still in flight. The guard was a no-op on exactly the platform
+    // that needed it, which is why this surfaced there and only there.
     let victims = cairn_sys::daemons_for_socket(&s.socket);
     s.stop_daemon();
     for pid in &victims {
