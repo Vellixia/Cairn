@@ -8,8 +8,16 @@ use std::path::PathBuf;
 /// Root of Cairn's local state.
 ///
 /// `CAIRN_HOME` wins; otherwise the platform data directory.
+///
+/// Read as an **OS string**, not a `String`. A path is not required to be UTF-8
+/// on Unix, and `std::env::var` reports a non-Unicode value as an error — which
+/// is indistinguishable here from the variable being unset, so a perfectly valid
+/// `CAIRN_HOME` would be ignored and every path would silently resolve into the
+/// real platform directory instead. That is the failure this function exists to
+/// let a caller avoid, so it must not be reachable by naming a directory the
+/// platform allows.
 pub fn home() -> PathBuf {
-    if let Ok(dir) = std::env::var("CAIRN_HOME") {
+    if let Some(dir) = std::env::var_os("CAIRN_HOME") {
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
@@ -242,10 +250,24 @@ mod tests {
     #[test]
     fn cairn_home_overrides_everything() {
         // Serialized within this test only; env is process-global.
-        let prev = std::env::var("CAIRN_HOME").ok();
+        let prev = std::env::var_os("CAIRN_HOME");
         std::env::set_var("CAIRN_HOME", "/tmp/cairn-test-home");
         assert_eq!(home(), PathBuf::from("/tmp/cairn-test-home"));
         assert!(db_path().starts_with("/tmp/cairn-test-home"));
+        // A path the platform allows but `env::var` cannot return: read as a
+        // `String` this looks exactly like "unset", and `home()` would hand back
+        // the real platform directory while the caller believed it had been
+        // redirected.
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+            let raw = OsString::from_vec(b"/tmp/cairn-test-home-\xff".to_vec());
+            std::env::set_var("CAIRN_HOME", &raw);
+            assert_eq!(home(), PathBuf::from(&raw));
+            assert_ne!(home(), dirs::data_dir().unwrap_or_default().join("cairn"));
+        }
+
         match prev {
             Some(v) => std::env::set_var("CAIRN_HOME", v),
             None => std::env::remove_var("CAIRN_HOME"),
