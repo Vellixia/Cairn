@@ -183,17 +183,32 @@ fn a_corrupt_database_is_detected_and_reported() {
         "the database is not the garbage this test wrote, so nothing below is \
          about a corrupt store\n{diag}"
     );
-    for suffix in ["-wal", "-shm"] {
-        let len = std::fs::metadata(s.sidecar(suffix))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        assert_eq!(
-            len, 0,
-            "a {suffix} survived beside the garbage, and SQLite reads the \
-             database through it — the store is intact and this test would be \
-             asserting against a daemon that is behaving correctly\n{diag}"
-        );
-    }
+    // **The log, and only the log.** `-wal` is the file that can carry database
+    // content: in WAL mode SQLite reads page 1 through it when the log holds
+    // one, which is the whole reason a garbage main file is not enough. `-shm`
+    // is the wal-index — a transient, memory-mapped index *into* the log that
+    // SQLite rebuilds when it is absent and discards when it is inconsistent.
+    // It holds no pages and can resurrect nothing.
+    //
+    // That distinction is load-bearing here rather than pedantic. Windows
+    // refuses to delete *or* truncate a file with a live mapping, and the
+    // `-shm`'s mapping outlives the daemon process by a moment, so a run that
+    // has correctly emptied the log still finds a full `-shm` beside it.
+    // Requiring both to be gone failed the fixture for a file that cannot
+    // affect the outcome.
+    //
+    // Measured rather than reasoned: a fully populated `-shm` next to a
+    // zero-length `-wal` and a garbage main file opens as
+    // `file is not a database (26)` — exactly the state this test wants.
+    let wal = std::fs::metadata(s.sidecar("-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert_eq!(
+        wal, 0,
+        "a write-ahead log survived beside the garbage, and SQLite reads the \
+         database through it — the store is intact and this test would be \
+         asserting against a daemon that is behaving correctly\n{diag}"
+    );
 
     let out = s.cairn(&["--json", "status"]);
     diag.push_str(&snapshot(&s, "after `status`"));
