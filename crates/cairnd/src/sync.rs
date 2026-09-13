@@ -5848,11 +5848,11 @@ mod tests {
     /// `tokio`'s mutex and not `std`'s: the guard is held across the `await`s
     /// that do the work, and a `std` guard held across an await can park the
     /// whole runtime thread with the lock still taken.
+    /// The lock now lives in `testsupport`, because this module is no longer the
+    /// only one that writes the process's one `config.json`. Two locks would
+    /// serialize each module against itself and neither against the other.
     async fn credentials_serially() -> tokio::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-            .lock()
-            .await
+        crate::testsupport::credentials_serially().await
     }
 
     /// the gap allowed. It is refused because the generation it was taken under

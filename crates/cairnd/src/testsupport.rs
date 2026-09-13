@@ -55,15 +55,41 @@ use uuid::Uuid;
 /// single write, and every fixture funnels through `daemon_with`, so it happens
 /// before anything can read a path.
 ///
-/// The directory is deliberately leaked: it must outlive every test in the
-/// process, and the OS reclaims it.
-fn isolate_home() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let dir = tempfile::TempDir::new().expect("a temporary CAIRN_HOME");
-        std::env::set_var("CAIRN_HOME", dir.path());
-        std::mem::forget(dir);
-    });
+/// **The directory is kept, and nothing deletes it.** It has to outlive every
+/// test in the process, and a `TempDir` dropped at the end of `call_once` would
+/// take it away while the suite was still running. `TempDir::keep` is the API
+/// that says so; `mem::forget` would do the same thing while reading like an
+/// oversight. Process exit does not remove it either, so each test run leaves
+/// one directory of a few kilobytes under the system temp directory — which is
+/// the price of not writing into the developer's real home, and is stated here
+/// rather than described as cleanup that does not happen.
+fn isolate_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = tempfile::TempDir::new()
+            .expect("a temporary CAIRN_HOME")
+            .keep();
+        std::env::set_var("CAIRN_HOME", &dir);
+        dir
+    })
+}
+
+/// Hold this for as long as a test is writing credentials.
+///
+/// `config.json` and the token file are one pair of paths for the whole
+/// process, so every test that writes them is writing the same two files. They
+/// are serialized rather than isolated per test because the paths come from
+/// `cairn_core::paths`, which reads the environment — and moving `CAIRN_HOME`
+/// per test would be a second process-global mutation racing the first.
+///
+/// Lives here rather than in one test module because more than one module now
+/// writes credentials, and two locks would serialize each module against itself
+/// and neither against the other.
+pub async fn credentials_serially() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 /// A daemon with an empty in-memory store and no server configured.
@@ -333,6 +359,11 @@ mod isolation {
     /// **Falsified by** deleting the `isolate_home()` call in `daemon_with`.
     #[tokio::test]
     async fn a_fixture_writes_its_credentials_somewhere_disposable() {
+        // The same lock every other credential-writing test takes. Without it
+        // this mutation lands in the middle of theirs: between the logout
+        // test's removal and its assertion, or while the unwritable-config
+        // test has made the file read-only.
+        let _serial = credentials_serially().await;
         let d = daemon().await;
 
         let home = std::env::var_os("CAIRN_HOME").unwrap_or_default();
@@ -363,6 +394,27 @@ mod isolation {
             config.exists(),
             "the credential write did not reach {}",
             config.display()
+        );
+    }
+
+    /// The redirect has to survive a `CAIRN_HOME` the platform allows but
+    /// `std::env::var` cannot return.
+    ///
+    /// A temporary directory inherits `TMPDIR`, which on Unix is free to hold
+    /// bytes that are not UTF-8. Resolved through `var` that reads as unset and
+    /// every path falls back to the real platform directory — the isolation
+    /// would report success while writing to exactly the place it exists to
+    /// protect. `cairn_core::paths::home` reads `var_os` for that reason; this
+    /// pins the property from the side that depends on it.
+    #[test]
+    fn the_isolated_home_is_the_one_that_resolves() {
+        let isolated = isolate_home();
+        assert_eq!(
+            cairn_core::paths::home(),
+            isolated,
+            "CAIRN_HOME names {} but paths resolve elsewhere, so the fixtures \
+             are writing somewhere real",
+            isolated.display()
         );
     }
 }
