@@ -16,6 +16,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY tests ./tests
 
+# **`skills/` is a compile-time input, not documentation.**
+#
+# `cairn-integrate` embeds the Skill tree with
+# `include_dir!("$CARGO_MANIFEST_DIR/../../skills/cairn")`, so the directory has
+# to be in the build context or the crate does not compile — the proc macro
+# panics with "is not a directory", which is not a missing-file error anyone
+# reads as a missing `COPY`.
+#
+# It became load-bearing here only when `cairn-server` took a dependency on
+# `cairn-integrate` for the capability coherence rule. Before that the server
+# never compiled that crate, so the absent directory cost nothing and the
+# release that first needed it is the one that found out.
+COPY skills ./skills
+
 # Only the server is needed here. `--locked` keeps the build honest about the
 # lockfile that was reviewed.
 RUN cargo build --release --locked -p cairn-server \
