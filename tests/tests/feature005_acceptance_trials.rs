@@ -569,10 +569,18 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
     let mut evidence_at_close: Vec<String> = Vec::with_capacity(TRIALS);
     let mut incomplete_at_close: Vec<usize> = Vec::new();
     for (trial, session) in sessions.iter().enumerate() {
+        // **In ordinal order, not grouped by kind.** The grouped form said
+        // what a session held and deliberately not what order it held it in,
+        // and order is the whole of what R1 reads: `test_result(failed) …
+        // file_changed(F)+ … test_result(passed)`. A permuted stream has the
+        // same group counts as a correct one, so the line that was supposed to
+        // discriminate a consolidation fault from a delivery fault could not
+        // see the delivery fault that was actually happening
+        // (`cairnd::arrival`). The sequence subsumes the counts.
         let kinds = server
             .query_column(&format!(
-                "SELECT kind || 'x' || COUNT(*)::text FROM safe_events
-                  WHERE session_id = '{session}' GROUP BY kind ORDER BY kind"
+                "SELECT kind FROM safe_events
+                  WHERE session_id = '{session}' ORDER BY session_seq"
             ))
             .join(",");
         let span = server

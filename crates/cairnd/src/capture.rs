@@ -521,6 +521,13 @@ pub async fn session_vocabulary(
 /// before the `file_changed` that justified it would make the server refuse a
 /// claim the client legitimately built.
 ///
+/// That is the order *within* one vendor event. The order *between* them is
+/// kept by [`crate::arrival`], because it is not kept here: each hook is its
+/// own process writing one request and exiting, and the task serving each
+/// connection races the others to the ordinal. Both halves are needed — the
+/// rules read a session's events as a sequence (`contracts/extraction.md`
+/// §309), and a stream permuted across hooks is dense, terminated, and wrong.
+///
 /// Every decline becomes both a counted disposition and a `capture_declined`
 /// event. The counter makes the rate visible locally; the event makes it
 /// visible centrally. Neither carries any part of what was declined (FR-741,

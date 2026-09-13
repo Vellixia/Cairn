@@ -58,10 +58,12 @@ fn a_non_repository_fails_cleanly_and_creates_no_state() {
     }
 }
 
-/// TEMPORARY (Feature 005 Windows diagnosis): the on-disk state of the store.
-///
-/// Removed once the Windows failure of `a_corrupt_database_is_detected_and_reported`
-/// has a demonstrated cause.
+/// What this test writes over the database, named once so the corruption and
+/// the assertion that it took cannot drift apart.
+const GARBAGE: &[u8] = b"not a valid sqlite database";
+
+/// The store's on-disk state, for the assertions that have to say which file
+/// the daemon actually read.
 fn snapshot(s: &Sandbox, label: &str) -> String {
     let mut out = format!("--- {label} ---\n");
     for (name, path) in [
@@ -130,23 +132,64 @@ fn a_corrupt_database_is_detected_and_reported() {
     }
     diag.push_str(&snapshot(&s, "after the daemon exited"));
 
-    // Overwrite the database with garbage — *and* remove the write-ahead log
-    // beside it. Truncating only the main file does not reliably corrupt the
-    // store: SQLite recovers from `-wal`, so the daemon opens a perfectly valid
-    // database and `status` succeeds. That is what made this test flaky rather
-    // than wrong, and it failed roughly three runs in five.
+    // Overwrite the database with garbage — *and* take the write-ahead log out
+    // beside it. Truncating only the main file does not corrupt the store:
+    // SQLite in WAL mode reads page 1 through the log when the log holds it, so
+    // the daemon opens a perfectly valid database and `status` succeeds.
+    //
+    // **Removal is not enough, and where it is not enough is Windows.** A file
+    // with a live handle cannot be unlinked there — SQLite opens without
+    // `FILE_SHARE_DELETE` — so `remove_file` returns `PermissionDenied` and a
+    // `let _ =` swallowed it. The log survived, carried the whole database, and
+    // the test reported "a corrupt database must not report success": a message
+    // about the product, for a fixture that had not corrupted anything. Unix
+    // never showed it, because `unlink` succeeds on an open file.
+    //
+    // Truncation needs no delete and works through a shared handle, so it is
+    // the fallback. A zero-length log is not a log SQLite recovers from.
     for suffix in ["-wal", "-shm"] {
-        let removed = std::fs::remove_file(s.sidecar(suffix));
-        diag.push_str(&format!(
-            "remove({suffix})={}\n",
-            match &removed {
-                Ok(()) => "ok".to_string(),
-                Err(e) => format!("{:?} os={:?}", e.kind(), e.raw_os_error()),
-            }
-        ));
+        let path = s.sidecar(suffix);
+        let outcome = match std::fs::remove_file(&path) {
+            Ok(()) => "removed".to_string(),
+            Err(e) => match std::fs::File::create(&path) {
+                Ok(_) => format!("truncated after {:?}", e.kind()),
+                Err(t) => format!(
+                    "left behind: remove {:?}, truncate {:?}",
+                    e.kind(),
+                    t.kind()
+                ),
+            },
+        };
+        diag.push_str(&format!("{suffix}: {outcome}\n"));
     }
-    std::fs::write(s.db_path(), b"not a valid sqlite database").expect("write");
+    std::fs::write(s.db_path(), GARBAGE).expect("write");
     diag.push_str(&snapshot(&s, "after writing garbage"));
+
+    // **The premise, asserted rather than assumed.**
+    //
+    // Everything below is about how Cairn reports a damaged store, and none of
+    // it means anything if the store is not damaged. Checking it here is what
+    // separates "Cairn mishandled a corrupt database" from "the fixture failed
+    // to corrupt one" — two findings the old message could not tell apart, and
+    // conflating them sent three rounds of investigation at the product for a
+    // fault in the test.
+    assert_eq!(
+        std::fs::read(s.db_path()).unwrap_or_default(),
+        GARBAGE,
+        "the database is not the garbage this test wrote, so nothing below is \
+         about a corrupt store\n{diag}"
+    );
+    for suffix in ["-wal", "-shm"] {
+        let len = std::fs::metadata(s.sidecar(suffix))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert_eq!(
+            len, 0,
+            "a {suffix} survived beside the garbage, and SQLite reads the \
+             database through it — the store is intact and this test would be \
+             asserting against a daemon that is behaving correctly\n{diag}"
+        );
+    }
 
     let out = s.cairn(&["--json", "status"]);
     diag.push_str(&snapshot(&s, "after `status`"));

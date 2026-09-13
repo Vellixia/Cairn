@@ -1154,6 +1154,59 @@ mod tests {
         out
     }
 
+    /// **R1 is a claim about sequence, so the ordinals have to be the
+    /// session's own order.**
+    ///
+    /// `test_result(failed) … file_changed(F)+ … test_result(passed)` collects
+    /// the changes made *while a failure was open*; a change carrying a lower
+    /// ordinal than the failure it repaired is cleared by that failure instead
+    /// of collected, and the rule proposes nothing. The multiset is identical
+    /// either way — same four events, same kinds, same content — so nothing
+    /// downstream can tell the two apart.
+    ///
+    /// This is the half of the SC-701 shortfall that lives in the server. The
+    /// other half is `cairnd::arrival`: the ordinals were being allocated by
+    /// whichever task won a race, so a session could arrive permuted, *dense*
+    /// and *terminated*, and lose its only durable record with no gap for a
+    /// completeness check to find. A trial that produced nothing reported
+    /// `proposed=1 accepted=0 refused=0` — the one proposal being the
+    /// project-wide rule every earlier trial had already stated.
+    #[test]
+    fn r1_reads_a_sequence_and_a_permuted_one_states_nothing() {
+        let session = SessionRef(Uuid::from_u128(7));
+
+        // The order the agent worked in: it ran, it failed, a file changed, it
+        // passed.
+        let happened = vec![
+            invoked(1, "cargo test -p widget"),
+            verdict(2, TestOutcome::Failed),
+            changed(3, "src/widget/parser.rs"),
+            verdict(4, TestOutcome::Passed),
+        ];
+        let stated = session_rules(session, &happened);
+        assert_eq!(
+            stated.len(),
+            1,
+            "the session that R1 exists for proposed nothing: {stated:?}"
+        );
+
+        // The same four events, one adjacent transposition: the change now
+        // carries a lower ordinal than the failure it repaired.
+        let permuted = vec![
+            invoked(1, "cargo test -p widget"),
+            changed(2, "src/widget/parser.rs"),
+            verdict(3, TestOutcome::Failed),
+            verdict(4, TestOutcome::Passed),
+        ];
+        assert!(
+            session_rules(session, &permuted).is_empty(),
+            "R1 read a fix out of a session in which nothing was broken when the \
+             file changed; if this ever proposes, the rule has stopped being \
+             about sequence and the ordering `cairnd::arrival` keeps is no \
+             longer load-bearing"
+        );
+    }
+
     #[test]
     fn every_rules_content_survives_the_privacy_screen() {
         // Gate 3 runs the same single implementation that governs any other
