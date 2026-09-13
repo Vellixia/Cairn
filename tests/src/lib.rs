@@ -9,6 +9,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+/// Feature 005 fixtures: PostgreSQL at server schema v4, SQLite at local
+/// schema v8, identical-UUID seeding, multi-account authentication and restart
+/// injection.
+///
+/// A module of its own rather than more surface on `Sandbox` and `Server`: the
+/// feature's fixtures are about *two* databases and *three* accounts at once,
+/// which is not a shape either existing type has.
+pub mod feature005;
+
 /// An isolated Cairn installation: its own state directory, socket, daemon and
 /// Git repository.
 pub struct Sandbox {
@@ -337,6 +346,30 @@ impl Sandbox {
         event: &str,
         payload: serde_json::Value,
     ) -> CliResult {
+        self.hook_in_with_env(dir, agent, event, payload, &[])
+    }
+
+    /// A hook with extra environment, which is how a test makes one capture
+    /// **undeliverable** without touching the daemon that has to observe it
+    /// afterwards.
+    ///
+    /// The override that matters is `CAIRND_BIN`. A hook that finds no daemon
+    /// starts one and then succeeds, so a stopped daemon alone does not produce
+    /// a drop; pointing this one invocation at a daemon binary that does not
+    /// exist makes the start fail outright, on both transports, with no deadline
+    /// and no socket semantics involved. Every other way of forcing this has a
+    /// platform in which it is a race: an unbindable address depends on how two
+    /// different transports fail, and an exhausted deadline depends on whether
+    /// the transport checks the budget before it writes — Unix does, the named
+    /// pipe does not.
+    pub fn hook_in_with_env(
+        &self,
+        dir: &std::path::Path,
+        agent: &str,
+        event: &str,
+        payload: serde_json::Value,
+        env: &[(&str, &str)],
+    ) -> CliResult {
         use std::io::Write;
         use std::process::Stdio;
 
@@ -345,14 +378,19 @@ impl Sandbox {
             args.push("--agent".into());
             args.push(agent.into());
         }
-        let mut child = Command::new(binary("cairn"))
+        let mut command = Command::new(binary("cairn"));
+        command
             .args(&args)
             .current_dir(dir)
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
             .env("HOME", self.fake_home())
-            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -661,6 +699,39 @@ pub fn binary(name: &str) -> PathBuf {
         candidate.display()
     );
     candidate
+}
+
+/// The `cairn-server` executable the end-to-end suite spawns.
+///
+/// **`CAIRN_SERVER_BIN` wins, and CI sets it to the release build.**
+///
+/// Everything else here is resolved next to the test executable, which under
+/// `cargo test` means `target/debug/` — so the suite drove an *unoptimized*
+/// server. That matters for one reason above all others: a sign-in is an
+/// argon2 verify, and creating an account is an argon2 hash. The workflow
+/// already records the cost (`~0.7s` unoptimized against `~0.03s` released)
+/// and already builds a release server for the web end-to-end job for exactly
+/// this reason; the Rust suite signs in far more often and was not given the
+/// same treatment.
+///
+/// Only this binary is overridable, deliberately. `cairn` and `cairnd` are
+/// resolved as before: their cost is not argon2, and `CAIRND_BIN` already
+/// means something else here — it is how the CLI is *told* where the daemon
+/// is, so reading it back as an override would conflate two directions.
+///
+/// The fallback is the previous behaviour exactly, so a developer running
+/// `cargo test` with nothing set gets the debug server they always got.
+pub fn server_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("CAIRN_SERVER_BIN") {
+        let path = PathBuf::from(path);
+        assert!(
+            path.exists(),
+            "CAIRN_SERVER_BIN points at {}, which does not exist; build it first",
+            path.display()
+        );
+        return path;
+    }
+    binary("cairn-server")
 }
 
 fn binary_file_name(name: &str) -> String {
@@ -1035,6 +1106,21 @@ impl Server {
     /// other test running beside it, and would let *their* rows corrupt its
     /// fixture, which is exactly how a race test comes to promote accounts it
     /// has never heard of.
+    /// A database of this server's own, and its URL, without a server on it.
+    ///
+    /// For the one property that needs several servers to meet on a database
+    /// nobody has migrated yet: `start_own_database` returns only once *its*
+    /// server is up, by which time the migrations are done and the race is
+    /// over.
+    pub fn fresh_database() -> Option<String> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let name = format!("cairn_own_{}", unique());
+        create_database(&admin, &name);
+        Some(replace_database(&admin, &name))
+    }
+
     pub fn start_own_database() -> Option<Self> {
         let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
             .ok()
@@ -1086,9 +1172,32 @@ impl Server {
 
     /// Sign in and return the session cookie, panicking if the credential is
     /// refused.
+    ///
+    /// **The panic says whether the account exists**, because a bare 401 does
+    /// not. `no account with that email and password` is one message for two
+    /// unrelated failures — the row was never written, or it was written and the
+    /// password did not verify — and they have opposite repairs. This has cost a
+    /// CI investigation once already: `feature005_pattern_delivery` failed here
+    /// on one runner, nine sibling tests in the same binary passed, and the
+    /// message could not say which half was wrong.
+    ///
+    /// Read directly from the database rather than through the API, so a server
+    /// that is refusing every request cannot also decide what the diagnosis
+    /// says.
     pub fn cookie_for_password(&self, email: &str, password: &str) -> String {
-        self.try_cookie_for_password(email, password)
-            .unwrap_or_else(|| panic!("{email} could not sign in"))
+        self.sign_in(email, password).unwrap_or_else(|why| {
+            let rows = self.query_column(&format!(
+                "SELECT email || ' disabled=' || COALESCE(disabled::text, '?')
+                   FROM users WHERE email = '{}'",
+                email.replace('\'', "''")
+            ));
+            let total: i64 = self.count("SELECT COUNT(*) FROM users");
+            panic!(
+                "{email} could not sign in: {why}\n                   rows in `users` for that email: {rows:?}\n                   accounts on this server: {total}\n                   (an empty row list means the account was never written and the \
+                 fault is upstream of sign-in; a present row means the password \
+                 did not verify)"
+            )
+        })
     }
 
     /// Sign in, or `None` if the credential is refused.
@@ -1097,16 +1206,74 @@ impl Server {
     /// password that *stops* working — after a disable, after a reset, after a
     /// change — and a helper that panicked on refusal could not express them.
     pub fn try_cookie_for_password(&self, email: &str, password: &str) -> Option<String> {
-        let (_, headers) = self.post_json_raw(
+        self.sign_in(email, password).ok()
+    }
+
+    /// Sign in, or say **why** not.
+    ///
+    /// `try_cookie_for_password` deliberately answers `Option`, because several
+    /// requirements are about a credential that stops working and "refused" is
+    /// the expected outcome there. But a refusal and a server that answered
+    /// `500` — or did not answer at all — are the same `None`, and that cost a
+    /// CI investigation: `could not sign in` with nothing after it cannot be
+    /// told apart from a password the test meant to be rejected.
+    ///
+    /// So the reason is carried here and discarded by the `Option` wrapper
+    /// above, leaving that function's meaning exactly as it was while the
+    /// panicking caller gets the status line and the body.
+    fn sign_in(&self, email: &str, password: &str) -> Result<String, String> {
+        let (body, headers, status) = self.post_json_diagnosed(
             "/api/auth/login",
             &serde_json::json!({ "email": email, "password": password }),
-            None,
         );
         headers
             .into_iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
             .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
             .filter(|c| c.contains('=') && !c.ends_with('='))
+            .ok_or_else(|| {
+                format!(
+                    "no usable session cookie; status={status:?} body={}",
+                    serde_json::to_string(&body).unwrap_or_default()
+                )
+            })
+    }
+
+    /// `post_json_raw`, keeping the status line it throws away.
+    ///
+    /// `split_response` only collects `key: value` lines, and a status line has
+    /// no colon before the version — so `HTTP/1.1 500 …` was parsed as neither
+    /// a header nor the body and simply vanished. An empty `status` here means
+    /// curl produced no response at all, which is a transport failure rather
+    /// than a refusal, and the two need telling apart.
+    fn post_json_diagnosed(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (serde_json::Value, Vec<(String, String)>, Option<String>) {
+        let out = Command::new("curl")
+            .args([
+                "-s",
+                "-D",
+                "-",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "-d",
+                &body.to_string(),
+                &format!("{}{path}", self.base),
+            ])
+            .output()
+            .expect("curl runs");
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let status = raw
+            .lines()
+            .next()
+            .filter(|l| l.starts_with("HTTP/"))
+            .map(|l| l.trim().to_string());
+        let (parsed, headers) = split_response(&raw);
+        (parsed, headers, status)
     }
 
     /// POST with a session cookie, returning the body and the status.
@@ -1292,6 +1459,48 @@ impl Server {
         Self::spawn_at(&url, i64::MAX, true, None, Some(addr))
     }
 
+    /// Take this server off the air, keeping its address and its data.
+    ///
+    /// **What an outage actually is**, and the distinction matters for US4. The
+    /// alternatives both test something else: re-pointing a client at a dead
+    /// port is a *credential transition* — the endpoint is part of the identity,
+    /// so the client correctly forgets which account it was, and the test then
+    /// measures sign-out rather than unreachability. Dropping the whole `Server`
+    /// destroys the database, which measures data loss.
+    ///
+    /// Here the process stops, the address stays claimable, and the accepted
+    /// rows stay where they are. The client keeps its token, its endpoint and
+    /// its account, and simply cannot reach anything — which is the situation
+    /// FR-781 and FR-787 are written about.
+    ///
+    /// Nothing binds the port while it is down, so in principle another process
+    /// could take it. [`Self::come_back`] retries, which is the same remedy
+    /// `spawn_at` already applies for the same reason.
+    pub fn go_offline(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Put it back at the same address, serving the same data.
+    pub fn come_back(&mut self) {
+        let addr = self
+            .base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+            .to_string();
+        // Taken before the replacement is built, so dropping the old value does
+        // not drop the database out from under the new one.
+        let owned = std::mem::take(&mut self.owns_database);
+        let fresh = Self::spawn_at(
+            &self.database_url,
+            self.max_schema_version,
+            owned,
+            None,
+            Some(addr),
+        );
+        *self = fresh;
+    }
+
     pub fn upgraded_in_place(&mut self) -> Self {
         let addr = self
             .base
@@ -1372,10 +1581,16 @@ impl Server {
             args.push("--admin-password".into());
             args.push(password.into());
         }
-        let mut child = Command::new(binary("cairn-server"))
+        // **Keep stderr.** It used to go to `/dev/null`, so "exited early
+        // (exit status: 1)" was the whole story a failing start could tell —
+        // and a server that cannot reach PostgreSQL, cannot bind, or refuses
+        // its arguments all look identical from outside. Piped rather than
+        // inherited so it does not interleave with the test output, and read
+        // back only on the failure path below.
+        let mut child = Command::new(server_binary())
             .args(&args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("cairn-server runs");
 
@@ -1384,7 +1599,15 @@ impl Server {
             // A server that could not bind is gone, and no amount of polling
             // will bring it back. Notice, and let the caller try another port.
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(format!("cairn-server at {base} exited early ({status})"));
+                let mut why = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut why);
+                }
+                return Err(format!(
+                    "cairn-server at {base} exited early ({status}); stderr: {}",
+                    why.trim()
+                ));
             }
             if ureq_get(&format!("{base}/api/health")).is_some() {
                 return Ok(Self {
@@ -1477,18 +1700,14 @@ impl Server {
     /// so the seam moved to the same place an operator uses.
     pub fn new_user_token(&self, label: &str) -> String {
         let email = format!("{label}-{}@example.test", unique());
-        let body = serde_json::json!({
-            "email": email, "display_name": label, "password": "hunter2hunter2"
-        });
         self.create_user(&email, label, "hunter2hunter2");
 
-        let login = self.post_json_raw("/api/auth/login", &body, None);
-        let cookie = login
-            .1
-            .into_iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-            .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
-            .expect("session cookie");
+        // Through the diagnosed path: `.expect("session cookie")` here is the
+        // other half of the failure `sign_in` exists to explain, and it said
+        // even less than the first.
+        let cookie = self
+            .sign_in(&email, "hunter2hunter2")
+            .unwrap_or_else(|why| panic!("{email} could not sign in after users add: {why}"));
 
         let created = self.post_json(
             "/api/tokens",
@@ -1505,7 +1724,7 @@ impl Server {
     /// failure: a test that silently continued without its user would fail
     /// later, somewhere less informative.
     pub fn create_user(&self, email: &str, display_name: &str, password: &str) {
-        let out = Command::new(binary("cairn-server"))
+        let out = Command::new(server_binary())
             .args([
                 "--database-url",
                 &self.database_url,
@@ -1526,6 +1745,22 @@ impl Server {
             out.status.success(),
             "cairn-server users add {email}: {}",
             String::from_utf8_lossy(&out.stderr)
+        );
+        // Read back what was just written. `users add` exiting zero says the
+        // process was happy, not that a row landed in the database this server
+        // is serving — and every caller here goes straight on to sign in as that
+        // account, where the failure surfaces as an indistinguishable 401.
+        // Asserting it at the write keeps the diagnosis where the fault is.
+        let seen = self.query_column(&format!(
+            "SELECT email FROM users WHERE email = '{}'",
+            email.replace('\'', "''")
+        ));
+        assert_eq!(
+            seen.len(),
+            1,
+            "`cairn-server users add {email}` reported success and the account \
+             is not readable on {}: found {seen:?}",
+            self.database_url
         );
     }
 
@@ -1647,6 +1882,33 @@ fn drop_database(url: &str) {
                 .await;
             pool.close().await;
         }
+    });
+}
+
+/// Run SQL against a server database on a connection of its own.
+///
+/// Public because proving the revision allocator needs two *concurrent*
+/// transactions, and `Server::execute` gives no way to hold one open while
+/// another runs. A caller that wants overlap runs this on its own thread.
+///
+/// Multiple statements are sent as one simple query, so `BEGIN; …; COMMIT;`
+/// works and runs on a single connection — which is the whole point here, since
+/// a transaction split across pooled connections would prove nothing.
+pub fn run_server_sql(url: &str, sql: &str) {
+    let (url, sql) = (url.to_string(), sql.to_string());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+        // `raw_sql`, not `query`: the prepared-statement path refuses more than
+        // one command, and a transaction is three.
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        pool.close().await;
     });
 }
 
@@ -1839,6 +2101,40 @@ fn split_body_and_status(raw: &str) -> (serde_json::Value, u16) {
 }
 
 /// POST and return the HTTP status only, carrying a bearer token.
+/// POST a body from a file, returning the HTTP status only.
+///
+/// A file rather than `-d <string>` because a body large enough to test a
+/// megabyte limit is a body large enough to exceed the shell's argument
+/// length, and the failure would look like a curl error rather than a limit
+/// working.
+pub fn post_file_status_bearer(base: &str, path: &str, body: &[u8], token: &str) -> u16 {
+    let file = tempfile::NamedTempFile::new().expect("a file for the request body");
+    std::fs::write(file.path(), body).expect("write the request body");
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            "--data-binary",
+            &format!("@{}", file.path().display()),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
 pub fn post_status_bearer(base: &str, path: &str, body: &serde_json::Value, token: &str) -> u16 {
     let out = Command::new("curl")
         .args([
@@ -1869,6 +2165,16 @@ pub fn post_status_bearer(base: &str, path: &str, body: &serde_json::Value, toke
 pub fn attach_server(s: &Sandbox, server: &Server, token: &str) {
     let result = s.cairn(&["auth", "token", "set", token, "--server", &server.base]);
     assert!(result.ok(), "auth token set failed: {}", result.stderr);
+}
+
+/// Whether the hook's capture-drop journal is still on disk (FR-749c).
+///
+/// A path rather than a query because this is the one piece of capture-drop
+/// state that lives outside the store: the hook appends to it and the daemon is
+/// supposed to consume it, so "is it gone" is the only way to assert that the
+/// collection is a collection rather than a repeated read.
+pub fn journal_exists(s: &Sandbox) -> bool {
+    s.cairn_home().join("capture-drops.ndjson").exists()
 }
 
 /// Every file under `dir`, keyed by its path relative to `root`.

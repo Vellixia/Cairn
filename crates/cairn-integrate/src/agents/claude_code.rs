@@ -18,16 +18,86 @@ use cairn_core::lifecycle::{CanonicalEvent, CanonicalLifecycleEvent};
 
 pub struct ClaudeCode;
 
-/// The vendor events Cairn registers. Claude has both a success and a failure
-/// tool event, so it registers seven — one per canonical event.
+/// The vendor events Cairn registers.
+///
+/// The first seven are Feature 002's, one per canonical lifecycle event, and
+/// they still drive sessions, handoffs and context delivery. Feature 005 adds
+/// three that the lifecycle has no counterpart for and safe-event capture does:
+/// a prompt-time event, a pre-tool event, and a subagent boundary. They are
+/// registered rather than inferred because a hook that is not registered never
+/// fires, and an event that never fires cannot be reported as anything.
 pub const EVENTS: &[&str] = &[
     "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
     "Stop",
+    "SubagentStop",
     "PreCompact",
     "PostCompact",
     "SessionEnd",
+];
+
+/// Which vendor field carries which fact (T046, `contracts/extraction.md`
+/// §13.10, checked against official documentation on 2026-08-30).
+///
+/// `StopFailure.last_assistant_message` is deliberately absent. On Claude Code
+/// that field carries the API error string itself — *"API Error: Rate limit
+/// reached"* — not model prose, and feeding an error string to classification
+/// would manufacture decisions out of infrastructure failures. `StopFailure` is
+/// not a registered event either, so the field cannot be reached by accident.
+///
+/// `MessageDisplay.delta` is absent for the same kind of reason: it streams
+/// partial assistant text, and classifying half a sentence would fire on a
+/// decision the session had not finished making. Only settled turn text is
+/// read.
+pub const FIELDS: FieldMap = FieldMap {
+    agent: EventAgent::ClaudeCode,
+    session_keys: &["session_id"],
+    tool_name: &["tool_name"],
+    tool_input: &["tool_input"],
+    tool_response: &["tool_response"],
+    input_file_path: &["file_path", "notebook_path"],
+    input_command: &["command"],
+    response_exit_status: &["exit_code"],
+    response_error: &["error", "message", "stderr"],
+    open_trigger: &["source"],
+    compaction_trigger: &["trigger"],
+    close_reason: &["reason"],
+    user_prompt: &["prompt"],
+    assistant_message: &["last_assistant_message"],
+    subagent_ref: &["agent_id"],
+    subagent_kind: &["agent_type"],
+    // Claude has a dedicated failure event, so nothing here ever has to decide
+    // from a success payload whether a tool failed.
+    classify_failure: failure_from_response,
+};
+
+/// What each registered event produces, in spool order.
+pub const ROUTES: RoutingTable = &[
+    ("SessionStart", &[Route::SessionOpen]),
+    ("UserPromptSubmit", &[Route::UserPrompt]),
+    ("PreToolUse", &[Route::ToolStarted]),
+    (
+        "PostToolUse",
+        &[Route::Tool {
+            failed: Some(false),
+        }],
+    ),
+    ("PostToolUseFailure", &[Route::Tool { failed: Some(true) }]),
+    // The turn boundary and the decision it may have settled. The quiescence
+    // comes first because it is the fact the vendor reported; the signal
+    // follows because it is what that turn's text meant, and it may cite a
+    // token only an earlier ordinal established.
+    ("Stop", &[Route::Quiesced, Route::AssistantMessage]),
+    (
+        "SubagentStop",
+        &[Route::SubagentCompleted, Route::AssistantMessage],
+    ),
+    ("PreCompact", &[Route::Compacting]),
+    ("PostCompact", &[Route::Compacted]),
+    ("SessionEnd", &[Route::SessionClose]),
 ];
 
 /// The six events Feature 001 registered. The legacy bridge matches these
@@ -173,6 +243,14 @@ impl AgentAdapter for ClaudeCode {
 
     fn registered_events(&self) -> &'static [&'static str] {
         EVENTS
+    }
+
+    fn capture(&self, event: &str, payload: &RawPayload, env: &CaptureEnv<'_>) -> CaptureOutput {
+        route_capture(&FIELDS, ROUTES, event, payload, env)
+    }
+
+    fn carries_semantic_material(&self, event: &str) -> bool {
+        matches!(event, "UserPromptSubmit" | "Stop" | "SubagentStop")
     }
 
     fn normalize(&self, event: &str, payload: &RawPayload) -> Option<CanonicalLifecycleEvent> {
@@ -542,10 +620,78 @@ mod tests {
     }
 
     #[test]
-    fn seven_registrations_for_seven_canonical_events() {
-        assert_eq!(EVENTS.len(), 7);
+    fn the_seven_lifecycle_registrations_survive_the_three_capture_ones() {
+        // Feature 005 registers three more events than the canonical lifecycle
+        // has: a prompt-time hook, a pre-tool hook and a subagent boundary. The
+        // addition is additive, and the property worth pinning is not the count
+        // but that nothing the lifecycle depends on was dropped to make room.
+        for lifecycle in [
+            "SessionStart",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "Stop",
+            "PreCompact",
+            "PostCompact",
+            "SessionEnd",
+        ] {
+            assert!(
+                EVENTS.contains(&lifecycle),
+                "{lifecycle} stopped being registered"
+            );
+        }
+        for capture in ["UserPromptSubmit", "PreToolUse", "SubagentStop"] {
+            assert!(EVENTS.contains(&capture), "{capture} is not registered");
+        }
+        assert_eq!(EVENTS.len(), 10);
         assert_eq!(LEGACY_EVENTS.len(), 6);
-        assert!(EVENTS.contains(&"PostCompact"));
         assert!(!LEGACY_EVENTS.contains(&"PostCompact"));
+    }
+
+    #[test]
+    fn the_error_bearing_and_streaming_fields_are_unreachable() {
+        // `StopFailure.last_assistant_message` carries the API error string,
+        // not model prose, and classifying it would manufacture decisions out
+        // of infrastructure failures. `MessageDisplay.delta` streams a partial
+        // turn. Neither event is registered and neither field is named, so the
+        // refusal is structural rather than a rule somebody has to remember.
+        for never in ["StopFailure", "MessageDisplay"] {
+            assert!(!EVENTS.contains(&never), "{never} must not be registered");
+        }
+        let out = ClaudeCode.capture(
+            "StopFailure",
+            &payload(json!({
+                "session_id": "s",
+                "last_assistant_message": "API Error: Rate limit reached",
+            })),
+            &CaptureEnv::default(),
+        );
+        assert!(out.is_empty(), "an unregistered event produced capture");
+
+        let out = ClaudeCode.capture(
+            "MessageDisplay",
+            &payload(json!({"session_id": "s", "delta": "we should use post"})),
+            &CaptureEnv::default(),
+        );
+        assert!(out.is_empty(), "a streaming fragment produced capture");
+    }
+
+    #[test]
+    fn an_editing_tool_yields_a_file_change_and_never_a_generic_command() {
+        // SC-707 and SC-744. The identity may be unavailable; the event may not
+        // degrade into something else.
+        let out = ClaudeCode.capture(
+            "PostToolUse",
+            &payload(json!({
+                "session_id": "s",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "crates/cairnd/src/sync.rs"},
+                "tool_response": {"exit_code": 0},
+            })),
+            &CaptureEnv::default(),
+        );
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&cairn_core::event::EventKind::ToolSucceeded));
+        assert!(kinds.contains(&cairn_core::event::EventKind::FileChanged));
+        assert!(!kinds.contains(&cairn_core::event::EventKind::CommandExecuted));
     }
 }

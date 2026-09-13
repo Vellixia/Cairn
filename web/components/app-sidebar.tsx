@@ -6,18 +6,25 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
+  Activity,
+  Boxes,
   Brain,
   ChevronsUpDown,
   FolderGit2,
+  HeartPulse,
   KeyRound,
   LayoutDashboard,
   ListChecks,
   LogOut,
   Monitor,
   Moon,
+  Plug,
   RefreshCw,
+  Search,
   Sun,
   Terminal,
+  UserCog,
+  Users,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { CairnMark } from "@/components/logo";
@@ -74,6 +81,11 @@ export function AppSidebar() {
     queryFn: () => api.projects(),
   });
 
+  // Same query key the user menu below uses, so the role costs no extra
+  // request — and comes from the server on this page load rather than from
+  // anything cached at sign-in.
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api.me() });
+
   const active = projects.data?.projects.find((p) => p.id === activeId);
 
   const projectNav = activeId
@@ -90,10 +102,55 @@ export function AppSidebar() {
           label: "Sessions",
           icon: Terminal,
         },
+        {
+          href: `/projects/${activeId}/activity`,
+          label: "Activity",
+          icon: Activity,
+        },
         { href: `/projects/${activeId}/memory`, label: "Memory", icon: Brain },
+        {
+          href: `/projects/${activeId}/retrievals`,
+          label: "Retrievals",
+          icon: Search,
+        },
+        { href: `/projects/${activeId}/agents`, label: "Agents", icon: Plug },
+        { href: `/projects/${activeId}/domains`, label: "Domains", icon: Boxes },
         { href: `/projects/${activeId}/sync`, label: "Sync", icon: RefreshCw },
       ]
     : [];
+
+  /**
+   * The deployment-wide entries, and who is offered them.
+   *
+   * **`adminOnly` hides a door that will not open; it does not lock one.** Every
+   * route behind these entries is gated by the server — `AdminUser` on system
+   * health and on the account routes — and a member who types the URL is
+   * refused there and shown that refusal. Hiding the entry saves them the trip;
+   * it is not what stops them (FR-892).
+   *
+   * Team curation is *not* admin-only, because reading it is not: the list is
+   * visible to every authenticated account, with proposals filtered per caller
+   * by the server. Only the ratify and retire actions on that page are
+   * administrator work.
+   */
+  const isAdmin = me.data?.role === "admin";
+  const systemNav = [
+    { href: "/team", label: "Team", icon: Users, testId: "nav-team" },
+    {
+      href: "/system",
+      label: "System health",
+      icon: HeartPulse,
+      testId: "nav-system",
+      adminOnly: true,
+    },
+    {
+      href: "/admin/users",
+      label: "Accounts",
+      icon: UserCog,
+      testId: "nav-admin-users",
+      adminOnly: true,
+    },
+  ].filter((item) => isAdmin || !item.adminOnly);
 
   return (
     <Sidebar collapsible="icon">
@@ -180,6 +237,25 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroup>
         )}
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Server</SidebarGroupLabel>
+          <SidebarMenu>
+            {systemNav.map((item) => (
+              <SidebarMenuItem key={item.href}>
+                <SidebarMenuButton
+                  isActive={pathname.startsWith(item.href)}
+                  tooltip={item.label}
+                  onClick={closeOnMobile}
+                  render={<Link href={item.href} data-testid={item.testId} />}
+                >
+                  <item.icon />
+                  <span>{item.label}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
+          </SidebarMenu>
+        </SidebarGroup>
 
         <SidebarGroup>
           <SidebarGroupLabel>Your projects</SidebarGroupLabel>

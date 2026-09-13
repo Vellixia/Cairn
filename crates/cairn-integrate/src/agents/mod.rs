@@ -11,16 +11,25 @@ pub mod codex;
 pub mod generic_mcp;
 pub mod opencode;
 
-use crate::adapter::Observed;
+use crate::adapter::{Observed, RawPayload};
 use crate::edit::{json, EditError};
 use crate::markers::{self, CONTRACT_ID};
 use crate::model::{AgentId, HealthCondition, InstallationScope, ResourceKind, ResourceOwner};
 use crate::plan::RecordedInstall;
 use crate::{render, revision};
+use cairn_core::event::{
+    ChangeKind, CompactionTrigger, DeclineReason, EventAgent, EventContent, EventKind, FailureKind,
+    FileIdentity, OpenTrigger, ResourceKind as ResearchResource, TestOutcome, ToolClass,
+};
+use cairn_core::lexicon::{map_semantic_signal, SourceRole};
 use cairn_core::lifecycle::CanonicalLifecycleEvent;
+use cairn_core::redact::redact;
 use cairn_core::tools::{classify_tool, is_test_command, normalize_vendor_tool};
+use cairn_core::validate::SafeEventField;
+use cairn_core::vocabulary::SessionVocabulary;
 use cairn_core::wire::ObservationInput;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Read a file, treating absence as empty.
@@ -335,4 +344,664 @@ pub(crate) fn canonical(
     payload: &crate::RawPayload,
 ) -> CanonicalLifecycleEvent {
     CanonicalLifecycleEvent::new(kind, agent.as_str(), key, payload.cwd.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Feature 005 capture (T046, `contracts/safe-events.md`, `contracts/extraction.md`)
+// ---------------------------------------------------------------------------
+
+/// Which vendor fields feed which canonical content, declared per agent.
+///
+/// This replaces the two-field allowlist above. The allowlist was one pair of
+/// keys read from every vendor's `tool_input`, which worked while the only
+/// question was "did a tool touch a file or run a command" — and cannot express
+/// the twenty-one canonical kinds, because different vendors put the same fact
+/// in differently-named places and some of them put it nowhere.
+///
+/// A **typed map, per vendor**, rather than a wider shared allowlist, because a
+/// shared allowlist is a claim that every vendor spells everything the same
+/// way. Naming each field per agent is also what makes the capture matrix
+/// checkable: a cell is supported when this map names a field for it, and
+/// declined or unimplemented when it does not — never silently absent (FR-728,
+/// SC-706).
+///
+/// Every entry is a list of alternatives tried in order, because vendors rename
+/// fields between versions and an adapter that knew only the current name would
+/// go quiet rather than fail.
+pub struct FieldMap {
+    pub agent: EventAgent,
+    /// The vendor's own session identifier. Routing only; never transmitted.
+    pub session_keys: &'static [&'static str],
+    pub tool_name: &'static [&'static str],
+    pub tool_input: &'static [&'static str],
+    pub tool_response: &'static [&'static str],
+    /// Inside `tool_input`: the file a file-touching tool acted on.
+    pub input_file_path: &'static [&'static str],
+    /// Inside `tool_input`: the command an executing tool ran.
+    pub input_command: &'static [&'static str],
+    /// Inside `tool_response`: the process exit status.
+    pub response_exit_status: &'static [&'static str],
+    /// Inside `tool_response`: the vendor's own failure description.
+    pub response_error: &'static [&'static str],
+    pub open_trigger: &'static [&'static str],
+    pub compaction_trigger: &'static [&'static str],
+    pub close_reason: &'static [&'static str],
+    /// The user-prompt field. Emits `user_instruction_signal` (§13.10).
+    pub user_prompt: &'static [&'static str],
+    /// The **settled** assistant-message field. Emits `decision_signal`.
+    pub assistant_message: &'static [&'static str],
+    pub subagent_ref: &'static [&'static str],
+    pub subagent_kind: &'static [&'static str],
+    /// How this vendor's one tool event says a tool failed.
+    ///
+    /// A function per vendor rather than a shared rule, because the vendors
+    /// disagree: one has a dedicated failure event and never needs this, one
+    /// reports an exit status, and one only sometimes establishes failure at
+    /// all. Guessing on behalf of the third would manufacture failures
+    /// (FR-117, SC-110).
+    pub classify_failure: fn(Option<&Value>) -> bool,
+}
+
+/// What the local machine knows that a pure payload parse cannot.
+///
+/// The repository root is machine configuration and never crosses the boundary
+/// (FR-753); it is here so an absolute path can be *relativized* locally rather
+/// than transmitted or discarded. The vocabulary is here because a semantic
+/// signal's tokens must be justified against evidence already in the event
+/// stream, and only the daemon holds that stream — so the hook is handed the
+/// derived set rather than being trusted to invent one.
+pub struct CaptureEnv<'a> {
+    pub repo_root: Option<&'a Path>,
+    pub vocabulary: &'a SessionVocabulary,
+    /// Normalized `topic_key` → normalized `value_key` for keys this project
+    /// already establishes. Supplies the §13.5 fallback object; empty simply
+    /// means the fallback is unavailable.
+    pub established_values: &'a BTreeMap<String, String>,
+}
+
+impl Default for CaptureEnv<'_> {
+    fn default() -> Self {
+        static EMPTY_VOCAB: std::sync::OnceLock<SessionVocabulary> = std::sync::OnceLock::new();
+        static EMPTY_VALUES: std::sync::OnceLock<BTreeMap<String, String>> =
+            std::sync::OnceLock::new();
+        CaptureEnv {
+            repo_root: None,
+            vocabulary: EMPTY_VOCAB.get_or_init(SessionVocabulary::new),
+            established_values: EMPTY_VALUES.get_or_init(BTreeMap::new),
+        }
+    }
+}
+
+// The three types below are `cairn-core`'s, re-exported rather than redefined.
+//
+// They are the shape that crosses the capture-process boundary, so the wire
+// request that carries them and the adapter that builds them must be talking
+// about the same type — two structurally identical definitions would compile
+// and would let one side gain a field the other silently dropped.
+pub use cairn_core::event::{CaptureDecline, CaptureOutput, SafeEventDraft};
+
+/// Build a draft with the fields every kind shares.
+pub(crate) fn draft(
+    map: &FieldMap,
+    kind: EventKind,
+    vendor_event: &str,
+    content: Option<EventContent>,
+) -> SafeEventDraft {
+    SafeEventDraft {
+        kind,
+        agent: map.agent,
+        vendor_event: normalize_vendor_tool(vendor_event),
+        content,
+    }
+}
+
+/// The first of several alternative keys that carries a string.
+pub(crate) fn first_str<'a>(value: Option<&'a Value>, keys: &[&str]) -> Option<&'a str> {
+    let value = value?;
+    keys.iter()
+        .find_map(|k| value.get(*k))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// The first of several alternative keys that carries an object or array.
+pub(crate) fn first_value<'a>(value: Option<&'a Value>, keys: &[&str]) -> Option<&'a Value> {
+    let value = value?;
+    keys.iter().find_map(|k| value.get(*k))
+}
+
+/// The first of several alternative keys that carries an integer.
+pub(crate) fn first_i64(value: Option<&Value>, keys: &[&str]) -> Option<i64> {
+    let value = value?;
+    keys.iter()
+        .find_map(|k| value.get(*k))
+        .and_then(serde_json::Value::as_i64)
+}
+
+/// Establish a file's repository-relative identity, or say honestly that there
+/// is none (`contracts/safe-events.md` §6, FR-777e–g, SC-707, SC-744).
+///
+/// Four dispositions and no fifth. In particular there is **no** synthesized
+/// value, no working-directory substitute, and no degradation to a generic
+/// command: a tool that changed a file Cairn could not place is recorded as a
+/// file change whose identity is unavailable, because that is a different fact
+/// from "a command ran" and reporting it as one would hide that Cairn is
+/// watching a tool it cannot place.
+///
+/// The repository root is used here and never transmitted (FR-753).
+pub fn repo_file_identity(
+    raw: Option<&str>,
+    repo_root: Option<&Path>,
+) -> (FileIdentity, Option<String>) {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (FileIdentity::UnavailableFromVendor, None);
+    };
+
+    // Relativize before validating. An absolute path *inside* the repository is
+    // the ordinary case, and refusing it as absolute would report the ordinary
+    // case as an attack.
+    let candidate = match (repo_root, Path::new(raw).is_absolute()) {
+        (Some(root), true) => match Path::new(raw).strip_prefix(root) {
+            Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+            // Absolute and not under the root: outside the repository. Not a
+            // malformed path — a true fact about where the tool worked.
+            Err(_) => return (FileIdentity::OutOfRepository, None),
+        },
+        (None, true) => return (FileIdentity::OutOfRepository, None),
+        (_, false) => raw.replace('\\', "/"),
+    };
+
+    match cairn_core::validate::validate_repo_file(&candidate) {
+        // Screened here as well as bounded, because path segments are a
+        // vocabulary source: a file *named* after a credential must not
+        // contribute one (`contracts/extraction.md` §13.3).
+        Ok(normalized) => {
+            for segment in normalized.split('/') {
+                if cairn_core::validate::validate_safe_event_text(
+                    SafeEventField::Provenance,
+                    segment,
+                    &[],
+                )
+                .is_err()
+                {
+                    return (FileIdentity::OutOfRepository, None);
+                }
+            }
+            (FileIdentity::Present, Some(normalized))
+        }
+        // A traversing or otherwise unusable path points somewhere Cairn cannot
+        // place inside the repository. Refused, never repaired: stripping a
+        // leading `/` or resolving a `..` would turn a path outside the
+        // repository into one that looks inside it.
+        Err(_) => (FileIdentity::OutOfRepository, None),
+    }
+}
+
+/// Redact a free-text field and refuse it if screening still fails.
+///
+/// Redaction runs first and every later step reads only the redacted form, so a
+/// credential can neither reach the wire nor enter the session vocabulary and
+/// legitimise a token for itself. Screening after redaction is the second line:
+/// redaction is a mechanism, not a guarantee, and a field it did not clean is
+/// dropped rather than sent.
+pub fn safe_text(field: SafeEventField, raw: &str) -> Option<String> {
+    let redacted = redact(raw);
+    if redacted.len() > cairn_core::event::FREE_TEXT_MAX_BYTES {
+        // Over-bound values are refused, never truncated: a truncated command
+        // is a different command.
+        return None;
+    }
+    match cairn_core::validate::validate_safe_event_text(field, &redacted, &[]) {
+        Ok(()) => Some(redacted),
+        Err(_) => None,
+    }
+}
+
+/// Everything one tool invocation establishes, in spool order.
+///
+/// The tool event comes first because it is the fact the vendor reported; the
+/// derived events follow because they are what that fact means. A file-touching
+/// tool always yields a `file_changed` or `file_read` — with an explicit
+/// identity disposition when the path could not be established — and never
+/// degrades into `command_executed` (SC-707, SC-744).
+pub fn tool_capture(
+    map: &FieldMap,
+    vendor_event: &str,
+    payload: &Value,
+    failed: bool,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    let Some(tool) = first_str(Some(payload), map.tool_name) else {
+        return CaptureOutput::default()
+            .declined(EventKind::ToolSucceeded, DeclineReason::VendorUnavailable);
+    };
+    let vendor_tool = normalize_vendor_tool(tool).unwrap_or_else(|| "tool".to_string());
+    let input = first_value(Some(payload), map.tool_input);
+    let response = first_value(Some(payload), map.tool_response);
+    let exit_status = first_i64(response, map.response_exit_status).map(|v| v as i32);
+    let note = first_str(response, map.response_error)
+        .and_then(|raw| safe_text(SafeEventField::FailureNote, raw));
+
+    let raw_command = first_str(input, map.input_command);
+    let raw_file = first_str(input, map.input_file_path);
+    let tool_class = tool_class_of(&vendor_tool, raw_command, raw_file);
+
+    let mut out = CaptureOutput::default();
+    out = if failed {
+        out.event(draft(
+            map,
+            EventKind::ToolFailed,
+            vendor_event,
+            Some(EventContent::ToolFailure {
+                vendor_tool: vendor_tool.clone(),
+                tool_class,
+                failure_kind: failure_kind_of(exit_status, note.as_deref()),
+                failure_note: note,
+                exit_status,
+            }),
+        ))
+    } else {
+        out.event(draft(
+            map,
+            EventKind::ToolSucceeded,
+            vendor_event,
+            Some(EventContent::Tool {
+                vendor_tool: vendor_tool.clone(),
+                tool_class,
+            }),
+        ))
+    };
+
+    match tool_class {
+        ToolClass::Edit | ToolClass::Read => {
+            let (file_identity, repo_file) = repo_file_identity(raw_file, env.repo_root);
+            let kind = if tool_class == ToolClass::Edit {
+                EventKind::FileChanged
+            } else {
+                EventKind::FileRead
+            };
+            out = out.event(draft(
+                map,
+                kind,
+                vendor_event,
+                Some(EventContent::File {
+                    repo_file,
+                    repo_file_from: None,
+                    // Only a rename or a deletion the vendor actually reported
+                    // may claim to be one. An edit tool establishes that the
+                    // file changed, and nothing finer.
+                    change_kind: (kind == EventKind::FileChanged).then_some(ChangeKind::Modified),
+                    file_identity,
+                }),
+            ));
+        }
+        ToolClass::Test => {
+            if let Some(command) =
+                raw_command.and_then(|c| safe_text(SafeEventField::TestCommand, c))
+            {
+                out = out.event(draft(
+                    map,
+                    EventKind::TestExecuted,
+                    vendor_event,
+                    Some(EventContent::TestInvocation {
+                        test_command: command,
+                    }),
+                ));
+            }
+            out = out.event(draft(
+                map,
+                EventKind::TestResult,
+                vendor_event,
+                Some(EventContent::TestVerdict {
+                    // Read, never inferred. A runner whose verdict Cairn could
+                    // not read is not a pass.
+                    test_outcome: match (failed, exit_status) {
+                        (true, _) => TestOutcome::Failed,
+                        (false, Some(0)) => TestOutcome::Passed,
+                        (false, Some(_)) => TestOutcome::Failed,
+                        (false, None) => TestOutcome::Unknown,
+                    },
+                    exit_status,
+                    tests_total: None,
+                    tests_failed: None,
+                }),
+            ));
+        }
+        ToolClass::Execute => {
+            if let Some(command) =
+                raw_command.and_then(|c| safe_text(SafeEventField::CommandLine, c))
+            {
+                out = out.event(draft(
+                    map,
+                    EventKind::CommandExecuted,
+                    vendor_event,
+                    Some(EventContent::Command {
+                        command_line: command,
+                        exit_status,
+                    }),
+                ));
+            }
+        }
+        ToolClass::Research => {
+            out = out.event(draft(
+                map,
+                EventKind::ResearchActivity,
+                vendor_event,
+                // Deliberately coarse. A URL is a locator, and a locator is
+                // exactly the sort of value this boundary does not carry.
+                Some(EventContent::Research {
+                    resource_kind: ResearchResource::Web,
+                }),
+            ));
+        }
+        ToolClass::Other => {}
+    }
+    out
+}
+
+/// A tool's class, from what it is called and what it was given.
+///
+/// The command and the file are consulted because a vendor's generic execution
+/// tool is a test run when what it ran was a test — and recording a test run as
+/// a generic command would lose the strongest signal in the extraction model.
+fn tool_class_of(vendor_tool: &str, command: Option<&str>, file: Option<&str>) -> ToolClass {
+    if let Some(command) = command {
+        return if is_test_command(command) {
+            ToolClass::Test
+        } else {
+            ToolClass::Execute
+        };
+    }
+    match classify_tool(vendor_tool) {
+        cairn_core::domain::ObservationType::FileChanged => ToolClass::Edit,
+        cairn_core::domain::ObservationType::FileRead => ToolClass::Read,
+        cairn_core::domain::ObservationType::TestRun => ToolClass::Test,
+        cairn_core::domain::ObservationType::CommandRun => ToolClass::Execute,
+        cairn_core::domain::ObservationType::Discovery => ToolClass::Research,
+        _ if file.is_some() => ToolClass::Edit,
+        _ => ToolClass::Other,
+    }
+}
+
+/// Classify a failure rather than describing it.
+///
+/// Consolidation counts repeats of *the same* failure, and two spellings of one
+/// English sentence would never count as the same failure. The note carries the
+/// redacted detail alongside, for a human.
+fn failure_kind_of(exit_status: Option<i32>, note: Option<&str>) -> FailureKind {
+    let lowered = note.unwrap_or_default().to_ascii_lowercase();
+    for (needle, kind) in [
+        ("not found", FailureKind::NotFound),
+        ("no such file", FailureKind::NotFound),
+        ("permission denied", FailureKind::PermissionDenied),
+        ("timed out", FailureKind::Timeout),
+        ("timeout", FailureKind::Timeout),
+        ("interrupted", FailureKind::Interrupted),
+        ("invalid", FailureKind::InvalidInput),
+        ("unavailable", FailureKind::Unavailable),
+    ] {
+        if lowered.contains(needle) {
+            return kind;
+        }
+    }
+    match exit_status {
+        Some(0) | None => FailureKind::Unknown,
+        Some(_) => FailureKind::NonZeroExit,
+    }
+}
+
+/// Map transient vendor text to a semantic signal, or record why not.
+///
+/// The material is read here, in memory, during the invocation that already
+/// parses and redacts it, and is discarded when this function returns. No
+/// vendor field it reads is ever persisted, locally or centrally — which is why
+/// the raw payload never crosses to the daemon (FR-730, SC-741).
+pub fn semantic_capture(
+    map: &FieldMap,
+    vendor_event: &str,
+    payload: &Value,
+    role: SourceRole,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    let keys = match role {
+        SourceRole::UserPrompt => map.user_prompt,
+        SourceRole::AssistantMessage => map.assistant_message,
+    };
+    // An agent Cairn declines to read semantic material from names no field
+    // here, and that is the decline — not an omission to be discovered later.
+    if keys.is_empty() {
+        return CaptureOutput::default().declined(role.event_kind(), DeclineReason::PolicyExcluded);
+    }
+    // A null settled assistant message is not an empty decision. It is the
+    // vendor saying there was no settled turn text, which declines.
+    let Some(text) = first_str(Some(payload), keys) else {
+        return CaptureOutput::default()
+            .declined(role.event_kind(), DeclineReason::VendorUnavailable);
+    };
+
+    match map_semantic_signal(text, role, env.vocabulary, env.established_values) {
+        Ok(signal) => CaptureOutput::default().event(draft(
+            map,
+            signal.kind,
+            vendor_event,
+            Some(signal.content),
+        )),
+        Err(reason) => CaptureOutput::default().declined(role.event_kind(), reason),
+    }
+}
+
+/// What one vendor event means, canonically.
+///
+/// A vendor event maps to a small list of these, and the list is the routing
+/// table. Written as data rather than as a `match` per adapter because the
+/// interesting per-vendor fact is *which* canonical events an event produces —
+/// and a table can be read against the capture matrix, while three hand-written
+/// matches have to be trusted to agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// `session_opened`, or `session_resumed` when the trigger says so.
+    SessionOpen,
+    SessionClose,
+    Compacting,
+    Compacted,
+    /// A tool is about to run. Carries no derived events: nothing has happened
+    /// yet, and recording a file change before the edit would be a claim.
+    ToolStarted,
+    /// A tool has run. `Some(failed)` when the vendor has a dedicated failure
+    /// event; `None` when one event carries both and the payload decides.
+    Tool {
+        failed: Option<bool>,
+    },
+    Quiesced,
+    SubagentCompleted,
+    /// Transient user-prompt text. Emits `user_instruction_signal` or declines.
+    UserPrompt,
+    /// Transient settled assistant text. Emits `decision_signal` or declines.
+    AssistantMessage,
+}
+
+/// One vendor event and everything it produces.
+pub type RoutingTable = &'static [(&'static str, &'static [Route])];
+
+/// Run a vendor's routing table for one event.
+///
+/// The order of `Route`s is the order the canonical events are spooled in, and
+/// that order is load-bearing: `session_seq` is assigned in it, and a semantic
+/// signal may only cite a token an earlier ordinal established. A table that
+/// listed the signal before the tool event that justified it would build claims
+/// the server then permanently refuses.
+pub fn route_capture(
+    map: &FieldMap,
+    table: RoutingTable,
+    event: &str,
+    payload: &RawPayload,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    // Routing needs the vendor's session key for nothing except establishing
+    // that the event *has* one: an event that cannot name its session cannot be
+    // routed and is declined, exactly as it is today (FR-118, FR-737).
+    if session_key(payload, map.session_keys).is_none() {
+        return CaptureOutput::default();
+    }
+    let Some((_, routes)) = table.iter().find(|(name, _)| *name == event) else {
+        // Not registered for this agent. Declining is the normal way an event
+        // Cairn does not map is handled, and it is not a failure (FR-115).
+        return CaptureOutput::default();
+    };
+
+    let mut out = CaptureOutput::default();
+    for route in *routes {
+        out = out.chain(one_route(map, *route, event, payload, env));
+    }
+    out
+}
+
+fn one_route(
+    map: &FieldMap,
+    route: Route,
+    event: &str,
+    payload: &RawPayload,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    let json = &payload.json;
+    match route {
+        Route::SessionOpen => {
+            let trigger = first_str(Some(json), map.open_trigger).unwrap_or("startup");
+            let open_trigger = trigger
+                .parse::<OpenTrigger>()
+                .unwrap_or(OpenTrigger::Startup);
+            // A resumed session is a distinct kind rather than a flag, because
+            // "this session continued" and "this session began" are different
+            // facts about a session's history and a reader should not have to
+            // recover one from a field on the other.
+            let kind = if open_trigger == OpenTrigger::Resume {
+                EventKind::SessionResumed
+            } else {
+                EventKind::SessionOpened
+            };
+            CaptureOutput::default().event(draft(
+                map,
+                kind,
+                event,
+                Some(EventContent::SessionOpen { open_trigger }),
+            ))
+        }
+        Route::SessionClose => {
+            // Bounded provenance, screened like any other. A vendor's reason
+            // string is short by convention and not by guarantee.
+            let close_reason = first_str(Some(json), map.close_reason)
+                .and_then(normalize_vendor_tool)
+                .unwrap_or_else(|| "unknown".to_string());
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::SessionClosed,
+                event,
+                Some(EventContent::SessionClose { close_reason }),
+            ))
+        }
+        Route::Compacting | Route::Compacted => {
+            let compaction_trigger =
+                match first_str(Some(json), map.compaction_trigger).unwrap_or("auto") {
+                    "manual" => CompactionTrigger::Manual,
+                    _ => CompactionTrigger::Auto,
+                };
+            let kind = if route == Route::Compacting {
+                EventKind::ContextCompacting
+            } else {
+                EventKind::ContextCompacted
+            };
+            CaptureOutput::default().event(draft(
+                map,
+                kind,
+                event,
+                Some(EventContent::Compaction { compaction_trigger }),
+            ))
+        }
+        Route::ToolStarted => {
+            let Some(tool) = first_str(Some(json), map.tool_name) else {
+                return CaptureOutput::default()
+                    .declined(EventKind::ToolStarted, DeclineReason::VendorUnavailable);
+            };
+            let vendor_tool = normalize_vendor_tool(tool).unwrap_or_else(|| "tool".to_string());
+            let input = first_value(Some(json), map.tool_input);
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::ToolStarted,
+                event,
+                Some(EventContent::Tool {
+                    tool_class: tool_class_of(
+                        &vendor_tool,
+                        first_str(input, map.input_command),
+                        first_str(input, map.input_file_path),
+                    ),
+                    vendor_tool,
+                }),
+            ))
+        }
+        Route::Tool { failed } => {
+            let failed = failed.unwrap_or_else(|| {
+                (map.classify_failure)(first_value(Some(json), map.tool_response))
+            });
+            tool_capture(map, event, json, failed, env)
+        }
+        Route::Quiesced => {
+            CaptureOutput::default().event(draft(map, EventKind::AgentQuiesced, event, None))
+        }
+        Route::SubagentCompleted => {
+            let Some(subagent_ref) =
+                first_str(Some(json), map.subagent_ref).and_then(normalize_vendor_tool)
+            else {
+                // An attribution with no identity attributes nothing. Declining
+                // is better than inventing a reference, which would make two
+                // unrelated subagents look like one.
+                return CaptureOutput::default().declined(
+                    EventKind::SubagentCompleted,
+                    DeclineReason::VendorUnavailable,
+                );
+            };
+            let subagent_kind = first_str(Some(json), map.subagent_kind)
+                .and_then(normalize_vendor_tool)
+                .unwrap_or_else(|| "unknown".to_string());
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::SubagentCompleted,
+                event,
+                Some(EventContent::Subagent {
+                    subagent_ref,
+                    subagent_kind,
+                    // The hook cannot know the ordinal: the daemon assigns it,
+                    // and it does so after this event is built. Zero is the
+                    // honest placeholder for "not established here" rather than
+                    // a guess at the parent's position.
+                    parent_session_seq: 0,
+                }),
+            ))
+        }
+        Route::UserPrompt => semantic_capture(map, event, json, SourceRole::UserPrompt, env),
+        Route::AssistantMessage => {
+            semantic_capture(map, event, json, SourceRole::AssistantMessage, env)
+        }
+    }
+}
+
+/// The default failure test for a vendor whose one tool event carries both
+/// outcomes.
+///
+/// Read, never inferred. A response with no exit status and no error has told
+/// Cairn nothing about the outcome, and calling that a failure would invent a
+/// failure the vendor did not report.
+pub fn failure_from_response(response: Option<&Value>) -> bool {
+    let Some(response) = response else {
+        return false;
+    };
+    if let Some(code) = response.get("exit_code").and_then(Value::as_i64) {
+        return code != 0;
+    }
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    if response.get("failed").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    response.get("error").is_some_and(|e| !e.is_null())
 }

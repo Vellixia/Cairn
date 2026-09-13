@@ -164,6 +164,36 @@ pub trait AgentAdapter: Send + Sync {
     /// The vendor events this adapter registers. Cairn registers only what its
     /// canonical lifecycle needs and reports the rest as unused (US2 #6).
     fn registered_events(&self) -> &'static [&'static str];
+
+    /// Feature 005 capture: everything one vendor event establishes.
+    ///
+    /// Additive, and deliberately beside `normalize` rather than replacing it.
+    /// `normalize` drives sessions, handoffs and context delivery through the
+    /// seven canonical lifecycle events, and those behaviours are not being
+    /// rebuilt; this produces the richer safe-event stream the server
+    /// consolidates. An adapter that implements neither is silent, which is
+    /// what a generic MCP agent should be — it is not part of the automatic
+    /// capture population (FR-838f).
+    fn capture(
+        &self,
+        event: &str,
+        payload: &RawPayload,
+        env: &crate::agents::CaptureEnv<'_>,
+    ) -> crate::agents::CaptureOutput {
+        let _ = (event, payload, env);
+        crate::agents::CaptureOutput::default()
+    }
+
+    /// Whether this vendor event carries transient prompt or assistant text.
+    ///
+    /// The caller asks so it knows to fetch a session vocabulary first. Nothing
+    /// else depends on the answer, and an adapter that reads no such field
+    /// answers `false` — which is how OpenCode's decline stays a property of
+    /// the adapter rather than of the caller remembering to skip it.
+    fn carries_semantic_material(&self, event: &str) -> bool {
+        let _ = event;
+        false
+    }
 }
 
 /// The structured outcome when a manager step cannot be automated (FR-233).

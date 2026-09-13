@@ -58,10 +58,48 @@ fn a_non_repository_fails_cleanly_and_creates_no_state() {
     }
 }
 
+/// What this test writes over the database, named once so the corruption and
+/// the assertion that it took cannot drift apart.
+const GARBAGE: &[u8] = b"not a valid sqlite database";
+
+/// The store's on-disk state, for the assertions that have to say which file
+/// the daemon actually read.
+fn snapshot(s: &Sandbox, label: &str) -> String {
+    let mut out = format!("--- {label} ---\n");
+    for (name, path) in [
+        ("db", s.db_path()),
+        ("-wal", s.sidecar("-wal")),
+        ("-shm", s.sidecar("-shm")),
+    ] {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let head: String = bytes
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                out.push_str(&format!(
+                    "  {name} {} len={} head={head}\n",
+                    path.display(),
+                    bytes.len()
+                ));
+            }
+            Err(e) => out.push_str(&format!(
+                "  {name} {} absent/unreadable: {:?}\n",
+                path.display(),
+                e.kind()
+            )),
+        }
+    }
+    out
+}
+
 #[test]
 fn a_corrupt_database_is_detected_and_reported() {
     let s = Sandbox::new();
-    s.must(&["daemon", "stop"]);
+    let mut diag = String::new();
+    diag.push_str(&snapshot(&s, "before anything is stopped"));
 
     // Wait for the daemon *process* to be gone, not merely for its socket to
     // stop answering. SQLite checkpoints the write-ahead log into the main
@@ -69,30 +107,103 @@ fn a_corrupt_database_is_detected_and_reported() {
     // listening but is still shutting down will write a valid database back
     // over the garbage below — and `status` then succeeds, which is what made
     // this test fail about a third of the time.
+    //
+    // **Taken before anything stops it**, which is the half the first repair
+    // missed. There was a `daemon stop` above this line, so by the time the
+    // processes were identified the daemon had usually stopped answering — and
+    // the two platforms then disagree about what that means. On Unix
+    // `daemons_for_socket` scans processes by name and environment, so it still
+    // finds a daemon that is shutting down and the wait below does its job. On
+    // Windows it asks the named pipe who is serving it, and a pipe that has
+    // already gone answers nothing: the list came back empty and the loop below
+    // iterated over nothing.
+    //
+    // That guard is necessary and was not sufficient. What actually kept
+    // failing on Windows is below, at the sidecars: a file with a live handle
+    // cannot be unlinked there, the removal was discarded, and the surviving
+    // log carried the whole database past the garbage. Both halves are
+    // repaired; neither replaces the other.
     let victims = cairn_sys::daemons_for_socket(&s.socket);
+    diag.push_str(&format!("victims={victims:?}\n"));
     s.stop_daemon();
     for pid in &victims {
+        let exited = cairn_sys::wait_for_exit(*pid, std::time::Duration::from_secs(5));
+        diag.push_str(&format!("wait_for_exit({pid})={exited}\n"));
         assert!(
-            cairn_sys::wait_for_exit(*pid, std::time::Duration::from_secs(5)),
-            "daemon {pid} should exit after `daemon stop`"
+            exited,
+            "daemon {pid} should exit after `daemon stop`\n{diag}"
+        );
+    }
+    diag.push_str(&snapshot(&s, "after the daemon exited"));
+
+    // Overwrite the database with garbage — *and* take the write-ahead log out
+    // beside it. Truncating only the main file does not corrupt the store:
+    // SQLite in WAL mode reads page 1 through the log when the log holds it, so
+    // the daemon opens a perfectly valid database and `status` succeeds.
+    //
+    // **Removal is not enough, and where it is not enough is Windows.** A file
+    // with a live handle cannot be unlinked there — SQLite opens without
+    // `FILE_SHARE_DELETE` — so `remove_file` returns `PermissionDenied` and a
+    // `let _ =` swallowed it. The log survived, carried the whole database, and
+    // the test reported "a corrupt database must not report success": a message
+    // about the product, for a fixture that had not corrupted anything. Unix
+    // never showed it, because `unlink` succeeds on an open file.
+    //
+    // Truncation needs no delete and works through a shared handle, so it is
+    // the fallback. A zero-length log is not a log SQLite recovers from.
+    for suffix in ["-wal", "-shm"] {
+        let path = s.sidecar(suffix);
+        let outcome = match std::fs::remove_file(&path) {
+            Ok(()) => "removed".to_string(),
+            Err(e) => match std::fs::File::create(&path) {
+                Ok(_) => format!("truncated after {:?}", e.kind()),
+                Err(t) => format!(
+                    "left behind: remove {:?}, truncate {:?}",
+                    e.kind(),
+                    t.kind()
+                ),
+            },
+        };
+        diag.push_str(&format!("{suffix}: {outcome}\n"));
+    }
+    std::fs::write(s.db_path(), GARBAGE).expect("write");
+    diag.push_str(&snapshot(&s, "after writing garbage"));
+
+    // **The premise, asserted rather than assumed.**
+    //
+    // Everything below is about how Cairn reports a damaged store, and none of
+    // it means anything if the store is not damaged. Checking it here is what
+    // separates "Cairn mishandled a corrupt database" from "the fixture failed
+    // to corrupt one" — two findings the old message could not tell apart, and
+    // conflating them sent three rounds of investigation at the product for a
+    // fault in the test.
+    assert_eq!(
+        std::fs::read(s.db_path()).unwrap_or_default(),
+        GARBAGE,
+        "the database is not the garbage this test wrote, so nothing below is \
+         about a corrupt store\n{diag}"
+    );
+    for suffix in ["-wal", "-shm"] {
+        let len = std::fs::metadata(s.sidecar(suffix))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert_eq!(
+            len, 0,
+            "a {suffix} survived beside the garbage, and SQLite reads the \
+             database through it — the store is intact and this test would be \
+             asserting against a daemon that is behaving correctly\n{diag}"
         );
     }
 
-    // Overwrite the database with garbage — *and* remove the write-ahead log
-    // beside it. Truncating only the main file does not reliably corrupt the
-    // store: SQLite recovers from `-wal`, so the daemon opens a perfectly valid
-    // database and `status` succeeds. That is what made this test flaky rather
-    // than wrong, and it failed roughly three runs in five.
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(s.sidecar(suffix));
-    }
-    std::fs::write(s.db_path(), b"not a valid sqlite database").expect("write");
-
     let out = s.cairn(&["--json", "status"]);
+    diag.push_str(&snapshot(&s, "after `status`"));
+    diag.push_str(&format!(
+        "status code={} stdout={} stderr={}\n",
+        out.code, out.stdout, out.stderr
+    ));
     assert!(
         !out.ok(),
-        "a corrupt database must not report success: {}",
-        out.stderr
+        "a corrupt database must not report success\n{diag}"
     );
     // And it must fail as a reported storage problem, not a panic. Asserting
     // only `!ok` would pass on a crash, which is the failure mode this is

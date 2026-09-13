@@ -188,7 +188,15 @@ decide, and an empty `project_identities` slice is answered by *passing* the
 | Personal promotion | The single source project's tokens — `evaluate_promotion` passes its own `project_identity` (§1) as a one-element slice |
 | Team proposal | Same as direct personal creation — the current project's tokens, or empty |
 | Team promotion | Same as personal promotion — the source project's tokens |
-| Server-side synchronization ingest (§2c) | The **union** of every project the pushing user is a member of, because the server cannot know which project the client was in when it created the item, only every project it could have been (D447) |
+| Server-side synchronization ingest (§2c) | The **union** of every project the pushing user is a member of, deleted projects included (FR-577a), because the server cannot know which project the client was in when it created the item, only every project it could have been (D447) |
+
+**Post-cutover, the server's command routes read the same set (FR-577a).** Rows 1, 3 and 4
+describe what a *client* hands its own pre-check — the one project in front of it. The
+server-side half of each (`POST /api/personal/knowledge`, `POST /api/team/knowledge`,
+`POST /api/patterns`) screens against the caller's whole membership, out of the same gatherer
+row 5 names. One gatherer, because two drifted: the command side considered every membership
+its query returned, the ingest side filtered `deleted_at IS NULL`, and a deleted project's
+name was therefore refused by a command and accepted by a push of the identical text.
 
 **FR-545 (verified by SC-438) — the five entry points, all of them, no exceptions.**
 `validate_global_content` MUST be called by, and only by, code on these five paths, because
@@ -421,6 +429,15 @@ can know every project that user could have been in. This is deliberately broade
 client-side check, and it catches exactly the case a client-side check structurally cannot:
 content naming project X, pushed by a client that happened to be working in project Y at the
 time.
+
+**Deletion does not narrow it (FR-577a).** Project deletion is soft: `tombstone` stamps
+`deleted_at` and leaves `name` and `repository_remote` exactly where they were, and the
+records derived from that project are untouched by its deletion (§9, FR-519). The name stays
+disclosable for as long as the derived knowledge exists, which is indefinitely, so the union
+is over memberships alone with no `deleted_at` predicate beside them. A membership that was
+*removed* does drop out: the union is over memberships, and a project the caller has no
+standing in is not theirs to be caught naming — a server screening against every project it
+stores would refuse most English and tell every caller what every other team is called.
 
 **This layers with the client check; it does not replace it (FR-577).** A well-behaved client
 still validates before it ever queues the item — that check is cheaper, catches the mistake

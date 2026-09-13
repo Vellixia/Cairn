@@ -92,8 +92,19 @@ fn audit(sources: &[(String, String)]) -> Vec<Duplicate> {
         // narrowed. The blind spot this accepts is a duplicate hidden inside a
         // `#[cfg(test)]` module; that is tolerable because such code cannot run
         // in a shipped binary, and it is named here rather than left implicit.
+        // An integration test is a test module that happens to live in its own
+        // file. The rule below already exempts `#[cfg(test)]` for the reason
+        // that a test asserting `err.class == Some("absolute_path")` is a
+        // *consumer* of the class — and a file under a crate's `tests/`
+        // directory is nothing but that, since Cargo will not link it into a
+        // shipped binary either. Exempting one location and not the other made
+        // the audit depend on where a consumer was written rather than on what
+        // it was, and the first test to name a second class from `tests/` was
+        // flagged as a duplicate implementation of a validator it only calls.
+        let is_integration_test = normalized.contains("/tests/");
         let production = match source.find("#[cfg(test)]") {
             Some(at) => &source[..at],
+            None if is_integration_test => "",
             None => source.as_str(),
         };
         let code: String = production

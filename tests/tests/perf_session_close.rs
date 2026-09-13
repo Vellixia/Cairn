@@ -96,21 +96,59 @@ fn codex_session_end_fits_inside_the_vendors_own_budget() {
 
     // Every boundary landed: the measurement is of real closes, not of a hook
     // that returned early because nothing happened.
-    s.settle_within(
-        "every boundary to be reconciled",
-        std::time::Duration::from_secs(30),
-        |s| {
-            s.json(&["session", "list"])["sessions"]
-                .as_array()
-                .map(|a| a.len() >= BOUNDARIES && a.iter().all(|x| x["status"] != "active"))
-                .unwrap_or(false)
-        },
+    //
+    // **Sized to a hundred reconciliations on the slowest runner, and it was
+    // not.** Thirty seconds allots three hundred milliseconds to each of the
+    // hundred boundaries, and the Windows runner — debug build, slowest in the
+    // matrix — recorded a single boundary at 1524 ms in the very run that timed
+    // out here, while its median stayed at 24 ms and its p95 at 33 ms. The
+    // budget SC-128 asserts was met; the wait for the work to settle afterwards
+    // was not long enough for the machine it ran on. Raising it changes no
+    // claim: the assertions below still hold the shipped build to the vendor's
+    // own timeout, and a reconciliation that genuinely stalls still fails here.
+    //
+    // The shortfall comes with the failure, because "none reconciled" and
+    // "ninety-nine reconciled" are different defects and a bare timeout cannot
+    // tell them apart.
+    let reconciled = |s: &Sandbox| -> (usize, usize) {
+        let sessions = s.json(&["session", "list"])["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let done = sessions.iter().filter(|x| x["status"] != "active").count();
+        (sessions.len(), done)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < deadline {
+        let (seen, done) = reconciled(&s);
+        if seen >= BOUNDARIES && done == seen {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let (seen, done) = reconciled(&s);
+    assert!(
+        seen >= BOUNDARIES && done == seen,
+        "only {done} of {seen} sessions reconciled, against {BOUNDARIES} \
+         boundaries driven: the latency above was measured over closes whose \
+         work had not finished"
     );
+
     // And every one of them is owed nothing.
-    s.settle_within(
-        "the handoff debt to clear",
-        std::time::Duration::from_secs(30),
-        |s| s.json(&["status"])["sessions_awaiting_handoff"].as_i64() == Some(0),
+    let debt = |s: &Sandbox| -> i64 {
+        s.json(&["status"])["sessions_awaiting_handoff"]
+            .as_i64()
+            .unwrap_or(-1)
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < deadline && debt(&s) != 0 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        debt(&s),
+        0,
+        "{} boundaries are still owed a handoff after three minutes",
+        debt(&s)
     );
 
     if cfg!(debug_assertions) {

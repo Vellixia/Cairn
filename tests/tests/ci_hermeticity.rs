@@ -200,12 +200,26 @@ fn no_test_in_this_suite_requires_a_secret() {
     }
     assert!(checked > 10, "only {checked} files were checked");
 
-    // The one variable the suite reads, and the tests that read it skip
-    // themselves when it is absent rather than failing — which is what keeps
-    // macOS CI green without Docker.
+    // The two variables the suite reads, and neither is a secret.
+    //
+    // `CAIRN_TEST_DATABASE_URL` names the PostgreSQL the server suites need,
+    // and the tests that read it skip themselves when it is absent rather than
+    // failing — which is what keeps macOS CI green without Docker.
+    //
+    // `CAIRN_SERVER_BIN` names which `cairn-server` to spawn. The Linux job
+    // points it at the release build, because every account the suite creates
+    // is an argon2 hash and every sign-in a verify; absent, the harness falls
+    // back to the binary beside the test executable exactly as before, which
+    // is why the jobs that do not set it are unaffected.
+    //
+    // The rule this enforces is unchanged and is about *secrets*: a vendor
+    // token read from the environment would quietly make an optional job a
+    // required one. Neither of these is a credential, and both have a defined
+    // meaning when unset.
+    const READABLE: [&str; 2] = ["CAIRN_TEST_DATABASE_URL", "CAIRN_SERVER_BIN"];
     for (file, name) in &reads {
-        assert_eq!(
-            name, "CAIRN_TEST_DATABASE_URL",
+        assert!(
+            READABLE.contains(&name.as_str()),
             "{file} reads `{name}` from the environment, which required CI cannot provide"
         );
     }
@@ -387,16 +401,34 @@ fn an_agents_proposal_is_recorded_as_a_proposal() {
     // The vocabulary itself says where a decision came from. There is no
     // `inferred` and no `model`: every basis names either a rule Cairn ran or
     // a party that asserted it.
+    //
+    // Feature 005 adds a fifth, and it is still a rule rather than a judgement.
+    // FR-801a newly lets an automatic process record a reinforcement on a
+    // deterministic identity match and on no other basis, and FR-802 requires
+    // that such a relation stay distinguishable from one a human or an agent
+    // asked for — so it gets its own name rather than sharing
+    // `deterministic_rule` with duplicate and conflict detection, where "who
+    // decided this" would become unanswerable for exactly the relation where it
+    // is newly in question.
     let mut bases: Vec<&str> = RelationBasis::ALL.iter().map(|b| b.as_str()).collect();
     bases.sort();
     assert_eq!(
         bases,
         vec![
+            "consolidation_reinforcement",
             "deterministic_rule",
             "evidence",
             "explicit_agent",
             "explicit_user"
         ],
         "a basis that does not name a rule or a party would make provenance unreadable"
+    );
+    // The new member is producible only by consolidation, which is what makes
+    // an inferred relation distinguishable from a requested one.
+    assert!(
+        !RelationBasis::ConsolidationReinforcement
+            .as_str()
+            .contains("explicit"),
+        "an automatic basis must not read as an asserted one"
     );
 }

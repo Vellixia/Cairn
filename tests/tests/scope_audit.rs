@@ -505,14 +505,33 @@ fn no_valid_time_or_branching_history_exists() {
     }
 
     // And no code path rewrites an interval after the fact.
+    //
+    // **Comments are stripped first**, the same way
+    // `global_content_validation.rs` strips them before its own source sweep
+    // and for the same reason: naming a thing in prose is not implementing it.
+    // The word that tripped this was a comment in the ingest path explaining
+    // that a schema change must *not* destroy decisions retroactively — an
+    // audit that reads a promise not to do something as evidence of doing it
+    // teaches people to stop writing the promise down.
+    //
+    // A function called `retroactive_amend` is still caught, which is the
+    // thing FR-345 is actually about.
     for (path, text) in source_files() {
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
+        let code: String = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("*") && !t.starts_with("/*")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         for forbidden in ["retroactive", "rewrite_history", "amend_interval"] {
             assert!(
-                !text.contains(forbidden),
-                "{} names `{forbidden}`",
+                !code.contains(forbidden),
+                "{} names `{forbidden}` in code",
                 path.display()
             );
         }

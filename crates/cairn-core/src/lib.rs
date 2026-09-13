@@ -11,9 +11,16 @@ pub mod context;
 pub mod continuity;
 pub mod corpus;
 pub mod domain;
+/// Feature 005's canonical event model — the one record that crosses the
+/// machine boundary.
+pub mod event;
+/// Feature 005's deterministic identities: events, commands, candidates,
+/// refusals, corroborations and patterns.
+pub mod eventid;
 pub mod global;
 pub mod handoff;
 pub mod knowledge;
+pub mod lexicon;
 pub mod lifecycle;
 pub mod paths;
 pub mod patterns;
@@ -25,6 +32,9 @@ pub mod tasks;
 pub mod tools;
 pub mod validate;
 pub mod verify;
+/// The session vocabulary a semantic signal must justify its tokens against —
+/// one implementation, called by the client and the server independently.
+pub mod vocabulary;
 pub mod wire;
 
 pub use config::CairnConfig;

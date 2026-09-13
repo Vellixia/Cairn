@@ -19,14 +19,84 @@ use cairn_core::lifecycle::{CanonicalEvent, CanonicalLifecycleEvent};
 
 pub struct Codex;
 
-/// The six vendor registrations Cairn writes.
+/// The vendor registrations Cairn writes.
+///
+/// Codex has no separate tool-failure hook: its one `PostToolUse` registration
+/// normalizes into either outcome depending on the payload. Feature 005 adds
+/// the prompt-time, pre-tool and subagent boundaries the safe-event model needs
+/// and the lifecycle has no counterpart for.
 pub const EVENTS: &[&str] = &[
     "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
     "PostToolUse",
     "Stop",
+    "SubagentStop",
     "PreCompact",
     "PostCompact",
     "SessionEnd",
+];
+
+/// Which vendor field carries which fact (`contracts/extraction.md` §13.10).
+///
+/// `last_assistant_message` is **nullable** on Codex — the vendor's own field
+/// table says `string | null`. A null is not an empty decision; it is the
+/// vendor saying there was no settled turn text, and the mapping declines
+/// rather than emitting a signal with empty tokens. Nothing here special-cases
+/// it, because an absent field already declines.
+///
+/// `StopFailure` is not registered and no field of it is named, for the same
+/// reason as on Claude Code: an error string is not model prose.
+pub const FIELDS: FieldMap = FieldMap {
+    agent: EventAgent::Codex,
+    // Codex has spelled its session identity two ways across versions. Both are
+    // tried, in order, because an adapter that knew only the current one would
+    // go quiet on an upgrade rather than fail visibly.
+    session_keys: &["session_id", "thread_id"],
+    tool_name: &["tool_name"],
+    tool_input: &["tool_input"],
+    tool_response: &["tool_response"],
+    input_file_path: &["file_path", "path"],
+    input_command: &["command"],
+    response_exit_status: &["exit_code"],
+    response_error: &["error", "message", "stderr"],
+    open_trigger: &["source"],
+    compaction_trigger: &["trigger"],
+    close_reason: &["reason"],
+    user_prompt: &["prompt"],
+    assistant_message: &["last_assistant_message"],
+    subagent_ref: &["agent_id"],
+    subagent_kind: &["agent_type"],
+    // One event carries both outcomes, so the payload decides. `classify` is
+    // the same order `classify_failure` has always used, so the lifecycle path
+    // and the capture path cannot disagree about whether a tool failed.
+    classify_failure: classify,
+};
+
+/// The boolean half of [`classify_failure`], for the capture path.
+///
+/// One function delegating to the other rather than two independent tests: a
+/// tool that the lifecycle recorded as failed and capture recorded as succeeded
+/// would be one act described two ways, and the disagreement would be invisible
+/// until somebody read both.
+fn classify(response: Option<&serde_json::Value>) -> bool {
+    classify_failure(response).0
+}
+
+/// What each registered event produces, in spool order.
+pub const ROUTES: RoutingTable = &[
+    ("SessionStart", &[Route::SessionOpen]),
+    ("UserPromptSubmit", &[Route::UserPrompt]),
+    ("PreToolUse", &[Route::ToolStarted]),
+    ("PostToolUse", &[Route::Tool { failed: None }]),
+    ("Stop", &[Route::Quiesced, Route::AssistantMessage]),
+    (
+        "SubagentStop",
+        &[Route::SubagentCompleted, Route::AssistantMessage],
+    ),
+    ("PreCompact", &[Route::Compacting]),
+    ("PostCompact", &[Route::Compacted]),
+    ("SessionEnd", &[Route::SessionClose]),
 ];
 
 /// Codex's own session-end handler budget (D31). Cairn's session-end work must
@@ -240,6 +310,14 @@ impl AgentAdapter for Codex {
 
     fn registered_events(&self) -> &'static [&'static str] {
         EVENTS
+    }
+
+    fn capture(&self, event: &str, payload: &RawPayload, env: &CaptureEnv<'_>) -> CaptureOutput {
+        route_capture(&FIELDS, ROUTES, event, payload, env)
+    }
+
+    fn carries_semantic_material(&self, event: &str) -> bool {
+        matches!(event, "UserPromptSubmit" | "Stop" | "SubagentStop")
     }
 
     fn normalize(&self, event: &str, payload: &RawPayload) -> Option<CanonicalLifecycleEvent> {
@@ -593,9 +671,17 @@ followUpQueueMode = \"queue\"
     #[test]
     fn six_registrations_cover_seven_canonical_events() {
         // D23: `PostToolUse` normalizes into two outcomes; that does not make
-        // it two registrations.
-        assert_eq!(EVENTS.len(), 6);
+        // it two registrations. Feature 005 adds three registrations the
+        // lifecycle has no counterpart for, and none of the six it replaces.
+        assert_eq!(EVENTS.len(), 9);
         assert!(!EVENTS.contains(&"PostToolUseFailure"));
+        for capture in ["UserPromptSubmit", "PreToolUse", "SubagentStop"] {
+            assert!(EVENTS.contains(&capture), "{capture} is not registered");
+        }
+        assert!(
+            !EVENTS.contains(&"StopFailure"),
+            "an error string is not model prose and must be unreachable"
+        );
         let a = Codex;
         let produced: std::collections::BTreeSet<_> = EVENTS
             .iter()
@@ -746,5 +832,59 @@ followUpQueueMode = \"queue\"
             &json!({"type": "command", "command": "cairn hook Stop && make lint"}),
             "Stop"
         ));
+    }
+
+    /// Codex is a committed automatic-delivery agent (T074, `contracts/
+    /// retrieval-delivery.md` §1, FR-838a): both delivery points are
+    /// documented and stable for it, exactly as for Claude Code, and neither
+    /// is declined the way OpenCode's are.
+    ///
+    /// This pins the two structural preconditions `cairn::hook`'s delivery
+    /// gate depends on, from this crate's side of that boundary:
+    ///
+    /// - `UserPromptSubmit` is registered (so the hook actually fires and is
+    ///   not silently declined by the adapter, `event_class` note in
+    ///   `cairn::hook::run_blocking`); and
+    /// - it maps to no canonical lifecycle event (so it is reached only
+    ///   through the capture path that carries delivery, never mistaken for
+    ///   a boundary event that would take the other one).
+    ///
+    /// `SessionStart` is unaffected by any of this: session-open delivery
+    /// rides the existing `session_opened` canonical event, unchanged since
+    /// before Feature 005.
+    #[test]
+    fn codex_registers_prompt_submit_as_capture_only() {
+        let a = Codex;
+        assert!(
+            a.registered_events().contains(&"UserPromptSubmit"),
+            "prompt-time delivery has no event to fire on otherwise"
+        );
+        assert!(
+            a.normalize("UserPromptSubmit", &payload(json!({"session_id": "s"})))
+                .is_none(),
+            "UserPromptSubmit must stay capture-only, never a boundary event"
+        );
+    }
+
+    /// The declared matrix agrees: neither delivery point is
+    /// `declined_by_cairn` for Codex, in contrast with OpenCode's three
+    /// (`opencode.rs::opencode_declines_automatic_delivery_for_every_
+    /// registered_event`).
+    #[test]
+    fn codexs_declared_matrix_does_not_decline_delivery() {
+        use crate::capability::{declared_matrix, MatrixStatus};
+        let matrix = declared_matrix("codex");
+        for key in ["deliver:session_open", "deliver:prompt_time"] {
+            let status = matrix
+                .iter()
+                .find(|c| c.capability == key)
+                .map(|c| c.status)
+                .unwrap_or_else(|| panic!("{key} is not in Codex's matrix"));
+            assert_ne!(
+                status,
+                MatrixStatus::DeclinedByCairn,
+                "{key} must not be declined for a committed agent"
+            );
+        }
     }
 }

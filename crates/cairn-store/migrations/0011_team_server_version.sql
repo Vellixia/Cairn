@@ -1,0 +1,45 @@
+-- Local schema v11 — a mirrored team row remembers *which* server version it
+-- reflects.
+--
+-- `merge_synced_team` is a cache refresh under server authority (FR-712a): the
+-- server owns the record, this row is a copy, and the server's answer wins. The
+-- statement that implemented that rule updated on `WHERE id = ?` and nothing
+-- else, which made it win against pages the server had already superseded as
+-- well as against ones it had not.
+--
+-- The cost was FR-457. A page fetched *before* a local transition and applied
+-- after it wrote `NULL` over `ratified_by_user_id`, `retired_by_user_id` and
+-- `retired_at`, and rolled an `authoritative` row back to `proposed`. The
+-- following `retire_team` then compare-and-swapped on `state = 'authoritative'`,
+-- found `proposed`, and refused — so the retirement's actor was never recorded
+-- on the machine that performed it, and "who removed this guidance" became a
+-- question only the server could answer. Observed rollback: 11.7 ms.
+--
+-- **A cache cannot order two pages it cannot date.** The client had no way to
+-- tell an older page from a newer one, because the only clock entitled to
+-- decide — the server's — was never on the wire. It is now: `team_changes` and
+-- `team_knowledge_view` both already compute
+-- `GREATEST(created_at, ratified_at, retired_at, superseded_at)` to page and
+-- sort on, and that value now travels as `changed_at`. This column is where the
+-- last applied page's value is kept, so the next page can be compared against
+-- it.
+--
+-- **One clock, never two.** What is stored here is the server's timestamp, and
+-- the only thing ever compared against it is another server timestamp from the
+-- same server instance (`bind_team_server_instance_tx` guarantees there is only
+-- ever one). No local clock enters the comparison, so clock skew between a
+-- device and its server cannot decide which record of a retirement survives.
+--
+-- **Not backfilled, and the null is not a wildcard in the usual direction.** A
+-- row already in this table predates version tracking, so nothing is known
+-- about which server version it reflects — and the safe reading of "unknown" is
+-- that the incoming page wins. An upgraded store therefore converges on its
+-- next pull exactly as it did before, and starts declining stale pages from the
+-- moment it has a version to decline them against. The guard tightens; it never
+-- withholds a row a device would otherwise have had.
+--
+-- Nullable for the other direction too: a server below this schema sends no
+-- `changed_at` at all, and a store must never become unable to sync with one.
+-- Such a page applies, and `COALESCE` leaves any version already recorded in
+-- place rather than erasing it.
+ALTER TABLE team_knowledge ADD COLUMN server_changed_at TEXT;

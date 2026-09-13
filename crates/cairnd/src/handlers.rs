@@ -30,8 +30,23 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         })),
         Request::DaemonShutdown => Ok(json!({ "stopping": true })),
 
+        Request::CaptureVocabulary {
+            cwd,
+            agent,
+            agent_session_key,
+        } => capture_vocabulary(d, &cwd, &agent, &agent_session_key).await,
+        Request::CaptureEvents {
+            cwd,
+            agent,
+            agent_session_key,
+            output,
+        } => {
+            spool_capture(d, &cwd, &agent, &agent_session_key, &output).await?;
+            Ok(json!({ "accepted": true }))
+        }
+
         Request::Init { cwd } => init(d, &cwd).await,
-        Request::Status { cwd } => status(d, &cwd).await,
+        Request::Status { cwd, spool_reason } => status(d, &cwd, spool_reason).await,
 
         Request::SessionStart {
             cwd,
@@ -98,7 +113,11 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             event,
             wait_for_handoff,
             token_budget,
-        } => crate::integrations::canonical_event(d, event, wait_for_handoff, token_budget).await,
+            capture,
+        } => {
+            crate::integrations::canonical_event(d, event, wait_for_handoff, token_budget, capture)
+                .await
+        }
 
         Request::IntegrationSnapshot { cwd } => {
             d.resolve(&cwd).await?;
@@ -248,6 +267,8 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             token_budget,
             explain,
             depth,
+            trigger,
+            open_trigger,
         } => {
             context(
                 d,
@@ -258,8 +279,25 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 token_budget,
                 explain,
                 depth,
+                trigger,
+                open_trigger,
             )
             .await
+        }
+
+        // The daemon's own report of what happened to a generated briefing,
+        // forwarded to the server (T072, `contracts/retrieval-delivery.md`
+        // §3, §6.2). No project or session to resolve here: the trace already
+        // carries both, and the server is what checks this account still owns
+        // it.
+        Request::RetrievalOutcome {
+            trace_id,
+            transmitted,
+            failure_reason,
+        } => {
+            crate::deliver::report_outcome(d, trace_id, transmitted, failure_reason.as_deref())
+                .await;
+            Ok(json!({ "reported": true }))
         }
 
         Request::SessionCheckpoint {
@@ -605,6 +643,27 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             reason,
         } => {
             let r = d.resolve(&cwd).await?;
+            if server_owns_knowledge(d).await {
+                // A pin is derived state the server computes and enforces its
+                // own budget for, so under server authority it is a request
+                // (FR-712).
+                //
+                // `reason` is deliberately not sent. The server's `pin` command
+                // reads `pinned` and nothing else, so a `reason` in the payload
+                // would be accepted and dropped — and a field that travels and
+                // vanishes is worse than one that never left, because the caller
+                // believes it arrived. It stays a local annotation until the
+                // server has somewhere to put it.
+                let _ = &reason;
+                return queue_knowledge_command(
+                    d,
+                    Some(r.project.id),
+                    session_id,
+                    cairn_store::spool::CommandKind::Pin,
+                    &json!({ "target_id": memory_id, "pinned": pinned }),
+                )
+                .await;
+            }
             let s = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
             let config = d.config.read().await.clone();
             repo::set_pinned(
@@ -720,10 +779,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             domain => global_subject(d, domain, topic_key).await,
         },
         Request::RebuildDerived { cwd } => rebuild_derived(d, &cwd).await,
+        Request::Durability { cwd } => durability(d, &cwd).await,
         Request::PatternList { cwd, trust, signal } => {
             crate::patterns::list(d, &cwd, trust, signal).await
         }
         Request::PatternShow { cwd, id } => crate::patterns::show(d, &cwd, id).await,
+        Request::MigrateInspect { cwd } => migrate_inspect(d, &cwd).await,
+        Request::MigrateClaimPatterns { cwd, patterns } => {
+            migrate_claim_patterns(d, &cwd, patterns).await
+        }
+        Request::MigrateRun { cwd } => migrate_run(d, &cwd).await,
+        Request::MigrateStatus { cwd } => migrate_status(d, &cwd).await,
+        Request::MigrateRetryRetained { cwd } => migrate_retry_retained(d, &cwd).await,
         Request::PatternPromote {
             cwd,
             memory_id,
@@ -933,6 +1000,21 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                  use `cairn team retire` (admin only)",
             )),
             Some(KnowledgeDomain::Personal) => {
+                // A tombstone on a record the server owns is a request like any
+                // other mutation (FR-712). Forgetting locally and telling the
+                // server later is the shape FR-709 forbids: for as long as the
+                // command is queued the two sides disagree about whether the
+                // record exists, and the local side is not the authority.
+                if server_owns_knowledge(d).await {
+                    return queue_knowledge_command(
+                        d,
+                        None,
+                        None,
+                        cairn_store::spool::CommandKind::PersonalForget,
+                        &json!({ "target_id": memory_id }),
+                    )
+                    .await;
+                }
                 cairn_store::global::forget_personal(&d.store, memory_id, d.owner_identity().await)
                     .await
                     .map_err(storage_err)?;
@@ -940,6 +1022,16 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             }
             None | Some(KnowledgeDomain::Project) => {
                 let r = d.resolve(&cwd).await?;
+                if server_owns_knowledge(d).await {
+                    return queue_knowledge_command(
+                        d,
+                        Some(r.project.id),
+                        None,
+                        cairn_store::spool::CommandKind::Forget,
+                        &json!({ "target_id": memory_id }),
+                    )
+                    .await;
+                }
                 repo::delete_memory(&d.store, memory_id, r.policy)
                     .await
                     .map_err(storage_err)?;
@@ -1082,7 +1174,7 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     }))
 }
 
-async fn status(d: &Daemon, cwd: &str) -> Reply {
+async fn status(d: &Daemon, cwd: &str, spool_reason: bool) -> Reply {
     let r = d.resolve(cwd).await?;
     let git = git_status(r.repo.worktree_path.clone()).await?;
     // Memory scoped to a branch or task that no longer resolves becomes
@@ -1120,6 +1212,7 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         local_schema_version: cairn_store::migrate::latest_version(),
         sessions_awaiting_handoff: debt.0,
         knowledge: knowledge_health(d, r.project.id).await,
+        capture: capture_health(d, r.project.id, spool_reason).await,
         handoff_synthesis_failures: debt
             .1
             .into_iter()
@@ -1163,6 +1256,250 @@ async fn rebuild_derived(d: &Daemon, cwd: &str) -> Reply {
         // whose derived values disagree with the records behind them.
         "consistent": differed == 0,
     }))
+}
+
+/// What deleting this local store would cost, category by category (T089).
+///
+/// **The inventory is exhaustive by construction, and that is the requirement.**
+/// FR-705 asks Cairn to state which categories would not survive deletion, and
+/// SC-714 asks for zero categories lost silently — a report that omitted one
+/// would be worse than no report, because the reader would take the omission for
+/// an assurance. The list itself lives in `cairn_store::diag::local_inventory`,
+/// beside the tables it counts, so a category added to the schema and not to the
+/// inventory is one file's inconsistency rather than two.
+///
+/// Three answers, not one:
+///
+/// - **what is lost** — the machine-local categories (FR-707). Observations,
+///   evidence, verification runs, checkpoints, pattern applications and the
+///   local-only knowledge the user asked never to leave. These have no server
+///   table, which is what makes "it stays local" a fact about the schema rather
+///   than a promise, and what makes losing them permanent.
+/// - **what is restorable** — the caches. The knowledge in them is the server's
+///   and comes back on the next pull without a manual repair step (FR-703,
+///   FR-704). The *rows* do not survive; the knowledge does, and those are
+///   different claims (`DurabilityClass::survives_local_loss`).
+/// - **what is in flight** — the spools. Events and commands accepted for
+///   delivery and not yet acknowledged. Not durable knowledge (FR-709) and not
+///   restorable either: a queued write nobody has accepted is lost with the
+///   queue.
+///
+/// The cache report is separate and answers a different question: whether each
+/// cache has actually refilled. An empty cache and an absent body of knowledge
+/// look identical from the reader's side, and FR-710a says a store must be able
+/// to tell them apart.
+async fn durability(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let inventory = cairn_store::diag::local_inventory(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let caches = cairn_store::diag::cache_status(&d.store)
+        .await
+        .map_err(storage_err)?;
+
+    let mut lost = Vec::new();
+    let mut restorable = Vec::new();
+    let mut in_flight = Vec::new();
+    for entry in &inventory {
+        let row = json!({
+            "category": entry.category,
+            "class": entry.class.as_str(),
+            "rows": entry.rows,
+        });
+        match entry.class {
+            cairn_store::diag::DurabilityClass::LocalOnly => lost.push(row),
+            cairn_store::diag::DurabilityClass::QueuedForServer => in_flight.push(row),
+            cairn_store::diag::DurabilityClass::Cache
+            | cairn_store::diag::DurabilityClass::ServerDurable => restorable.push(row),
+        }
+    }
+
+    Ok(json!({
+        "lost_on_deletion": lost,
+        "restorable_from_server": restorable,
+        "in_flight": in_flight,
+        "caches": caches
+            .iter()
+            .map(|c| json!({
+                "namespace": c.namespace,
+                "rows": c.rows,
+                "state": c.state.as_str(),
+                "last_refilled_at": c.last_refilled_at,
+            }))
+            .collect::<Vec<_>>(),
+        // Stated rather than left to be inferred from an empty `lost` list,
+        // which would be the wrong inference: a fresh store has nothing local
+        // yet and would report the same emptiness as one that genuinely holds
+        // nothing at risk.
+        "authority": cairn_store::authority::mode(&d.store)
+            .await
+            .map(|m| m.as_str())
+            .unwrap_or("unknown"),
+    }))
+}
+
+/// What capture did on this machine, and where its events are (T059).
+///
+/// Reported from the two primitives that already hold the answer rather than
+/// from a third count kept alongside them: `SpoolBreakdown` is the single spool
+/// status primitive, and the disposition counts are the single record of what
+/// capture decided. A status field that counted either independently could
+/// disagree with it, and a health report that disagrees with itself is worse
+/// than one that says nothing.
+///
+/// Returns `None` rather than zeros when the store cannot answer. Zeros would
+/// read as "capture is healthy and idle", which is a claim, and an unavailable
+/// store has not established it.
+async fn capture_health(d: &Daemon, project_id: Uuid, spool_reason: bool) -> Option<CaptureHealth> {
+    let capacity = cairn_store::spool::SpoolCapacity::default();
+    let counts = cairn_store::spool::disposition_counts(&d.store, project_id)
+        .await
+        .ok()?;
+    // **Measured against the server answering now, from a sample taken now.**
+    //
+    // "Which rows belong to a different deployment?" is a question about the
+    // peer: rows carry the instance they were queued for, and the mismatch is
+    // between that and whoever is answering. Two wrong answers were available
+    // and this code held both of them in turn. Comparing rows to the store's
+    // own binding answers "none" precisely when a replacement deployment has
+    // arrived — the one case FR-792 exists to make visible. Comparing them to
+    // whatever instance this process last happened to observe is wrong for a
+    // subtler reason: that memory does not survive the daemon being replaced,
+    // and `supervise` replaces daemons routinely, so the process that saw the
+    // replacement was reliably gone by the time anyone asked.
+    //
+    // So status takes its own bounded, read-only sample (FR-792a) — but only
+    // when there is a backlog for it to explain. An empty spool has no reason
+    // to report, so it must not depend on the network to say so.
+    let bound = cairn_store::cursor::bound_server_instance(&d.store)
+        .await
+        .ok()
+        .flatten();
+    let undelivered_now = cairn_store::spool::undelivered_total(&d.store).await.ok()?;
+    let probe = if spool_reason && undelivered_now > 0 {
+        Some(crate::sync::probe_peer_instance(d).await)
+    } else {
+        None
+    };
+    // The instance the counts are measured against.
+    //
+    // `Unreachable` deliberately yields `None`: with nothing answering there is
+    // no current peer, and a remembered one must not stand in for it (FR-792c).
+    // A store that cannot reach its endpoint has an outage, not a mismatch.
+    let instance = match probe {
+        Some(crate::sync::PeerProbe::Peer(peer)) => Some(peer),
+        Some(crate::sync::PeerProbe::Unreachable) => None,
+        // Nothing configured, or nothing to explain. Either way no peer is
+        // answering, so no row can belong to a different one.
+        Some(crate::sync::PeerProbe::NotConfigured) => None,
+        None => bound,
+    };
+    // The whole-spool mismatch: this store is bound to one deployment and a
+    // different one is answering. FR-791 will refuse it, so no row will move
+    // whatever its own state says — and the rows themselves cannot show this,
+    // because a row queued before the first successful sync carries no instance
+    // at all and would otherwise report a healthy queue.
+    let peer_mismatch = match (probe, bound) {
+        (Some(crate::sync::PeerProbe::Peer(peer)), Some(b)) => peer != b,
+        // No binding is not a mismatch. Observing a peer neither creates a
+        // binding nor constitutes one (FR-792b).
+        _ => false,
+    };
+    let unreachable = matches!(probe, Some(crate::sync::PeerProbe::Unreachable));
+    tracing::debug!(
+        target: "cairn::observation",
+        compared_against = ?instance, bound = ?bound, probe = ?probe,
+        peer_mismatch, undelivered_now,
+        "spool status is measuring against this instance"
+    );
+    let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity, instance)
+        .await
+        .ok()?;
+    let commands = cairn_store::spool::command_spool_breakdown(&d.store, capacity, instance)
+        .await
+        .ok()?;
+    // Read once for both spools, so the two halves of one report cannot
+    // disagree about whether anybody is signed in.
+    let signed_in = d.account_identity().await.is_some();
+
+    let mut dispositions: std::collections::BTreeMap<String, i64> =
+        std::collections::BTreeMap::new();
+    for row in counts {
+        *dispositions
+            .entry(row.disposition.as_str().to_string())
+            .or_insert(0) += row.n;
+    }
+
+    Some(CaptureHealth {
+        dispositions,
+        events: spool_health(&events, signed_in, peer_mismatch, unreachable),
+        commands: spool_health(&commands, signed_in, peer_mismatch, unreachable),
+    })
+}
+
+/// One spool's health on the wire.
+///
+/// `signed_in`, `peer_mismatch` and `unreachable` are passed rather than read
+/// from the breakdown, because the rows cannot know any of them — and they are
+/// the blocking reasons that leave no trace in the spool at all (FR-792).
+///
+/// A drain with no account never claims; a drain that cannot reach the server
+/// fails before claiming; and a drain answered by the wrong deployment is
+/// refused before it claims. In all three cases every row sits `waiting` and
+/// looks identical to work that was queued a second ago and is about to go. A
+/// user staring at a queue that is not moving is owed the difference.
+fn spool_health(
+    b: &cairn_store::spool::SpoolBreakdown,
+    signed_in: bool,
+    peer_mismatch: bool,
+    unreachable: bool,
+) -> SpoolHealth {
+    SpoolHealth {
+        waiting: b.waiting,
+        in_flight: b.in_flight,
+        retrying: b.retrying,
+        deferred: b.deferred,
+        terminal: b.terminal,
+        terminal_retry_exhausted: b.terminal_retry_exhausted,
+        // Derived from the breakdown rather than recomputed here, so the two
+        // cannot drift apart.
+        undelivered: b.undelivered(),
+        saturated: b.saturated,
+        other_instance: b.other_instance,
+        oldest_at: b.oldest_at.map(|t| t.to_rfc3339()),
+        // **The stated precedence** (FR-792d, `data-model.md` §5b). A spool can
+        // be several kinds of blocked at once and a status line reports one
+        // thing, so the choice is written here as an ordered decision rather
+        // than left to the order in which the conditions happen to be computed.
+        //
+        // 1. `no_account`      nothing at all can be claimed — the claim
+        //                      predicate matches an account exactly — so a
+        //                      retry reason would describe a retry nobody is
+        //                      attempting.
+        // 2. `server_unreachable`
+        //                      Cairn cannot even ask, so no reason derived
+        //                      from row state describes what is happening.
+        // 3. `server_instance_mismatch` (whole)
+        //                      the answering deployment is not the one this
+        //                      store is bound to; FR-791 refuses it, so no row
+        //                      moves whatever its state, and the remedy is to
+        //                      re-point the store rather than to wait.
+        // 4..8                 the row-derived reasons, in the severity order
+        //                      `SpoolBreakdown::blocked_reason` states.
+        // 9. `server_instance_mismatch` (partial)
+        //                      also row-derived, and last there: the
+        //                      deliverable part is still moving.
+        blocked_reason: match (signed_in, unreachable, peer_mismatch, b.undelivered() > 0) {
+            // Nothing waiting is never blocked, whatever the network is doing.
+            // A reason here would make "blocked" mean "has work", and a signal
+            // that is always on is not a signal.
+            (_, _, _, false) => b.blocked_reason().map(str::to_string),
+            (false, _, _, true) => Some("no_account".to_string()),
+            (true, true, _, true) => Some("server_unreachable".to_string()),
+            (true, false, true, true) => Some("server_instance_mismatch".to_string()),
+            (true, false, false, true) => b.blocked_reason().map(str::to_string),
+        },
+    }
 }
 
 /// Mark memory whose scope key no longer resolves as `stale` (FR-018).
@@ -1215,6 +1552,126 @@ async fn integration_mode(d: &Daemon) -> String {
 ///
 /// A worktree may hold several active sessions, so ambiguity is reported
 /// rather than guessed (FR-010).
+/// The capture agent one adapter name denotes.
+///
+/// The two vocabularies spell the same agent differently — `AgentId` uses
+/// hyphens because that is what a command line reads well, `EventAgent` uses
+/// underscores because that is what a key-shaped wire value reads well — and
+/// this is the one place the two meet. Both spellings are accepted so a caller
+/// need not know which side of the boundary it is on.
+pub(crate) fn event_agent(name: &str) -> Option<cairn_core::event::EventAgent> {
+    use cairn_core::event::EventAgent;
+    match name {
+        "claude-code" | "claude_code" => Some(EventAgent::ClaudeCode),
+        "codex" => Some(EventAgent::Codex),
+        "opencode" => Some(EventAgent::OpenCode),
+        // `generic-mcp` is not part of the automatic capture population
+        // (FR-838f) and its adapter produces nothing, so it never reaches here.
+        _ => None,
+    }
+}
+
+/// The vocabulary a hook needs before it can build a semantic signal.
+///
+/// The hook holds the transient vendor text and the daemon holds the event
+/// stream, and neither can do the §13.7 mapping alone. Sending the text here
+/// would put a prompt fragment across the capture-process boundary, which
+/// FR-730 forbids, so the derived token set travels the other way instead. It
+/// discloses nothing new: every token in it is a path segment, a command verb,
+/// a test identifier or an established project key that anyone who can read the
+/// project can already see.
+///
+/// A session that does not exist yet answers with an empty vocabulary rather
+/// than an error. The first event of a session legitimately arrives before any
+/// event has established anything, and an error there would make the hook treat
+/// an ordinary case as a failure.
+async fn capture_vocabulary(d: &Daemon, cwd: &str, agent: &str, key: &str) -> Reply {
+    let _ = agent;
+    let r = d.resolve(cwd).await?;
+    let session = repo::session_by_key(&d.store, r.project.id, key)
+        .await
+        .map_err(storage_err)?;
+    let Some(session) = session else {
+        return Ok(
+            json!({ "vocabulary": cairn_core::vocabulary::SessionVocabulary::new(),
+                          "established_values": {} }),
+        );
+    };
+    let (vocabulary, established) =
+        crate::capture::session_vocabulary(&d.store, r.project.id, session.id)
+            .await
+            .map_err(storage_err)?;
+    Ok(json!({ "vocabulary": vocabulary, "established_values": established }))
+}
+
+/// Spool one vendor event's approved canonical events.
+///
+/// Account-bound and it fails closed. The claim predicate matches an account
+/// exactly, so a row spooled with no account could never be claimed by anyone —
+/// queueing one would be a silent black hole rather than a queued event
+/// (FR-790, FR-864a). Capture is fail-soft toward the *agent*, never toward the
+/// truth: the decline is counted rather than hidden.
+pub(crate) async fn spool_capture(
+    d: &Daemon,
+    cwd: &str,
+    agent: &str,
+    key: &str,
+    output: &cairn_core::event::CaptureOutput,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = resolve_session_for_event(d, &r, Some(key)).await?;
+
+    // The adapter that ran, named by the caller. An agent Feature 005 does not
+    // capture from reaches here only if a caller invented the name, and it is
+    // refused rather than filed under a neighbour.
+    let Some(agent) = event_agent(agent) else {
+        return Err(WireError::invalid(format!(
+            "{agent} is not an agent Feature 005 captures from"
+        )));
+    };
+
+    let Some(account_id) = d.account_identity().await else {
+        // Counted, not silent. An unsigned-in machine still produces capture,
+        // and a health report that could not tell "nothing happened" from
+        // "nobody was signed in" would be reporting the wrong problem.
+        for draft in &output.events {
+            cairn_store::spool::record_disposition(
+                &d.store,
+                r.project.id,
+                agent.as_str(),
+                draft.kind.as_str(),
+                cairn_core::event::Disposition::DeclinedByPolicy,
+            )
+            .await
+            .map_err(storage_err)?;
+        }
+        return Ok(json!({
+            "spooled": 0,
+            "declined": output.events.len(),
+            "reason": "no account is signed in, so a spooled event could never be delivered",
+        }));
+    };
+
+    let summary = crate::capture::spool_safe_events(
+        &d.store,
+        r.project.id,
+        account_id,
+        session.id,
+        agent,
+        output,
+    )
+    .await
+    .map_err(storage_err)?;
+    let _ = agent;
+
+    Ok(json!({
+        "spooled": summary.spooled,
+        "declined": summary.declined,
+        "overflow_dropped": summary.overflow_dropped,
+        "saturated": summary.saturated,
+    }))
+}
+
 pub(crate) async fn resolve_session(
     d: &Daemon,
     r: &Resolved,
@@ -1470,13 +1927,16 @@ async fn observe(
 // Context
 // ---------------------------------------------------------------------------
 
-/// Eight arguments, one past the lint's limit, and each one is read.
+/// Ten arguments, three past the lint's limit, and each one is read.
 ///
 /// `reason` decides the post-compaction path; `depth` decides whether the global
-/// sections are assembled at all (FR-477); the rest were already load-bearing.
-/// Bundling them into a request struct would only move the same eight values
-/// behind one name — this function's caller destructures them straight out of
-/// `Request::Context`, so a struct would be that variant with a second name.
+/// sections are assembled at all (FR-477); `trigger`/`open_trigger` decide
+/// whether this retrieval goes through the server and as what
+/// (`contracts/retrieval-delivery.md` §1–§3); the rest were already
+/// load-bearing. Bundling them into a request struct would only move the same
+/// values behind one name — this function's caller destructures them straight
+/// out of `Request::Context`, so a struct would be that variant with a second
+/// name.
 #[allow(clippy::too_many_arguments)]
 async fn context(
     d: &Daemon,
@@ -1487,6 +1947,8 @@ async fn context(
     token_budget: Option<usize>,
     explain: bool,
     depth: Option<cairn_core::wire::ContextDepth>,
+    trigger: Option<String>,
+    open_trigger: Option<String>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let budget = token_budget.unwrap_or(d.config.read().await.context_budget_tokens);
@@ -1499,8 +1961,77 @@ async fn context(
     // Absent means `standard` — today's full assembly — so a caller that has
     // never named `depth` sees no change (FR-481, T156).
     let depth = depth.unwrap_or(cairn_core::wire::ContextDepth::Standard);
-    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain, depth).await?;
-    let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
+
+    let mut out = match (explain, session.as_ref()) {
+        // `--explain` diagnoses the daemon's own local assembly and its
+        // reasons; the server's `sections` carry a `selection_rule` of their
+        // own but no per-reader diagnostic to merge with it, so this stays a
+        // purely local read exactly as it was before Feature 005 US2
+        // (`contracts/retrieval-delivery.md` §8 keeps a *reason* out of the
+        // trace for the parallel cause).
+        (true, _) => {
+            let payload = briefing::build(
+                d,
+                &r,
+                session.as_ref(),
+                briefing::Assembly::local(budget, depth).explaining(true),
+            )
+            .await?;
+            serde_json::to_value(payload).unwrap_or(json!({}))
+        }
+        // No session bound in this worktree: `/api/retrieve` requires one to
+        // bind to, and there is none, so this is the daemon's own local
+        // assembly exactly as it always was (FR-031).
+        (false, None) => {
+            let payload =
+                briefing::build(d, &r, None, briefing::Assembly::local(budget, depth)).await?;
+            serde_json::to_value(payload).unwrap_or(json!({}))
+        }
+        (false, Some(s)) => {
+            let trigger = trigger
+                .as_deref()
+                .map(crate::deliver::Trigger::parse)
+                .unwrap_or(crate::deliver::Trigger::Explicit);
+            let deadline =
+                std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
+            let delivered = crate::deliver::deliver(
+                d,
+                &r,
+                s.id,
+                trigger,
+                open_trigger.as_deref(),
+                budget,
+                deadline,
+            )
+            .await;
+            // These three already travel inside `delivered.payload` too
+            // (a caller that only sees the wire reply, such as the hook
+            // process, has no other way to read them) — logged here as well
+            // because this is the one place a server outage or a degraded
+            // level is otherwise silent on the daemon's own side.
+            tracing::debug!(
+                trace_id = ?delivered.trace_id,
+                degradation_level = %delivered.degradation_level,
+                served_from_cache = delivered.served_from_cache,
+                "server-side retrieval delivered"
+            );
+            let mut payload = delivered.payload;
+            // FR-477: `minimum` excludes both global sections entirely,
+            // unconditionally. `deliver` has no `depth` parameter of its own
+            // — the merge is identical at every depth — so the gate is
+            // enforced here, on the merged result, instead of before the
+            // fetch. The server has no notion of `depth` either, so this is
+            // the only place the guarantee can live regardless.
+            if depth.is_minimum() {
+                if let Some(briefing) = payload.get_mut("briefing").and_then(|b| b.as_object_mut())
+                {
+                    briefing.remove("personal_notes");
+                    briefing.remove("team_guidance");
+                }
+            }
+            payload
+        }
+    };
 
     // The mode Cairn can honestly promise this agent — derived from Feature
     // 002's capability profile, never from a capability of its own (FR-426).
@@ -2229,6 +2760,32 @@ async fn memory_reinforce(
     from_memory_id: Option<Uuid>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
+    if server_owns_knowledge(d).await {
+        // `reinforcement_count` is derived, and a client that could send it
+        // could assert it (`knowledge-commands.md` §3.1). So the intent travels
+        // and the server does the counting.
+        //
+        // The `from` endpoint is still required, and still refused here rather
+        // than server-side, because this is where the caller finds out. It does
+        // **not** travel: the server's `reinforce` command increments the count
+        // and records no edge — recording one is `relate`, a command of its own
+        // (`knowledge-commands.md` §3). Sending a field the handler does not read
+        // would look like the edge had crossed when it had not.
+        let from = from_memory_id.ok_or_else(|| {
+            WireError::invalid(
+                "reinforcement needs the memory that carries the confirming statement",
+            )
+        })?;
+        let _ = from;
+        return queue_knowledge_command(
+            d,
+            Some(r.project.id),
+            session_id,
+            cairn_store::spool::CommandKind::Reinforce,
+            &json!({ "target_id": memory_id }),
+        )
+        .await;
+    }
     let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
     let target = repo::memory(&d.store, memory_id)
         .await
@@ -2410,6 +2967,35 @@ async fn personal_create(
     let content = cairn_core::redact::redact(&content);
     let identities = current_project_identities(&r.project);
 
+    // Once the server owns durable knowledge this is a request, not a write
+    // (FR-712). Screening still happens here and not only server-side: a
+    // command carrying content the boundary refuses should be refused before it
+    // is queued, so the user learns now rather than when the drain reports it.
+    cairn_core::validate::validate_global_content(
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        &[],
+        &identities,
+    )
+    .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+    if server_owns_knowledge(d).await {
+        let payload = json!({
+            "knowledge_type": kind.as_str(),
+            "content": content,
+            "topic_key": topic_key,
+            "value_key": value_key,
+        });
+        return queue_knowledge_command(
+            d,
+            None,
+            None,
+            cairn_store::spool::CommandKind::PersonalCreate,
+            &payload,
+        )
+        .await;
+    }
+
     let new = cairn_store::global::NewPersonalKnowledge::direct(
         d.owner_identity().await,
         kind,
@@ -2439,6 +3025,120 @@ async fn personal_create(
     Ok(body)
 }
 
+// ---------------------------------------------------------------------------
+// Post-cutover routing (T027, FR-701, FR-712, FR-815a)
+// ---------------------------------------------------------------------------
+
+/// Turn an explicit knowledge mutation into a command once the server owns
+/// durable knowledge.
+///
+/// Before cutover this does nothing and the local write stands. After it, a
+/// local write would be exactly what FR-712 forbids — "a local write the server
+/// later discovers" — so the mutation becomes a **request** instead.
+///
+/// It is always spooled rather than sent inline, and that is deliberate.
+/// FR-781 says an agent operation must not block on the server, and FR-815a
+/// says an explicit creation made offline becomes a queued write rather than a
+/// local durable record. Sending inline would satisfy neither when the server
+/// is slow: the caller would wait, and a failure would leave the daemon
+/// choosing between blocking and inventing a local record. Spooling gives one
+/// path for both cases, and the drain (T039) delivers it — promptly when the
+/// server is there, later when it is not.
+///
+/// The caller is told the command was **accepted for delivery**, never that it
+/// is durable. Nothing local becomes authoritative because a command is
+/// waiting (FR-709, FR-787).
+/// Whether an explicit mutation must become a request rather than a local write.
+///
+/// **Read on every explicit mutation, and the reason it is a function rather
+/// than a flag captured once is that the answer changes under a running
+/// daemon**: cutover flips it, and a handler holding a stale copy would keep
+/// writing local durable rows after the server took ownership.
+///
+/// A store that cannot answer is treated as not authoritative. The local path is
+/// the one that works without a server, and guessing the other way would queue
+/// commands nothing will ever apply.
+async fn server_owns_knowledge(d: &Daemon) -> bool {
+    cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m.commands_are_authoritative())
+        .unwrap_or(false)
+}
+
+pub(crate) async fn queue_knowledge_command(
+    d: &Daemon,
+    project_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    kind: cairn_store::spool::CommandKind,
+    payload: &serde_json::Value,
+) -> Reply {
+    // Account-bound, and it fails closed. A command spooled with no account
+    // could not be claimed by anyone — the claim predicate matches an account
+    // exactly — so queueing one would be a silent black hole rather than a
+    // queued write (FR-790, FR-864a).
+    let Some(account_id) = d.account_identity().await else {
+        return Err(WireError::new(
+            codes::NOT_LINKED,
+            "sign in before recording knowledge: the server owns durable \
+             knowledge now, and a command with no account could never be \
+             delivered",
+        ));
+    };
+
+    // Sessionless is a real case, not a degenerate one. The CLI permits memory
+    // operations outside any session, and the honest representation is a
+    // store-scoped command rather than a throwaway session row — which would
+    // leave a second active session in the worktree and make the next agent's
+    // context ambiguous (`contracts/knowledge-commands.md` §4.1).
+    let scope = match session_id {
+        Some(session) => cairn_store::spool::CommandScope::Session(session),
+        None => cairn_store::spool::store_scope(&d.store)
+            .await
+            .map_err(storage_err)?,
+    };
+
+    let admission = cairn_store::spool::spool_command(
+        &d.store,
+        cairn_store::spool::NewCommand {
+            // Bound to the server this store has established a lane with, at the
+            // moment the command is written (FR-791). Never re-decided later.
+            server_instance_id: cairn_store::cursor::bound_server_instance(&d.store)
+                .await
+                .map_err(storage_err)?,
+            scope,
+            project_id,
+            account_id,
+            kind,
+            payload,
+        },
+        cairn_store::spool::SpoolCapacity::default(),
+    )
+    .await
+    .map_err(storage_err)?;
+
+    match admission {
+        cairn_store::spool::CommandAdmission::Spooled(command) => Ok(json!({
+            // Not "stored". The distinction is the contract's: a queued command
+            // is not a local durable record, and saying so would be the claim
+            // FR-709 and FR-787 exist to prevent.
+            "accepted_for_delivery": true,
+            "command_id": command.command_id,
+            "scope": command.scope.kind(),
+            "command_seq": command.command_seq,
+        })),
+        // Refused visibly, and nothing queued was discarded to make room: no
+        // explicit command is droppable (FR-785 as applied in `spool.rs`).
+        cairn_store::spool::CommandAdmission::Saturated { queued } => Err(WireError::new(
+            codes::STORAGE_UNAVAILABLE,
+            format!(
+                "the command queue is full at {queued} undelivered \
+                     commands; nothing was dropped, and this command was not \
+                     accepted"
+            ),
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn memory_create(
     d: &Daemon,
@@ -2463,6 +3163,36 @@ async fn memory_create(
     let (scope, key) = resolve_scope(&r, &session, &git.branch, scope, scope_key)?;
     let content = cairn_core::redact::redact(&content);
 
+    // Once the server owns durable knowledge, this stops being a local write.
+    // `local_only` is the one exception and stays local by definition: it is
+    // knowledge the user asked never to leave the machine (FR-051), so routing
+    // it through the server would be the opposite of what it means.
+    if !local_only
+        && cairn_store::authority::mode(&d.store)
+            .await
+            .map_err(storage_err)?
+            .commands_are_authoritative()
+    {
+        // Intent only. Nothing derived travels — no state, no counts, no
+        // verification — because the server computes those and a client that
+        // could send them could assert them (`knowledge-commands.md` §3.1).
+        let payload = json!({
+            "type": kind.as_str(),
+            "scope": scope.as_str(),
+            "scope_key": key,
+            "content": content,
+            "topic_key": subject.topic_key,
+            "value_key": subject.value_key,
+            "supersedes": supersedes,
+        });
+        let command = match supersedes {
+            Some(_) => cairn_store::spool::CommandKind::Supersede,
+            None => cairn_store::spool::CommandKind::Remember,
+        };
+        return queue_knowledge_command(d, Some(r.project.id), Some(session.id), command, &payload)
+            .await;
+    }
+
     let new = repo::NewMemory {
         project_id: r.project.id,
         kind,
@@ -2482,7 +3212,9 @@ async fn memory_create(
             let (old, new) = repo::supersede_memory(&d.store, original, new, r.policy)
                 .await
                 .map_err(storage_err)?;
-            Ok(json!({ "memory": new, "superseded": old.id }))
+            let mut body = json!({ "memory": new, "superseded": old.id });
+            note_local_only_durability(d, local_only, &mut body).await;
+            Ok(body)
         }
         None => {
             let out = repo::create_memory_reconciled(
@@ -2504,9 +3236,48 @@ async fn memory_create(
             if !out.notes.is_empty() {
                 body["notes"] = json!(out.notes);
             }
+            note_local_only_durability(d, local_only, &mut body).await;
             Ok(body)
         }
     }
+}
+
+/// Say what `--local-only` costs, on the reply to the write that chose it.
+///
+/// **FR-706 asks for this at the point of choosing, and this is that point.**
+/// Local-only is the one deliberate exclusion from FR-703's durability
+/// guarantee: the record is excluded because the user asked for it to be, and a
+/// choice whose consequence is stated only in a manual is a choice made without
+/// it. Deleting this store deletes the record, and no pull brings it back —
+/// there is nothing on the server to pull.
+///
+/// Attached to the reply rather than logged, so it reaches the human and the
+/// agent that made the call. Silent when the flag was not set: a note on every
+/// write would be noise, and noise is how a warning stops being read.
+///
+/// Only in the end state. While the local store is still the authority, every
+/// memory is local and `--local-only` withholds nothing a colleague would
+/// otherwise have — the warning would be true of the whole store, which is a
+/// statement about the installation and not about this write.
+async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut serde_json::Value) {
+    if !local_only {
+        return;
+    }
+    let authoritative = cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m.commands_are_authoritative())
+        .unwrap_or(false);
+    if !authoritative {
+        return;
+    }
+    body["durability"] = json!({
+        "class": cairn_store::diag::DurabilityClass::LocalOnly.as_str(),
+        "survives_local_loss": false,
+        "note": "local-only: this stays on this machine. It is not sent to the \
+                 server, it is excluded from the durability guarantee, and \
+                 deleting this store deletes it — there is nothing to restore \
+                 it from.",
+    });
 }
 
 /// Recording memory should not require the caller to have started a session
@@ -2823,6 +3594,38 @@ async fn team_propose(
     let r = d.resolve(cwd).await?;
     let identities = current_project_identities(&r.project);
 
+    // A proposal is an intent, and under server authority it travels as one
+    // (FR-712). The proposer is bound from the credential on the far side; there
+    // is no field for it here, which is the point.
+    cairn_core::validate::validate_global_content(
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        &applicability,
+        &identities,
+    )
+    .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+    if server_owns_knowledge(d).await {
+        let payload = json!({
+            "knowledge_type": knowledge_type.unwrap_or(MemoryType::Fact).as_str(),
+            "content": content,
+            "topic_key": topic_key,
+            "value_key": value_key,
+            "applicability": applicability
+                .iter()
+                .map(|f| json!({ "kind": f.kind.as_str(), "value": f.value }))
+                .collect::<Vec<_>>(),
+        });
+        return queue_knowledge_command(
+            d,
+            None,
+            None,
+            cairn_store::spool::CommandKind::TeamPropose,
+            &payload,
+        )
+        .await;
+    }
+
     let new = cairn_store::global::NewTeamKnowledge::direct(
         require_account(d).await?,
         // `fact` is the same default `cairn memory add --type` gives a
@@ -2901,11 +3704,30 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
                 e
             }
         })?;
-    match cairn_store::global::ratify_team(&d.store, id, actor, supersedes).await {
+    // The swap is about to win or lose, and either way no pulled page has
+    // carried this transition — so the version the row now reflects is in the
+    // server's reply and nowhere else yet. It travels *into* the swap, so the
+    // transition and its version commit together: recorded afterwards, a page
+    // fetched before the ratification is admitted in between and rolls the row
+    // back to `proposed`, taking `ratified_by_user_id` with it (FR-457).
+    let version = crate::sync::team_transition_version(&remote);
+    match cairn_store::global::ratify_team_at_version(&d.store, id, actor, supersedes, version)
+        .await
+    {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
         {
+            // The swap lost, which is ordinary — the row was not in the state
+            // this device expected. The server still decided, so its answer is
+            // the correct content for a local copy that is a cache (FR-712a),
+            // and leaving the stale one would show `proposed` for guidance the
+            // whole deployment now follows.
+            //
+            // **And if adopting it fails, this refuses.** The `?` is the whole
+            // fix: the result used to be discarded, so a ratification that was
+            // recorded nowhere on this machine still answered `ok` (FR-457).
+            crate::sync::adopt_team_answer(d, &remote).await?;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
@@ -2950,11 +3772,20 @@ async fn require_account(d: &Daemon) -> Result<Uuid, WireError> {
 /// the same `state_conflict`-after-server-success treatment.
 async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
     let (remote, actor) = crate::sync::team_retire_remote(d, id).await?;
-    match cairn_store::global::retire_team(&d.store, id, actor).await {
+    // As `team_ratify`: the version travels into the swap so the retirement and
+    // the version it reflects commit together.
+    let version = crate::sync::team_transition_version(&remote);
+    match cairn_store::global::retire_team_at_version(&d.store, id, actor, version).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
         {
+            // Same reasoning as `team_ratify`, and the symptom that found it:
+            // the acting device recorded a retirement with no actor and no
+            // timestamp, because the swap it expected to make never applied.
+            // Refuses when this last chance to record it also fails, rather
+            // than reporting a retirement nothing here can attribute.
+            crate::sync::adopt_team_answer(d, &remote).await?;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
@@ -3097,6 +3928,14 @@ async fn namespace_sync_status(
                 // not surfaced: recall shows only the currently linked
                 // identity, and so does this (FR-567).
                 SyncNamespace::Personal(..) => continue,
+                // A pattern is a personal-domain record (FR-708c), so its lane
+                // reports under `personal` rather than inventing a fourth kind
+                // in a status view — the lane is separate because the feed and
+                // the cursor are, not because the domain is.
+                SyncNamespace::Patterns(_, user) if user == owner => {
+                    (KnowledgeDomain::Personal, namespace.key())
+                }
+                SyncNamespace::Patterns(..) => continue,
                 SyncNamespace::Team(_) => (KnowledgeDomain::Team, namespace.key()),
                 SyncNamespace::Project(_) => continue,
             };
@@ -3380,6 +4219,104 @@ async fn restore_checkpoint(
     serde_json::to_value(restored).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Migration from Feature 004 (T143, T151)
+//
+// Thin: every decision lives in `migrate005`, and these five do the two things
+// a handler is for — resolve the repository, and turn a report into a reply.
+// ---------------------------------------------------------------------------
+
+/// The authenticated account, which is what a migration is scoped to.
+///
+/// Not this machine's local user id: ownership of personal knowledge and of a
+/// legacy pattern claim is an account fact, and a store used with two accounts
+/// has one local user and two migrations' worth of eligible rows
+/// (`migration-cutover.md` §4.1a).
+async fn migrating_account(d: &Daemon) -> Result<uuid::Uuid, WireError> {
+    d.server.read().await.account_id.ok_or_else(|| {
+        WireError::new(
+            codes::UNAUTHORIZED,
+            "migration needs an authenticated account; run `cairn auth token set`",
+        )
+    })
+}
+
+async fn remote_for(d: &Daemon) -> Result<crate::migrate005::HttpRemote, WireError> {
+    Ok(crate::migrate005::HttpRemote::new(
+        crate::sync::client(d).await?,
+    ))
+}
+
+fn store_failure(e: cairn_store::StoreError) -> WireError {
+    match e {
+        cairn_store::StoreError::Refused { code, message } => WireError::new(code, message),
+        other => storage_err(other),
+    }
+}
+
+async fn migrate_inspect(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let report = crate::migrate005::inspect(&d.store)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "inspect": report }))
+}
+
+async fn migrate_claim_patterns(d: &Daemon, cwd: &str, patterns: Vec<uuid::Uuid>) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let selection = if patterns.is_empty() {
+        cairn_store::migrate::unclaimed_patterns(&d.store)
+            .await
+            .map_err(store_failure)?
+    } else {
+        patterns
+    };
+    let rows = crate::migrate005::claim_patterns(&d.store, account, &selection)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "claims": rows }))
+}
+
+async fn migrate_run(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let writer = cairn_store::repo::writer_identity(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let remote = remote_for(d).await?;
+    let report = crate::migrate005::run(&d.store, &remote, account, &writer.to_string())
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "run": report }))
+}
+
+async fn migrate_status(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let report = crate::migrate005::status(&d.store)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "status": report }))
+}
+
+async fn migrate_retry_retained(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let writer = cairn_store::repo::writer_identity(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let remote = remote_for(d).await?;
+    let (released, still_retained) =
+        crate::migrate005::retry_retained(&d.store, &remote, account, &writer.to_string())
+            .await
+            .map_err(store_failure)?;
+    Ok(json!({
+        "ok": true,
+        "released": released,
+        "still_retained": still_retained,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3400,6 +4337,337 @@ mod tests {
         let json = serde_json::to_value(&envelope).expect("serializable envelope");
         assert_eq!(json["ok"], false, "expected failure, got {json}");
         json["error"].clone()
+    }
+
+    /// The blocked-reason precedence is the stated one, at every level
+    /// (FR-792d, `data-model.md` §5b).
+    ///
+    /// # Why a table and not a scenario
+    ///
+    /// A spool can be several kinds of blocked at once and a status line
+    /// reports one thing, so which one it reports is a decision — and before
+    /// this it was made by the order in which the conditions happened to be
+    /// computed, across two functions, one of which could not see two of the
+    /// inputs. An end-to-end test can reach perhaps three of these
+    /// combinations, and only by arranging a server, an outage and a backlog
+    /// for each; the ordering itself is a property of one pure function over a
+    /// struct of counts, so this drives it directly and every adjacent pair in
+    /// the published table is actually pinned.
+    ///
+    /// Each case asserts a *pair*: the reason that must win and the one it must
+    /// beat, both true at once. A case where only one condition held would pass
+    /// under any ordering at all.
+    ///
+    /// **Falsified by** reordering any two arms of either `match`, and by
+    /// moving a reason between the caller-supplied set and the row-derived one.
+    #[test]
+    fn one_reason_wins_and_the_order_is_the_published_one() {
+        use cairn_store::spool::SpoolBreakdown;
+
+        /// One row of the published table: the reason that must win, the
+        /// adjacent reason it must beat, and the state in which both hold.
+        struct Case {
+            expected: Option<&'static str>,
+            why: &'static str,
+            breakdown: SpoolBreakdown,
+            signed_in: bool,
+            peer_mismatch: bool,
+            unreachable: bool,
+        }
+
+        /// A breakdown with nothing wrong with it, spoiled per case.
+        fn quiet() -> SpoolBreakdown {
+            SpoolBreakdown {
+                waiting: 0,
+                in_flight: 0,
+                retrying: 0,
+                deferred: 0,
+                terminal: 0,
+                terminal_retry_exhausted: 0,
+                bytes: 0,
+                saturated: false,
+                other_instance: 0,
+                oldest_at: None,
+            }
+        }
+
+        let cases = vec![
+            Case {
+                expected: None,
+                why: "an empty spool is never blocked, whatever the network is \
+                      doing — a reason here would make `blocked` mean `has work`",
+                breakdown: quiet(),
+                signed_in: false,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("no_account"),
+                why: "nothing can be claimed at all, so it outranks \
+                      unreachability and a mismatch both",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: false,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("server_unreachable"),
+                why: "Cairn cannot even ask, so it outranks a mismatch it could \
+                      not have observed and every row-derived reason",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    retrying: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: true,
+                unreachable: true,
+            },
+            Case {
+                expected: Some("server_instance_mismatch"),
+                why: "the answering deployment is not the bound one, so no row \
+                      moves whatever its state — it outranks saturation",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: true,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("saturated"),
+                why: "work is being lost rather than delayed, so it outranks a \
+                      terminal row that is merely stuck",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    saturated: true,
+                    terminal: 1,
+                    terminal_retry_exhausted: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("retry_exhausted"),
+                why: "a row that will never move again outranks a deferral that \
+                      resolves itself",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    terminal: 1,
+                    terminal_retry_exhausted: 1,
+                    deferred: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("refused_by_server"),
+                why: "a permanent refusal outranks a deferral and a backoff",
+                breakdown: SpoolBreakdown {
+                    waiting: 1,
+                    terminal: 1,
+                    deferred: 1,
+                    retrying: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("awaiting_capability"),
+                why: "waiting for a server upgrade outranks a transient backoff",
+                breakdown: SpoolBreakdown {
+                    deferred: 1,
+                    retrying: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("backing_off"),
+                why: "Cairn is asking and failing, which outranks a partial \
+                      mismatch whose deliverable half is still moving",
+                breakdown: SpoolBreakdown {
+                    retrying: 1,
+                    waiting: 1,
+                    other_instance: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+            Case {
+                expected: Some("server_instance_mismatch"),
+                why: "reported last when only some rows belong elsewhere: those \
+                      rows never will move, but the rest are draining normally",
+                breakdown: SpoolBreakdown {
+                    waiting: 2,
+                    other_instance: 1,
+                    ..quiet()
+                },
+                signed_in: true,
+                peer_mismatch: false,
+                unreachable: false,
+            },
+        ];
+
+        for c in cases {
+            let got = spool_health(&c.breakdown, c.signed_in, c.peer_mismatch, c.unreachable);
+            assert_eq!(
+                got.blocked_reason.as_deref(),
+                c.expected,
+                "{}\n  breakdown: {:?}\n  signed_in={} peer_mismatch={} unreachable={}",
+                c.why,
+                c.breakdown,
+                c.signed_in,
+                c.peer_mismatch,
+                c.unreachable
+            );
+        }
+    }
+
+    /// A status read only touches the network when it is asked for the spool's
+    /// reason (FR-792a, FR-105).
+    ///
+    /// # Why this test exists rather than a comment
+    ///
+    /// Answering "why is delivery not progressing" truthfully needs a fresh
+    /// sample of who is answering the endpoint, and taking one costs a network
+    /// round trip. `cairn status` and `cairn doctor` show that reason and must
+    /// pay for it. But `Request::Status` is also how `cairn agents`,
+    /// `cairn connect`, `cairn repair` and `cairn disconnect` read one unrelated
+    /// number — `sessions_awaiting_handoff` — and **FR-105 forbids detection
+    /// from requiring network access at all**. Nothing structural stops a later
+    /// change from making the probe unconditional again: it would still pass
+    /// every FR-792 test, and `cairn agents` would quietly start depending on a
+    /// server being reachable. So the boundary is pinned here.
+    ///
+    /// The endpoint is a port nothing listens on, which makes the two cases
+    /// distinguishable without a server: a probe that is taken cannot reach it
+    /// and reports `server_unreachable`, and a probe that is never taken leaves
+    /// the reason to be derived from the rows, which say nothing about the
+    /// network. So the assertion is not "it was fast" — a timing test would be
+    /// flaky and would prove nothing — but "the answer is one only a probe
+    /// could have produced".
+    ///
+    /// **Falsified by** probing regardless of `spool_reason`, and by dropping
+    /// the flag so both callers ask the same question.
+    #[tokio::test]
+    async fn detection_reads_status_without_touching_the_network() {
+        let r = Repo::new().await;
+        let p = fx::project(&r.daemon, "probe-scope", None).await;
+        let s = fx::session(&r.daemon, &p, "probe-scope-1").await;
+
+        // A credential pointing at a port nothing serves. Port 1 is privileged
+        // and unbound, so the connection is refused immediately rather than
+        // waiting out the probe's deadline.
+        r.daemon
+            .mutate_credentials(|c| {
+                c.url = Some("http://127.0.0.1:1".to_string());
+                c.token = Some("probe-scope-token".to_string());
+                // Signed in, because `no_account` outranks reachability by
+                // design (FR-792d): with nobody signed in nothing can be
+                // claimed at all, and that reason would mask the one under
+                // test here.
+                c.account_id = Some(Uuid::now_v7());
+            })
+            .await
+            .expect("set the fixture's credential");
+
+        // One undelivered row, because a spool with nothing in it is never
+        // blocked and never probes — the interesting case is the one where
+        // FR-792's question is live.
+        let admitted = cairn_store::spool::spool_event(
+            &r.daemon.store,
+            cairn_store::spool::SpoolCapacity::default(),
+            cairn_store::spool::NewEvent {
+                project_id: p.id,
+                account_id: Uuid::now_v7(),
+                event: cairn_core::event::SafeCanonicalEvent {
+                    event_id: Uuid::nil(),
+                    session_seq: 0,
+                    contract_version: 1,
+                    kind: cairn_core::event::EventKind::FileRead,
+                    agent: cairn_core::event::EventAgent::ClaudeCode,
+                    vendor_event: None,
+                    session_id: s.id,
+                    occurred_at: chrono::Utc::now(),
+                    content: Some(cairn_core::event::EventContent::File {
+                        repo_file: Some("src/probe.rs".to_string()),
+                        repo_file_from: None,
+                        change_kind: None,
+                        file_identity: cairn_core::event::FileIdentity::Present,
+                    }),
+                },
+                server_instance_id: None,
+            },
+        )
+        .await
+        .expect("spool one event");
+        assert!(
+            matches!(admitted, cairn_store::spool::EventAdmission::Spooled { .. }),
+            "the fixture queued nothing, so neither case below is about a \
+             blocked spool: {admitted:?}"
+        );
+
+        let asked = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
+        assert_eq!(
+            asked["capture"]["events"]["blocked_reason"].as_str(),
+            Some("server_unreachable"),
+            "a caller that asked for the reason did not get a fresh sample of \
+             the endpoint (FR-792a): {}",
+            asked["capture"]["events"]
+        );
+
+        let unasked = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: false,
+            },
+        )
+        .await;
+        assert_ne!(
+            unasked["capture"]["events"]["blocked_reason"].as_str(),
+            Some("server_unreachable"),
+            "detection reached the network to answer a question it never reads; \
+             FR-105 requires it not to: {}",
+            unasked["capture"]["events"]
+        );
+        // And the cheap read is still a real read: the depth and the age of the
+        // backlog are local facts and must be reported either way (FR-792).
+        assert!(
+            unasked["capture"]["events"]["undelivered"]
+                .as_i64()
+                .unwrap_or(0)
+                > 0
+                && unasked["capture"]["events"]["oldest_at"].as_str().is_some(),
+            "the network-free read stopped reporting the depth and age FR-792 \
+             asks for: {}",
+            unasked["capture"]["events"]
+        );
     }
 
     #[tokio::test]
@@ -3438,7 +4706,14 @@ mod tests {
     #[tokio::test]
     async fn status_reports_the_real_working_tree() {
         let r = Repo::new().await;
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(v["repository"]["branch"], "main");
         assert!(v["repository"]["commit_sha"].is_string());
         assert_eq!(v["repository"]["untracked"], 0);
@@ -3446,7 +4721,14 @@ mod tests {
         // An untracked file must show up as one, rather than the cached value
         // from a moment ago.
         r.write("scratch.txt", "x\n");
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(v["repository"]["untracked"], 1);
     }
 
@@ -3460,6 +4742,7 @@ mod tests {
             &r,
             Request::Status {
                 cwd: elsewhere.path().display().to_string(),
+                spool_reason: true,
             },
         )
         .await;
@@ -3825,7 +5108,14 @@ mod tests {
             .await;
         }
 
-        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        let v = ok(
+            &r,
+            Request::Status {
+                cwd: r.cwd.clone(),
+                spool_reason: true,
+            },
+        )
+        .await;
         assert_eq!(
             v["observation_count"], 1,
             "only the non-excluded edit should have been stored: {v}"

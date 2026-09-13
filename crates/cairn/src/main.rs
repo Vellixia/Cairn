@@ -81,10 +81,21 @@ enum Command {
         /// how the wrong project gets rebuilt.
         #[arg(long)]
         rebuild_derived: bool,
+        /// State what deleting this local store would cost, and what it would
+        /// not (FR-705, SC-714).
+        ///
+        /// Three lists: what is lost for good, what the server restores on the
+        /// next pull, and what is queued and not yet accepted. Plus whether
+        /// each cache has actually refilled — an empty cache and an absence of
+        /// knowledge look identical from here, and only one of them is news.
+        #[arg(long)]
+        durability: bool,
     },
     /// Reusable cross-project patterns (`contracts/patterns.md`).
     ///
-    /// A pattern is local to this machine and never synchronizes.
+    /// A pattern's transferable content is durable on the server as an
+    /// owner-only personal-domain record; its signals, origin and applications
+    /// stay on this machine and are not backed up.
     Pattern {
         #[command(subcommand)]
         action: PatternAction,
@@ -262,6 +273,35 @@ enum Command {
         /// Feature 001 hook entry keeps working unchanged.
         #[arg(long)]
         agent: Option<String>,
+    },
+
+    /// Move this store's durable knowledge to the server
+    /// (`contracts/migration-cutover.md` §4-§9).
+    ///
+    /// Flags rather than subcommands because they are five views of one
+    /// procedure, and because `--inspect` and `--status` are the two a user
+    /// runs repeatedly while deciding whether to run the third.
+    Migrate {
+        /// Count what the store holds and change nothing else.
+        #[arg(long)]
+        inspect: bool,
+        /// Claim ownership of legacy patterns for the signed-in account.
+        ///
+        /// Ownership is never inferred: `reusable_patterns` has no owner
+        /// column, a Feature 004 store may have been used with several
+        /// accounts, and there is no truthful automatic assignment. Naming no
+        /// id claims every unclaimed pattern; naming ids claims those.
+        #[arg(long, num_args = 0.., value_name = "PATTERN_ID")]
+        claim_patterns: Option<Vec<Uuid>>,
+        /// Run the migration, resuming at the first unfinished phase.
+        #[arg(long)]
+        run: bool,
+        /// Phases, and every retained record with its reason.
+        #[arg(long)]
+        status: bool,
+        /// Re-attempt every record that stayed local.
+        #[arg(long)]
+        retry_retained: bool,
     },
 }
 
@@ -1072,7 +1112,12 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         }
 
         Command::Status => {
-            let v = client::send(&Request::Status { cwd: cwd() }).await?;
+            let v = client::send(&Request::Status {
+                cwd: cwd(),
+                // `cairn status` is the command FR-792 is written about.
+                spool_reason: true,
+            })
+            .await?;
             let payload: StatusPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
             Ok(Output::with(v, render::status(&payload)))
@@ -1106,14 +1151,33 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Doctor {
             agent,
             rebuild_derived,
+            durability,
         } => {
             if *rebuild_derived {
                 rebuild_derived_command().await
+            } else if *durability {
+                durability_command().await
             } else {
                 integrate::doctor(parse_agent_opt(agent)?).await
             }
         }
         Command::Pattern { action } => pattern(action).await,
+        Command::Migrate {
+            inspect,
+            claim_patterns,
+            run,
+            status,
+            retry_retained,
+        } => {
+            migrate(
+                *inspect,
+                claim_patterns.as_deref(),
+                *run,
+                *status,
+                *retry_retained,
+            )
+            .await
+        }
         Command::Repair {
             agent,
             dry_run,
@@ -1207,6 +1271,10 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 token_budget: *budget,
                 explain: *explain,
                 depth,
+                // The CLI always retrieves as an explicit pull (`contracts/
+                // retrieval-delivery.md` §3), same as `cairn_context`.
+                trigger: None,
+                open_trigger: None,
             })
             .await?;
             let payload: ContextPayload =
@@ -1846,11 +1914,13 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 domain: None,
             })
             .await?;
-            let text = format!(
-                "Remembered {}.\n{}",
-                render::id_of(&v["memory"]),
-                render::reconciliation(&v)
-            );
+            let text = render::queued_instead_of_stored(&v).unwrap_or_else(|| {
+                format!(
+                    "Remembered {}.\n{}",
+                    render::id_of(&v["memory"]),
+                    render::reconciliation(&v)
+                )
+            });
             Ok(Output::with(v, text))
         }
         MemoryAction::Supersede {
@@ -1891,11 +1961,13 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 local_only: *local_only,
             })
             .await?;
-            let text = format!(
-                "Remembered {}.\n  supersedes {}\n",
-                render::id_of(&v["memory"]),
-                v["superseded"].as_str().unwrap_or("?")
-            );
+            let text = render::queued_instead_of_stored(&v).unwrap_or_else(|| {
+                format!(
+                    "Remembered {}.\n  supersedes {}\n",
+                    render::id_of(&v["memory"]),
+                    v["superseded"].as_str().unwrap_or("?")
+                )
+            });
             Ok(Output::with(v, text))
         }
         MemoryAction::Subject {
@@ -2522,6 +2594,264 @@ async fn rebuild_derived_command() -> Result<Output, WireError> {
             format!("{differed} derived value(s) disagree with their rebuild"),
         ));
     }
+    Ok(Output::with(v, text))
+}
+
+/// `cairn doctor --durability` — the local-loss inventory (T089).
+///
+/// Reports what deleting this store would cost, in three lists, and never
+/// collapses them into one number. "Restorable" is not the same claim as
+/// "durable": the rows go, the knowledge comes back on the next pull, and a
+/// summary that said only "safe" would be answering a question the user did not
+/// ask.
+///
+/// Exits zero either way. Local-only data is a choice, not a fault, and a
+/// non-zero exit would turn every store that holds an observation into a failing
+/// check.
+async fn durability_command() -> Result<Output, WireError> {
+    let v = client::send(&Request::Durability { cwd: cwd() }).await?;
+
+    let rows = |key: &str| -> Vec<(String, i64)> {
+        v[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        (
+                            e["category"].as_str().unwrap_or("").to_string(),
+                            e["rows"].as_i64().unwrap_or(0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut text = String::new();
+    let mut section = |title: &str, entries: Vec<(String, i64)>| {
+        text.push_str(title);
+        text.push('\n');
+        if entries.iter().all(|(_, n)| *n == 0) {
+            text.push_str("  (nothing)\n");
+        }
+        for (category, n) in entries.iter().filter(|(_, n)| *n > 0) {
+            text.push_str(&format!("  {category:<32} {n:>8}\n"));
+        }
+        text.push('\n');
+    };
+
+    section(
+        "lost for good if this store is deleted:",
+        rows("lost_on_deletion"),
+    );
+    section(
+        "restored from the server on the next pull:",
+        rows("restorable_from_server"),
+    );
+    section(
+        "queued, accepted for delivery, not yet durable:",
+        rows("in_flight"),
+    );
+
+    text.push_str("caches:\n");
+    let caches = v["caches"].as_array().cloned().unwrap_or_default();
+    if caches.is_empty() {
+        text.push_str("  (no lane has been established yet)\n");
+    }
+    for c in &caches {
+        text.push_str(&format!(
+            "  {:<40} {:<14} {:>6} rows\n",
+            c["namespace"].as_str().unwrap_or(""),
+            c["state"].as_str().unwrap_or(""),
+            c["rows"].as_i64().unwrap_or(0),
+        ));
+    }
+    text.push_str(&format!(
+        "\nauthority: {}\n",
+        v["authority"].as_str().unwrap_or("unknown")
+    ));
+
+    Ok(Output::with(v, text))
+}
+
+/// `cairn migrate …` (`contracts/migration-cutover.md` §4-§9).
+///
+/// Exactly one action per invocation. Combining them would read as a
+/// convenience and behave as a trap: `--claim-patterns --run` looks like
+/// "claim these, then migrate", and a user who mistyped an id would have run
+/// the migration anyway with the patterns they meant to claim reported
+/// `owner_unclaimed`.
+async fn migrate(
+    inspect: bool,
+    claim_patterns: Option<&[Uuid]>,
+    run: bool,
+    status: bool,
+    retry_retained: bool,
+) -> Result<Output, WireError> {
+    let chosen = [
+        inspect,
+        claim_patterns.is_some(),
+        run,
+        status,
+        retry_retained,
+    ]
+    .iter()
+    .filter(|c| **c)
+    .count();
+    if chosen != 1 {
+        return Err(WireError::invalid(
+            "`cairn migrate` takes exactly one of --inspect, --claim-patterns, \
+             --run, --status or --retry-retained",
+        ));
+    }
+
+    if inspect {
+        let v = client::send(&Request::MigrateInspect { cwd: cwd() }).await?;
+        let i = &v["inspect"];
+        let mut text = String::from("migration inspect (nothing has been changed)\n\n");
+        text.push_str("records:\n");
+        if let Some(map) = i["records"].as_object() {
+            for (k, n) in map {
+                text.push_str(&format!("  {k:<34} {}\n", n.as_i64().unwrap_or(0)));
+            }
+        }
+        text.push_str("queued:\n");
+        if let Some(map) = i["outbox"].as_object() {
+            for (k, n) in map {
+                text.push_str(&format!("  {k:<34} {}\n", n.as_i64().unwrap_or(0)));
+            }
+        }
+        text.push_str(&format!(
+            "  {:<34} {}\n  {:<34} {}\n",
+            "with no recorded author",
+            i["outbox_without_author"].as_i64().unwrap_or(0),
+            "local-only project memories",
+            i["local_only_memories"].as_i64().unwrap_or(0),
+        ));
+        let eligible = i["patterns_eligible_for_claim"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "\npatterns eligible for an ownership claim: {}\n",
+            eligible.len()
+        ));
+        for p in &eligible {
+            // `unknown`, and deliberately so: the shipped table has no owner
+            // column, and printing the signed-in account here would be the
+            // inference the claim exists to avoid.
+            text.push_str(&format!(
+                "  {}  historical owner: unknown\n",
+                p.as_str().unwrap_or("")
+            ));
+        }
+        if !eligible.is_empty() {
+            text.push_str("\nrun `cairn migrate --claim-patterns` to claim them.\n");
+        }
+        return Ok(Output::with(v, text));
+    }
+
+    if let Some(patterns) = claim_patterns {
+        let v = client::send(&Request::MigrateClaimPatterns {
+            cwd: cwd(),
+            patterns: patterns.to_vec(),
+        })
+        .await?;
+        let mut text = String::new();
+        for c in v["claims"].as_array().unwrap_or(&Vec::new()) {
+            text.push_str(&format!(
+                "{}  {}\n",
+                c["local_pattern_id"].as_str().unwrap_or(""),
+                c["outcome"].as_str().unwrap_or("")
+            ));
+        }
+        if text.is_empty() {
+            text.push_str("no legacy pattern is waiting to be claimed\n");
+        }
+        return Ok(Output::with(v, text));
+    }
+
+    if run {
+        let v = client::send(&Request::MigrateRun { cwd: cwd() }).await?;
+        let r = &v["run"];
+        let mut text = String::new();
+        if let Some(from) = r["resumed_at"].as_str() {
+            text.push_str(&format!("resumed at phase: {from}\n"));
+        }
+        text.push_str(&format!(
+            "delivered {} · demoted {} · withheld from demotion {}\n",
+            r["drain"]["delivered"].as_i64().unwrap_or(0),
+            r["demoted"].as_i64().unwrap_or(0),
+            r["withheld_from_demotion"].as_i64().unwrap_or(0),
+        ));
+        text.push_str(&format!(
+            "keys re-normalized {} · conflicts surfaced {}\n",
+            r["keys"]["renormalized"].as_i64().unwrap_or(0),
+            r["keys"]["conflicts"].as_i64().unwrap_or(0),
+        ));
+        let blocked = r["drain"]["blocked"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !blocked.is_empty() {
+            text.push_str(&format!("\n{} record(s) did not move:\n", blocked.len()));
+            for b in &blocked {
+                text.push_str(&format!(
+                    "  {:<18} {:<38} {}\n",
+                    b["entity_type"].as_str().unwrap_or(""),
+                    b["entity_id"].as_str().unwrap_or(""),
+                    b["reason"].as_str().unwrap_or("")
+                ));
+            }
+        }
+        text.push_str(&format!(
+            "\nauthority: {}\n",
+            r["mode"].as_str().unwrap_or("unknown")
+        ));
+        return Ok(Output::with(v, text));
+    }
+
+    if status {
+        let v = client::send(&Request::MigrateStatus { cwd: cwd() }).await?;
+        let st = &v["status"];
+        let mut text = format!(
+            "authority: {}\n\nphases:\n",
+            st["mode"].as_str().unwrap_or("")
+        );
+        for p in st["phases"].as_array().unwrap_or(&Vec::new()) {
+            text.push_str(&format!(
+                "  {:<24} {:<9} {}\n",
+                p["phase"].as_str().unwrap_or(""),
+                p["state"].as_str().unwrap_or(""),
+                p["detail_count"].as_i64().unwrap_or(0),
+            ));
+        }
+        let retained = st["retained"].as_array().cloned().unwrap_or_default();
+        text.push_str(&format!("\nretained locally: {}\n", retained.len()));
+        for r in &retained {
+            text.push_str(&format!(
+                "  {:<48} {:<26} {}\n",
+                r["reference"].as_str().unwrap_or(""),
+                r["reason"].as_str().unwrap_or(""),
+                if r["writable"].as_bool().unwrap_or(false) {
+                    "writable"
+                } else {
+                    "read-only"
+                },
+            ));
+        }
+        if st["complete"].as_bool().unwrap_or(false) {
+            text.push_str("\nthis store is server-authoritative with no exceptions.\n");
+        }
+        return Ok(Output::with(v, text));
+    }
+
+    let v = client::send(&Request::MigrateRetryRetained { cwd: cwd() }).await?;
+    let text = format!(
+        "released {} · still retained {}\n",
+        v["released"].as_i64().unwrap_or(0),
+        v["still_retained"].as_i64().unwrap_or(0),
+    );
     Ok(Output::with(v, text))
 }
 

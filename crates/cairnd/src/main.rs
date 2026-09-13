@@ -4,13 +4,16 @@
 //! local socket, and never touches the network unless a project was explicitly
 //! linked.
 
+mod arrival;
 mod briefing;
 mod capture;
 mod continuity;
+mod deliver;
 mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
+mod migrate005;
 mod patterns;
 mod promote;
 mod recover;
@@ -109,6 +112,8 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         )),
         in_flight_captures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
+        outage_cache: Arc::new(tokio::sync::Mutex::new(deliver::OutageCache::default())),
+        last_observed_instance: Arc::new(RwLock::new(None)),
     });
 
     let reconciled = recover::reconcile_previous_runs(&daemon).await;
@@ -292,6 +297,7 @@ async fn run(socket_path: PathBuf, idle_timeout: std::time::Duration) -> anyhow:
     std::fs::rename(&staging, &socket_path)?;
     let owned = socket_identity(&socket_path);
     tracing::info!(socket = %socket_path.display(), run_id = %daemon.run_id, "cairnd listening");
+    let arrivals = arrival::Arrivals::new();
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
@@ -312,8 +318,13 @@ async fn run(socket_path: PathBuf, idle_timeout: std::time::Duration) -> anyhow:
                     Ok((stream, _)) => {
                         let daemon = Arc::clone(&daemon);
                         let shutdown = shutdown_tx.clone();
+                        // Taken here, where the order is still the order the
+                        // hooks ran in: `accept` returns connections in the
+                        // order they were made, and everything after this point
+                        // is a task that races the others (`arrival`).
+                        let ticket = arrivals.take();
                         tokio::spawn(async move {
-                            if let Err(e) = serve(daemon, stream, shutdown).await {
+                            if let Err(e) = serve(daemon, stream, shutdown, ticket).await {
                                 tracing::debug!(error = %e, "connection ended");
                             }
                         });
@@ -414,6 +425,7 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
     let daemon = daemon?;
     first_connect?;
     tracing::info!(pipe = %name, run_id = %daemon.run_id, "cairnd listening");
+    let arrivals = arrival::Arrivals::new();
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn(supervise(
@@ -431,8 +443,12 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
             .create(name.as_str())?;
         let daemon = Arc::clone(&daemon);
         let shutdown = shutdown_tx.clone();
+        // The first connection is still a connection, and it is the *earliest*
+        // one: skipping it here would leave the hook that opened this daemon
+        // racing every hook behind it (`arrival`).
+        let ticket = arrivals.take();
         tokio::spawn(async move {
-            if let Err(e) = serve(daemon, handled, shutdown).await {
+            if let Err(e) = serve(daemon, handled, shutdown, ticket).await {
                 tracing::debug!(error = %e, "connection ended");
             }
         });
@@ -456,8 +472,13 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
                     Ok(()) => {
                         let daemon = Arc::clone(&daemon);
                         let shutdown = shutdown_tx.clone();
+                        // As on Unix, and for the same reason: a named pipe
+                        // hands waiting clients over in the order they
+                        // connected, and that order is not recoverable once
+                        // each is a task of its own (`arrival`).
+                        let ticket = arrivals.take();
                         tokio::spawn(async move {
-                            if let Err(e) = serve(daemon, handled, shutdown).await {
+                            if let Err(e) = serve(daemon, handled, shutdown, ticket).await {
                                 tracing::debug!(error = %e, "connection ended");
                             }
                         });
@@ -508,10 +529,29 @@ async fn supervise(
 // ---------------------------------------------------------------------------
 
 /// One connection: newline-delimited JSON requests, one envelope per reply.
+/// Whether this request's events must take their ordinals in accept order.
+///
+/// Everything that carries capture output, except a boundary: a boundary is
+/// gated by nothing because it can be *waited on* by the captures around it
+/// (H3), and the two rules together are what keep the gate acyclic. A boundary
+/// is also not evidence any rule reads a sequence of — `session_opened` and
+/// `session_closed` bracket the stream rather than sitting inside the patterns
+/// R1–R8 match.
+fn orders_by_arrival(request: &Request) -> bool {
+    match request {
+        Request::Observe { .. } | Request::CaptureEvents { .. } => true,
+        Request::CanonicalEvent { event, capture, .. } => {
+            capture.is_some() && !event.event.is_boundary_class()
+        }
+        _ => false,
+    }
+}
+
 async fn serve<S>(
     daemon: Arc<Daemon>,
     stream: S,
     shutdown: tokio::sync::mpsc::Sender<()>,
+    mut ticket: arrival::Ticket,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -537,10 +577,29 @@ where
                     Request::CanonicalEvent { event, .. } => !event.event.is_boundary_class(),
                     _ => false,
                 };
+                // **Its ordinal is its place in the session, so it takes
+                // the place it arrived in** (`arrival`). Waited out before the
+                // capture is counted as in flight, never after: a boundary can
+                // wait for the captures already in flight (H3), and a capture
+                // counted while still at the gate would be one a boundary ahead
+                // of it waits for and it waits behind — a stall of the whole
+                // bound, in the one place a session is being closed.
+                if orders_by_arrival(&request) {
+                    let limit = std::time::Duration::from_millis(
+                        daemon.config.read().await.capture_deadline_ms,
+                    );
+                    ticket.wait_turn(limit).await;
+                } else {
+                    ticket.retire();
+                }
                 let _capture =
                     is_capture.then(|| state::CaptureGuard::new(&daemon.in_flight_captures));
                 let stop = matches!(request, Request::DaemonShutdown);
                 let reply = handlers::dispatch(&daemon, request).await;
+                // The ordinals this request was going to consume are consumed,
+                // so the next connection may have its turn. A no-op for
+                // anything retired above.
+                ticket.retire();
                 if stop {
                     let _ = shutdown.send(()).await;
                 }
@@ -588,5 +647,139 @@ fn init_tracing() {
                 .with_writer(std::io::stderr)
                 .try_init();
         }
+    }
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::*;
+    use cairn_core::event::CaptureOutput;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// Serve one request on a connection of its own, under `ticket`.
+    ///
+    /// The request is written in full before the handle is returned, so a test
+    /// that finds no reply is looking at something holding the *reply* and not
+    /// at a request it forgot to send.
+    fn connection(
+        daemon: Arc<Daemon>,
+        ticket: arrival::Ticket,
+        request: &Request,
+    ) -> tokio::task::JoinHandle<Option<String>> {
+        let (theirs, ours) = tokio::io::duplex(64 * 1024);
+        let mut line = serde_json::to_string(request).expect("encodable");
+        line.push('\n');
+        let (shutdown, keep) = tokio::sync::mpsc::channel::<()>(1);
+        tokio::spawn(async move {
+            // The receiver is held for as long as the connection is, so a
+            // `DaemonShutdown` on it could not fail for want of one.
+            let _keep = keep;
+            tokio::spawn(async move {
+                let _ = serve(daemon, theirs, shutdown, ticket).await;
+            });
+            let (read, mut write) = tokio::io::split(ours);
+            write.write_all(line.as_bytes()).await.expect("write");
+            write.flush().await.expect("flush");
+            BufReader::new(read)
+                .lines()
+                .next_line()
+                .await
+                .expect("read")
+        })
+    }
+
+    /// A daemon whose gate will not give up during a test.
+    ///
+    /// The wait is bounded by the capture deadline so that a connection which
+    /// never retires cannot stall capture indefinitely, and the default bound
+    /// is 250 ms — short enough that "waited" and "waited then gave up" are the
+    /// same observation inside a test's own timeout. Raising it makes the two
+    /// distinguishable, which is what lets the control below fail when it
+    /// should.
+    async fn repo() -> testsupport::Repo {
+        testsupport::Repo::with(CairnConfig {
+            capture_deadline_ms: 30_000,
+            ..CairnConfig::default()
+        })
+        .await
+    }
+
+    fn capture(cwd: &str) -> Request {
+        Request::CaptureEvents {
+            cwd: cwd.to_string(),
+            agent: "opencode".to_string(),
+            agent_session_key: "arrival".to_string(),
+            output: CaptureOutput::default(),
+        }
+    }
+
+    /// **A capture takes the ordinal belonging to the hook that produced it.**
+    ///
+    /// The ordinal is allocated inside `dispatch`, so "waits for its turn" and
+    /// "takes its ordinal in accept order" are the same statement. Here the
+    /// connection accepted *second* is the only one served: its request is
+    /// complete and its connection is live, so the sole thing that can be
+    /// holding its reply is the gate. Retiring the first ticket releases it.
+    ///
+    /// **Falsified by** deleting the `orders_by_arrival` branch in `serve`, or
+    /// by taking the ticket inside the spawned task rather than in the accept
+    /// loop: both restore the race that cost SC-701 a trial in one run of ten.
+    #[tokio::test]
+    async fn a_capture_waits_for_the_captures_accepted_before_it() {
+        let r = repo().await;
+        let cwd = r.cwd.clone();
+        let daemon = Arc::new(r.daemon);
+        let arrivals = arrival::Arrivals::new();
+        let mut first = arrivals.take();
+        let second = arrivals.take();
+
+        let mut behind = connection(Arc::clone(&daemon), second, &capture(&cwd));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut behind)
+                .await
+                .is_err(),
+            "a capture accepted second was served ahead of the capture accepted first"
+        );
+
+        first.retire();
+        let reply = tokio::time::timeout(Duration::from_secs(5), behind)
+            .await
+            .expect("the gate did not open when the earlier capture retired")
+            .expect("join");
+        assert!(reply.is_some(), "the connection closed without a reply");
+    }
+
+    /// The gate is for capture and for nothing else.
+    ///
+    /// A boundary can wait for the captures already in flight (H3), so gating
+    /// one would put a stall exactly where a session is being closed; and a
+    /// read has no ordinal to take. Without this, every `cairn status` during a
+    /// session would queue behind that session's own tool calls.
+    #[tokio::test]
+    async fn a_request_that_carries_no_capture_is_not_gated() {
+        let r = repo().await;
+        let cwd = r.cwd.clone();
+        let daemon = Arc::new(r.daemon);
+        let arrivals = arrival::Arrivals::new();
+        // Never retired, standing in for a capture still being written.
+        let _ahead = arrivals.take();
+        let behind = arrivals.take();
+
+        let answered = connection(
+            daemon,
+            behind,
+            &Request::Status {
+                cwd,
+                spool_reason: false,
+            },
+        );
+        // Well inside the gate's bound, so "was not gated" and "was gated and
+        // gave up" cannot both pass this.
+        let reply = tokio::time::timeout(Duration::from_secs(2), answered)
+            .await
+            .expect("a read accepted behind an unfinished capture was made to wait for it")
+            .expect("join");
+        assert!(reply.is_some(), "the connection closed without a reply");
     }
 }

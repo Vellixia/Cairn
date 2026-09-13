@@ -117,12 +117,19 @@ pub async fn sync_batch(
     }
     auth::require_member(&state.pool, body.project_id, user.id()).await?;
 
+    // Read fresh, once per request rather than once per item: an admin can
+    // throw the cutover switch while this process is running, and every item
+    // in the batch answers against the same instant rather than one flipping
+    // mid-batch (`migration-cutover.md` §2's "read at request time").
+    let cutover = cutover_active(&state.pool, state.schema_version).await?;
+
     let mut results = Vec::with_capacity(body.items.len());
     for item in &body.items {
         // Items are applied independently: one rejection does not fail a batch.
         match apply_item(
             &state.pool,
             state.schema_version,
+            cutover,
             body.project_id,
             user.id(),
             item,
@@ -155,12 +162,14 @@ pub async fn sync_batch(
 async fn apply_item(
     pool: &PgPool,
     schema_version: i64,
+    cutover: bool,
     project_id: Uuid,
     user_id: Uuid,
     item: &SyncItem,
 ) -> Result<&'static str, ApiError> {
     reject_forbidden_fields(item)?;
     reject_beyond_capability(schema_version, item)?;
+    reject_if_cutover(cutover, item)?;
 
     // Applied at most once, and the claim on the key is what decides it.
     //
@@ -374,6 +383,74 @@ fn held_until_migrated(schema_version: i64, entity_type: &str) -> ApiError {
              a `{entity_type}`; it will be accepted once the migration runs"
         ),
     )
+}
+
+/// Entity types the cutover refuses (`migration-cutover.md` §3.1).
+///
+/// A `delete` naming one of these is refused exactly as an `upsert` naming it
+/// is — the match is on `entity_type` alone, not on `(entity_type, operation)`,
+/// because the refusal is about further dual-authority writes against
+/// knowledge this feature moved off that path, and a tombstone is a write.
+const CUTOVER_REFUSED_ENTITY_TYPES: &[&str] = &[
+    "memory",
+    "memory_relation",
+    "personal_knowledge",
+    "team_knowledge",
+];
+
+/// The code a cutover refusal carries.
+///
+/// A **new** `&'static str`, deliberately not `codes::UNKNOWN_ENTITY_TYPE`
+/// (`migration-cutover.md` §3.2). The two look identical on the wire — same
+/// `409`, same envelope shape — but they mean opposite things to a retry loop:
+/// `unknown_entity_type` says "wait, this deployment is not ready yet, hold the
+/// item and retry after the migration runs"; `upgrade_required` says "stop
+/// retrying against this route — this store itself must migrate." Collapsing
+/// them into one code would make an upgraded client's retry loop
+/// indistinguishable from a pre-migration deployment's, and FR-876b1 requires a
+/// client to tell them apart.
+const UPGRADE_REQUIRED: &str = "upgrade_required";
+
+/// Whether this deployment has completed its Feature 005 cutover
+/// (`migration-cutover.md` §1, §2).
+///
+/// Read fresh from the database on every call, never cached on `AppState`: an
+/// administrator can flip `server_authority.mode` while this process keeps
+/// running, and a value captured once would keep answering `pre_cutover` until
+/// the next restart — exactly the answer that must not be stale here.
+///
+/// `false` below schema 4, where `server_authority` does not exist at all: a
+/// deployment that has not even applied the table cannot have cut over.
+async fn cutover_active(pool: &PgPool, schema_version: i64) -> ApiResult<bool> {
+    if schema_version < 4 {
+        return Ok(false);
+    }
+    let mode: Option<(String,)> = sqlx::query_as("SELECT mode FROM server_authority WHERE id = 1")
+        .fetch_optional(pool)
+        .await?;
+    Ok(mode.is_some_and(|(m,)| m == "server_authoritative"))
+}
+
+/// Refuse a knowledge-bearing write once this deployment has cut over
+/// (`migration-cutover.md` §3, FR-876c).
+///
+/// Checked before the idempotency claim and before anything is written — no
+/// row anywhere is touched by producing this refusal (§3.3) — and it is
+/// shape-based rather than a client-version check: a caller still emitting one
+/// of these entity types is, by construction, still speaking the pre-005
+/// dual-authority protocol, whatever its own binary version happens to be
+/// (§3.1). Non-knowledge entity types are untouched by this check and keep
+/// working in the same batch, cut over or not (FR-877).
+fn reject_if_cutover(cutover: bool, item: &SyncItem) -> Result<(), ApiError> {
+    if cutover && CUTOVER_REFUSED_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            UPGRADE_REQUIRED,
+            "this server has completed its Feature 005 cutover; personal and team \
+             knowledge synchronization now requires a migrated client",
+        ));
+    }
+    Ok(())
 }
 
 /// True if `field` appears as a key anywhere inside `value`, at any nesting
@@ -599,7 +676,11 @@ async fn upsert_session(
     scoped(rows.rows_affected(), "session")
 }
 
-async fn upsert_memory(
+/// `pub(crate)`, not `fn`: the migration drain route (`api.rs`) reuses this
+/// exact function rather than writing a second ingest path for project memory
+/// (`migration-cutover.md` §12.1, §4.2 — drain is the transfer path a project
+/// memory needs precisely because the ordinary sync route refuses it post-cutover).
+pub(crate) async fn upsert_memory(
     tx: &mut Transaction<'_, Postgres>,
     schema_version: i64,
     project_id: Uuid,
@@ -862,6 +943,11 @@ pub async fn sync_changes(
 ) -> ApiResult<Json<Value>> {
     auth::require_member(&state.pool, q.project_id, user.id()).await?;
 
+    // Read once for this page, same reasoning as `sync_batch`'s own read: an
+    // admin can cut over while this process is running, and the answer must
+    // not be stale (`migration-cutover.md` §1, §"Reads are never refused").
+    let cutover = cutover_active(&state.pool, state.schema_version).await?;
+
     let since = q
         .since
         .as_deref()
@@ -883,47 +969,75 @@ pub async fn sync_changes(
     let memories: Vec<Value> = rows
         .iter()
         .map(|r| {
-            json!({
-                "id": r.get::<Uuid, _>("id"),
-                "type": r.get::<String, _>("type"),
-                "scope": r.get::<String, _>("scope"),
-                "scope_key": r.get::<String, _>("scope_key"),
-                "content": r.get::<String, _>("content"),
-                "state": r.get::<String, _>("state"),
-                "provenance": {
+            // A `serde_json::Map` rather than one `json!` literal, because the
+            // post-cutover shape has to *omit* a key, not merely null it.
+            let mut memory = serde_json::Map::new();
+            memory.insert("id".into(), json!(r.get::<Uuid, _>("id")));
+            memory.insert("type".into(), json!(r.get::<String, _>("type")));
+            memory.insert("scope".into(), json!(r.get::<String, _>("scope")));
+            memory.insert("scope_key".into(), json!(r.get::<String, _>("scope_key")));
+            memory.insert("content".into(), json!(r.get::<String, _>("content")));
+            memory.insert("state".into(), json!(r.get::<String, _>("state")));
+            memory.insert(
+                "provenance".into(),
+                json!({
                     "session_id": r.get::<Uuid, _>("origin_session_id"),
                     "observation_ids": r.get::<Value, _>("observation_ids"),
                     "evidence_count": r.get::<i32, _>("evidence_count"),
-                },
-                // Feature 003. Absent columns read as null on a server whose
-                // 0002 migration has not run, which is what an older peer sees.
-                "topic_key": r.try_get::<Option<String>, _>("topic_key").ok().flatten(),
-                "value_key": r.try_get::<Option<String>, _>("value_key").ok().flatten(),
-                "importance": r.try_get::<Option<String>, _>("importance").ok().flatten(),
-                "pinned": r.try_get::<Option<bool>, _>("pinned").ok().flatten(),
-                "verification": {
-                    "state": r.try_get::<Option<String>, _>("verification").ok().flatten(),
-                    "authority": r
-                        .try_get::<Option<String>, _>("verification_authority")
-                        .ok()
-                        .flatten(),
-                    "last_verified_at": r
-                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_verified_at")
-                        .ok()
-                        .flatten()
-                        .map(|t| t.to_rfc3339()),
-                    "fact_count": r
-                        .try_get::<Option<i32>, _>("evidence_fact_count")
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0),
-                    "basis": r
-                        .try_get::<Option<Value>, _>("verification_basis")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| json!([])),
-                },
-            })
+                }),
+            );
+            // Feature 003. Absent columns read as null on a server whose 0002
+            // migration has not run, which is what an older peer sees.
+            memory.insert(
+                "topic_key".into(),
+                json!(r.try_get::<Option<String>, _>("topic_key").ok().flatten()),
+            );
+            memory.insert(
+                "value_key".into(),
+                json!(r.try_get::<Option<String>, _>("value_key").ok().flatten()),
+            );
+            memory.insert(
+                "importance".into(),
+                json!(r.try_get::<Option<String>, _>("importance").ok().flatten()),
+            );
+            memory.insert(
+                "pinned".into(),
+                json!(r.try_get::<Option<bool>, _>("pinned").ok().flatten()),
+            );
+            // Once this deployment has cut over, the server no longer derives
+            // this object from client-asserted state at all (`legacy_verification_audit`
+            // is where that state went), so the key is absent rather than
+            // present-and-empty — a present empty object would still read as
+            // "the server has an answer about verification" (`migration-cutover.md`
+            // §"Changes feed stops carrying server verification").
+            if !cutover {
+                memory.insert(
+                    "verification".into(),
+                    json!({
+                        "state": r.try_get::<Option<String>, _>("verification").ok().flatten(),
+                        "authority": r
+                            .try_get::<Option<String>, _>("verification_authority")
+                            .ok()
+                            .flatten(),
+                        "last_verified_at": r
+                            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_verified_at")
+                            .ok()
+                            .flatten()
+                            .map(|t| t.to_rfc3339()),
+                        "fact_count": r
+                            .try_get::<Option<i32>, _>("evidence_fact_count")
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0),
+                        "basis": r
+                            .try_get::<Option<Value>, _>("verification_basis")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| json!([])),
+                    }),
+                );
+            }
+            Value::Object(memory)
         })
         .collect();
 
@@ -1120,7 +1234,9 @@ fn blocker_json(r: &sqlx::postgres::PgRow) -> Value {
 /// `INSERT ... ON CONFLICT DO NOTHING` on the endpoint-pair primary key, so the
 /// same decision arriving from two machines is absorbed rather than duplicated —
 /// idempotent by construction, with no clock consulted (D78, FR-411).
-async fn upsert_relation(
+/// `pub(crate)`, reused by the migration drain route for the same reason
+/// [`upsert_memory`] is.
+pub(crate) async fn upsert_relation(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
     item: &SyncItem,

@@ -402,6 +402,7 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
             {
                 report.memories_updated += 1;
             }
+            report_to_server(d, project_id, memory_id, verifier, outcome.result).await;
         }
     }
 
@@ -417,6 +418,86 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
         recheck_criteria(d, project_id, worktree, &config, &mut report, started).await;
     }
     report
+}
+
+/// Queue the privacy-safe half of a local run for the server (T130, FR-811c).
+///
+/// # What crosses, and what stays
+///
+/// Four things cross: which record, what the check concluded, which kind of
+/// check it was, and when it ran. Nothing else — and the four are chosen
+/// precisely because none of them is evidence.
+///
+/// The run this was derived from stays local, entirely. `expected_digest`,
+/// `observed_digest`, `detail`, the evidence fact's fingerprint, the branch and
+/// the commit are all in the local row above and none of them is in the payload
+/// below. `evidence_fact` and `verification_run` are on
+/// `FORBIDDEN_ENTITY_TYPES` and have no server table, so this is not a policy
+/// the payload is being trusted to honour — there is nowhere for that data to
+/// land even if it were sent.
+///
+/// # Why it is a command and not a push
+///
+/// It goes through the same command spool every other explicit mutation uses.
+/// That buys the properties the spool already has and this would otherwise have
+/// to reinvent: it survives an outage, it is bound to the account that ran the
+/// check and to the server instance it was queued for, its identity is
+/// deterministic so a replay lands once, and it is *accepted for delivery*
+/// rather than durable until the server says so.
+///
+/// # What it cannot establish
+///
+/// The server assigns `remote_attested` to it, exactly as it does to any other
+/// client report, and Cairn having genuinely run a deterministic check here does
+/// not change that. This daemon can say a check ran; it cannot prove it to a
+/// server that did not watch. Claiming `cairn` for a locally-run check is the
+/// overclaim `verification-summary.md` §4 exists to refuse, and the fact that it
+/// would often be *true* is exactly why the boundary has to hold on something
+/// other than good intentions.
+///
+/// Best effort. A queue that refuses — nobody signed in, saturated — leaves the
+/// local run untouched and correct; the local machine's own verification does
+/// not depend on the server hearing about it (§8: the two states may differ
+/// without contradiction).
+async fn report_to_server(
+    d: &Daemon,
+    project_id: Uuid,
+    memory_id: Uuid,
+    verifier: VerifierKind,
+    result: VerifyResult,
+) {
+    let authoritative = cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m.commands_are_authoritative())
+        .unwrap_or(false);
+    if !authoritative {
+        return;
+    }
+    // The three-value verdict the report vocabulary uses, which is not the
+    // local `VerifyResult` spelling: `drifted` is a local state about a record,
+    // and what a *report* says is whether the check passed.
+    let verdict = match result {
+        VerifyResult::Verified => "passed",
+        VerifyResult::Drifted => "failed",
+        VerifyResult::Inconclusive => "inconclusive",
+    };
+    let payload = serde_json::json!({
+        "memory_ref": { "domain": "project", "knowledge_id": memory_id },
+        "verdict": verdict,
+        "verifier_kind": verifier.as_str(),
+        "run_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Err(e) = crate::handlers::queue_knowledge_command(
+        d,
+        Some(project_id),
+        None,
+        cairn_store::spool::CommandKind::VerificationRun,
+        &payload,
+    )
+    .await
+    {
+        tracing::debug!(error = %e.message, "a verification report was not queued");
+    }
 }
 
 /// Re-check the criteria this project holds `verified`.

@@ -873,27 +873,68 @@ pub struct ImportedMemory<'a> {
     pub effective_from: Option<&'a str>,
 }
 
-/// Store a proposal another machine produced, without ever overwriting a local
-/// row.
+/// Store a memory another machine produced, letting a correction to a record
+/// this store already holds actually land (T086, FR-712a).
 ///
-/// `INSERT OR IGNORE` is the whole merge rule for a proposal: two machines that
-/// wrote different things wrote **different rows**, and the id is the same only
-/// when it is the same record. Nothing here consults a clock, so which machine's
-/// copy arrives first cannot change the result (FR-411, SC-304).
+/// **This was `INSERT OR IGNORE`, and the change is deliberate.** The old rule
+/// read: two machines that wrote different things wrote *different rows*, the
+/// id is the same only when it is the same record, so a second arrival can only
+/// be a redelivery of what is already here. That was true while the local store
+/// was an authority over its own memories. Under server authority the row is a
+/// **cache** of a record the server owns, and the same statement makes a
+/// server-side content correction unapplicable: the device would go on recalling
+/// the uncorrected text for as long as the id survives. FR-701's declaration
+/// that the server is correct does not execute itself — it needs a merge rule
+/// able to accept a correction, which is what the `ON CONFLICT (id) DO UPDATE`
+/// below is.
 ///
-/// What is deliberately not taken from the sender:
+/// The reasoning extends [`crate::global::merge_synced_personal`]'s to project
+/// memory, and it is the same reasoning the caller in `cairnd::sync` already
+/// gives for not returning early on a memory it has seen: a peer re-sends a
+/// memory precisely when something shareable about it changed. That was true of
+/// verification before it was true of content; this makes the store side agree
+/// with it rather than quietly discarding the change the caller went to the
+/// trouble of delivering.
+///
+/// Nothing here consults a clock, so which copy arrives first still cannot
+/// change the result by itself (FR-411, SC-304). What decides is arrival order,
+/// and ordering pulled pages is the sync cursor's job rather than a per-row
+/// comparison.
+///
+/// **Two rows are never refreshed**, and both exclusions are enforced in the
+/// `DO UPDATE`'s own `WHERE`, not by a check the caller could skip:
+///
+/// * a `local_only` row. Knowledge marked local-only never went to the server
+///   and is excluded from the durability guarantee by FR-706, so nothing can
+///   legitimately come back bearing its id — but the guard is written anyway,
+///   because the cost of being wrong is a record the user deliberately kept off
+///   the network being overwritten by content that reached the network;
+/// * a deleted row. `delete_memory` clears content and sets `deleted_at`
+///   (FR-052). An arriving copy that rewrote content into a tombstone would
+///   resurrect exactly what a deletion is supposed to have ended.
+///
+/// What is still deliberately not taken from the sender — these are derived
+/// locally, and the `DO UPDATE` names none of them:
 ///
 /// * `reinforcement_count` and `distinct_origin_count` — derived from the
 ///   records this store holds, and rebuilt by the caller after the arriving
 ///   decisions land;
 /// * `superseded_at` and `state` — a view of the `supersedes` relations, which
 ///   `rebuild_supersession` recomputes when the decision itself arrives (D67);
+/// * `verification` and `verification_authority` — rebuilt from the runs this
+///   store has, by `import_verification`'s own path;
 /// * `stale_at` — drift is what *this* machine observed about its own worktree;
 /// * `pinned` — an attention decision governed by this project's local pin
-///   budget (D75), which adopting a peer's pins would silently exceed.
+///   budget (D75), which adopting a peer's pins would silently exceed;
+/// * `created_at`, `origin_session_id` and `local_only` — established when the
+///   row first appeared here and not restated by a refresh.
 ///
-/// Returns whether a row was written, so a caller can tell an arrival from a
-/// record it already had.
+/// Returns whether the incoming proposal landed. That is a change of meaning
+/// from "a row was written": under the old rule the two were the same question,
+/// and under this one they are not. `false` now means a guard above suppressed
+/// the write, which is the answer a caller actually needs — "you already had
+/// this" stopped being interesting the moment a second arrival could carry a
+/// correction.
 pub async fn import_memory(store: &Store, m: ImportedMemory<'_>) -> Result<bool> {
     // A project-scoped memory is scoped to *the project*, and each machine
     // names that project with its own local id. Storing the sender's id would
@@ -924,13 +965,34 @@ pub async fn import_memory(store: &Store, m: ImportedMemory<'_>) -> Result<bool>
         .and_then(cairn_core::knowledge::normalize_value_key);
 
     let now = rows::now_text();
+    // `excluded.*` names the row this statement tried to insert, so the update
+    // restates the incoming values without binding any parameter twice.
+    //
+    // The `WHERE` on the `DO UPDATE` is the whole of the two exclusions: a
+    // `local_only` or already-deleted row matches the conflict, fails the
+    // predicate, and is left exactly as it is while the statement reports zero
+    // rows affected. Written here rather than as a `SELECT` beforehand because
+    // this runs outside a transaction — a read-then-write would leave a window
+    // in which the flag changed between the two.
     let wrote = sqlx::query(
-        "INSERT OR IGNORE INTO memories
+        "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
              origin_session_id, local_only, created_at, updated_at,
              topic_key, value_key, content_norm_digest, importance, effective_from)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, 0, ?8, ?8,
-                 ?9, ?10, ?11, ?12, ?13)",
+                 ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT (id) DO UPDATE SET
+             type                = excluded.type,
+             scope               = excluded.scope,
+             scope_key           = excluded.scope_key,
+             content             = excluded.content,
+             content_norm_digest = excluded.content_norm_digest,
+             topic_key           = excluded.topic_key,
+             value_key           = excluded.value_key,
+             importance          = excluded.importance,
+             effective_from      = excluded.effective_from,
+             updated_at          = excluded.updated_at
+           WHERE memories.local_only = 0 AND memories.deleted_at IS NULL",
     )
     .bind(m.id.to_string())
     .bind(m.project_id.to_string())
@@ -2790,5 +2852,216 @@ mod writer_identity_tests {
         .execute(&mut *tx)
         .await
         .unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Import: the server-wins refill (T086)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+    use crate::Store;
+
+    async fn seed_project(store: &Store) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = rows::now_text();
+        sqlx::query(
+            "INSERT INTO projects
+               (id, name, git_common_dir, repository_remote, linked,
+                server_project_id, created_at, updated_at, deleted_at)
+             VALUES (?1, 'test', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+        )
+        .bind(id.to_string())
+        .bind(format!("/tmp/git-{id}"))
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    fn arriving(id: Uuid, project: Uuid, content: &str) -> ImportedMemory<'_> {
+        ImportedMemory {
+            id,
+            project_id: project,
+            kind: MemoryType::Fact,
+            scope: MemoryScope::Project,
+            scope_key: "",
+            content,
+            origin_session_id: Uuid::now_v7(),
+            topic_key: None,
+            value_key: None,
+            importance: Importance::Normal,
+            effective_from: None,
+        }
+    }
+
+    async fn content_of(store: &Store, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT content FROM memories WHERE id = ?1")
+            .bind(id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// FR-712a, the whole point of the change: a second arrival carrying
+    /// corrected content replaces what is stored.
+    ///
+    /// Under the `INSERT OR IGNORE` this replaced, the second call was a no-op
+    /// and this store recalled the uncorrected text forever.
+    #[tokio::test]
+    async fn a_second_arrival_replaces_the_cached_content() {
+        let store = Store::open_memory().await.unwrap();
+        let project = seed_project(&store).await;
+        let id = Uuid::now_v7();
+
+        assert!(
+            import_memory(&store, arriving(id, project, "the timeout is 30s"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            import_memory(&store, arriving(id, project, "the timeout is 5s"))
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(
+            content_of(&store, id).await,
+            "the timeout is 5s",
+            "a correction the cache cannot accept never reaches the reader"
+        );
+        let digest: Option<String> =
+            sqlx::query_scalar("SELECT content_norm_digest FROM memories WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            digest.as_deref(),
+            Some(cairn_core::knowledge::content_norm_digest("the timeout is 5s").as_str()),
+            "the digest follows the content it indexes"
+        );
+    }
+
+    /// FR-706. A local-only memory never went to the server, so nothing can
+    /// legitimately come back bearing its id — and if something does, the row
+    /// the user deliberately kept off the network is left exactly as it is.
+    #[tokio::test]
+    async fn a_local_only_row_is_never_refreshed() {
+        let store = Store::open_memory().await.unwrap();
+        let project = seed_project(&store).await;
+        let id = Uuid::now_v7();
+
+        import_memory(&store, arriving(id, project, "kept on this machine"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memories SET local_only = 1 WHERE id = ?1")
+            .bind(id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let landed = import_memory(
+            &store,
+            arriving(id, project, "overwritten from the network"),
+        )
+        .await
+        .unwrap();
+        assert!(!landed, "the guard must report that nothing was applied");
+        assert_eq!(
+            content_of(&store, id).await,
+            "kept on this machine",
+            "a local-only row must not be overwritten by content that crossed the network"
+        );
+    }
+
+    /// FR-052. A deletion cleared the content and set `deleted_at`; an arriving
+    /// copy must not write the content back into the tombstone.
+    #[tokio::test]
+    async fn a_deleted_row_is_never_resurrected_by_an_import() {
+        let store = Store::open_memory().await.unwrap();
+        let project = seed_project(&store).await;
+        let id = Uuid::now_v7();
+
+        import_memory(&store, arriving(id, project, "since deleted"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memories SET content = '', deleted_at = ?2 WHERE id = ?1")
+            .bind(id.to_string())
+            .bind(rows::now_text())
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let landed = import_memory(&store, arriving(id, project, "since deleted"))
+            .await
+            .unwrap();
+        assert!(!landed, "the guard must report that nothing was applied");
+        assert_eq!(
+            content_of(&store, id).await,
+            "",
+            "a tombstone must stay a tombstone"
+        );
+    }
+
+    /// The derived columns are rebuilt from this store's own relations and
+    /// runs, so a refresh must leave every one of them alone. This is the
+    /// assertion that would catch a future `DO UPDATE` growing a column.
+    #[tokio::test]
+    async fn a_refresh_leaves_the_locally_derived_columns_alone() {
+        let store = Store::open_memory().await.unwrap();
+        let project = seed_project(&store).await;
+        let id = Uuid::now_v7();
+
+        import_memory(&store, arriving(id, project, "first"))
+            .await
+            .unwrap();
+        let created_at: String =
+            sqlx::query_scalar("SELECT created_at FROM memories WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        sqlx::query(
+            "UPDATE memories
+                SET state = 'superseded', reinforcement_count = 4,
+                    distinct_origin_count = 3, verification = 'remote_attested',
+                    pinned = 1
+              WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        import_memory(&store, arriving(id, project, "second"))
+            .await
+            .unwrap();
+
+        let after: (String, i64, i64, String, i64, String) = sqlx::query_as(
+            "SELECT state, reinforcement_count, distinct_origin_count, verification,
+                    pinned, created_at
+               FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(after.0, "superseded", "state is a view of the relations");
+        assert_eq!(after.1, 4, "reinforcement is counted locally");
+        assert_eq!(after.2, 3, "distinct origins are counted locally");
+        assert_eq!(
+            after.3, "remote_attested",
+            "verification is rebuilt from the runs this store has"
+        );
+        assert_eq!(after.4, 1, "a pin is this project's own attention decision");
+        assert_eq!(
+            after.5, created_at,
+            "the row is as old as its first arrival here"
+        );
+        assert_eq!(content_of(&store, id).await, "second");
     }
 }

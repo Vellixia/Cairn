@@ -37,12 +37,14 @@ pub fn canonical_event<'a>(
     event: CanonicalLifecycleEvent,
     wait_for_handoff: bool,
     token_budget: Option<usize>,
+    capture: Option<cairn_core::event::CaptureOutput>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Reply> + Send + 'a>> {
     Box::pin(canonical_event_inner(
         d,
         event,
         wait_for_handoff,
         token_budget,
+        capture,
     ))
 }
 
@@ -51,6 +53,7 @@ async fn canonical_event_inner(
     event: CanonicalLifecycleEvent,
     wait_for_handoff: bool,
     token_budget: Option<usize>,
+    capture: Option<cairn_core::event::CaptureOutput>,
 ) -> Reply {
     if !event.is_well_formed() {
         return Err(WireError::invalid(
@@ -71,7 +74,26 @@ async fn canonical_event_inner(
     if reply.is_ok() {
         establish(d, &agent, &vendor_key, kind).await;
     }
-    let _ = (key, cwd);
+
+    // The safe events, after the lifecycle half — which is what created or
+    // resumed the session they bind to.
+    //
+    // **The reply is never changed by what happens here.** A boundary event
+    // must answer, and a capture-class event must fail soft: an agent that
+    // received its context and then saw an error because a spool row could not
+    // be written would be experiencing Cairn as the thing that broke, which is
+    // exactly what FR-749a–d forbid. A capture failure is counted and logged
+    // rather than returned (FR-749c).
+    if let Some(capture) = capture {
+        if !capture.is_empty() {
+            if let Err(e) =
+                crate::handlers::spool_capture(d, &cwd, &agent, &vendor_key, &capture).await
+            {
+                tracing::debug!(error = %e.message, agent = %agent, "capture was not spooled");
+            }
+        }
+    }
+    let _ = key;
     reply
 }
 
@@ -163,6 +185,14 @@ async fn dispatch(
 
             // Context delivery is the one canonical event whose handling
             // produces something the agent consumes (D19a).
+            //
+            // `trigger: session_open` and the vendor's own `source` are what
+            // let this retrieval go through the server as the push it is
+            // (`contracts/retrieval-delivery.md` §1–§3); `open_trigger` is
+            // forwarded exactly as the vendor sent it (`startup`/`resume`/
+            // `clear`/`compact`/`fork`), never derived from `after_compaction`
+            // above, which is Cairn's own recorded-state detection and can
+            // legitimately disagree with what the vendor happened to send.
             let delivered = crate::handlers::handle(
                 d,
                 cairn_core::wire::Request::Context {
@@ -176,6 +206,8 @@ async fn dispatch(
                     // assembly; this event carries no depth of its own to
                     // forward (T156).
                     depth: None,
+                    trigger: Some("session_open".to_string()),
+                    open_trigger: event.source.clone(),
                 },
             )
             .await;

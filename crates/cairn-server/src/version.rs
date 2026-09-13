@@ -56,6 +56,78 @@ pub const SCHEMA_3_CAPABILITIES: &[&str] = &[
     "team_knowledge",
 ];
 
+/// What a Feature 005 daemon must know before it queues autonomous-memory work
+/// here (FR-774, FR-775).
+///
+/// Extends `SCHEMA_3_CAPABILITIES` additively, the same discipline the previous
+/// two lists follow: every earlier name stays present and unchanged, so a
+/// Feature 003 or 004 daemon reading this list finds exactly what it found
+/// before and nothing it has to understand.
+///
+/// One name per kind of work a client can queue that this schema's tables must
+/// exist to hold. `safe_events` is the one the cutover contract writes out
+/// verbatim (`contracts/migration-cutover.md` §1); the rest follow the same
+/// rule, because a daemon that queued a knowledge command, a pattern promotion
+/// or a verification report against a v3 server would have it fail on every
+/// attempt rather than being told once that the server cannot hold it.
+pub const SCHEMA_4_CAPABILITIES: &[&str] = &[
+    "memory_relations",
+    "task_criteria",
+    "task_blockers",
+    "memory_subject_identity",
+    "memory_verification",
+    "personal_knowledge",
+    "team_knowledge",
+    "safe_events",
+    "knowledge_commands",
+    "shared_patterns",
+    "verification_reports",
+    "context_retrieval",
+];
+
+/// Whether this deployment has cut over to server authority
+/// (`contracts/migration-cutover.md` §1).
+///
+/// A structure rather than two loose fields, because the pair is only
+/// meaningful together: `cutover_at` without `mode` says nothing, and a
+/// `cutover_at` on a `pre_cutover` deployment would be a contradiction rather
+/// than an absence.
+///
+/// Absent below schema 4, where `server_authority` does not exist. Its absence
+/// is the answer — the same "no probe endpoint, no version table" discipline
+/// `SCHEMA_2_CAPABILITIES` established — and a client seeing no `authority`
+/// field knows it is talking to a server that has no cutover to report.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorityPayload {
+    pub mode: String,
+    pub cutover_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Read this deployment's cutover state.
+///
+/// From the database on every call, deliberately not cached on the
+/// application state. An administrator can throw this switch while the process
+/// is running, and a client polls this endpoint precisely to find out that they
+/// have — a value captured at start-up would say `pre_cutover` until the next
+/// restart, which is the one answer that must not be stale.
+///
+/// `None` below schema 4, where the table does not exist. A read error is also
+/// `None`: the version endpoint is unauthenticated and must not fail, and an
+/// absent field already means "this server has no cutover to report", which is
+/// the safe reading.
+pub async fn authority_for(pool: &sqlx::PgPool, schema_version: i64) -> Option<AuthorityPayload> {
+    if schema_version < 4 {
+        return None;
+    }
+    let row: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as("SELECT mode, cutover_at FROM server_authority WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    row.map(|(mode, cutover_at)| AuthorityPayload { mode, cutover_at })
+}
+
 /// What a deployment at `schema_version` can hold.
 ///
 /// Derived from the schema the database **applied**, so a server held at an
@@ -63,7 +135,9 @@ pub const SCHEMA_3_CAPABILITIES: &[&str] = &[
 /// could do. Advertising a capability whose table is absent would make the
 /// daemon queue work that then fails on every attempt.
 pub fn capabilities_for(schema_version: i64) -> &'static [&'static str] {
-    if schema_version >= 3 {
+    if schema_version >= 4 {
+        SCHEMA_4_CAPABILITIES
+    } else if schema_version >= 3 {
         SCHEMA_3_CAPABILITIES
     } else if schema_version >= 2 {
         SCHEMA_2_CAPABILITIES
@@ -100,6 +174,12 @@ pub struct VersionPayload {
     /// Absent below schema 3, where the table it comes from does not exist yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_instance_id: Option<Uuid>,
+    /// Whether this deployment has cut over to server authority (FR-876).
+    ///
+    /// Absent below schema 4. A client probes this the way it already probes
+    /// schema capability, so no new polling mechanism exists to maintain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<AuthorityPayload>,
 }
 
 #[derive(Default)]
@@ -127,6 +207,7 @@ impl ReleaseCache {
         &self,
         schema_version: i64,
         server_instance_id: Option<Uuid>,
+        authority: Option<AuthorityPayload>,
     ) -> VersionPayload {
         if self.is_stale().await {
             self.refresh().await;
@@ -147,6 +228,7 @@ impl ReleaseCache {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id,
+            authority,
         }
     }
 
@@ -225,10 +307,79 @@ mod tests {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id: None,
+            authority: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"current\":\"0.1.0\""));
         assert!(s.contains("\"update_available\":false"));
+    }
+
+    /// Every earlier capability name survives every later list.
+    ///
+    /// The additive rule is the whole contract: a Feature 003 daemon reading a
+    /// v4 server's list has to find the five names it knows, in a list it can
+    /// ignore the rest of. Dropping or renaming one would make an older client
+    /// stop queueing work it is perfectly able to queue, and it would do so
+    /// silently.
+    #[test]
+    fn each_schema_advertises_a_superset_of_the_one_before() {
+        for (lower, higher) in [
+            (SCHEMA_2_CAPABILITIES, SCHEMA_3_CAPABILITIES),
+            (SCHEMA_3_CAPABILITIES, SCHEMA_4_CAPABILITIES),
+        ] {
+            for name in lower {
+                assert!(
+                    higher.contains(name),
+                    "capability {name} disappeared from a later schema"
+                );
+            }
+            assert!(higher.len() > lower.len(), "a later schema added nothing");
+        }
+    }
+
+    #[test]
+    fn capabilities_follow_the_schema_the_database_applied() {
+        // Not the binary's own version: a deployment held at an earlier
+        // migration must advertise what it really has, or the daemon queues
+        // work against tables that do not exist.
+        assert!(capabilities_for(1).is_empty());
+        assert_eq!(capabilities_for(2), SCHEMA_2_CAPABILITIES);
+        assert_eq!(capabilities_for(3), SCHEMA_3_CAPABILITIES);
+        assert_eq!(capabilities_for(4), SCHEMA_4_CAPABILITIES);
+        // A server ahead of this build still advertises what this build knows
+        // how to describe, rather than guessing at names it has never heard.
+        assert_eq!(capabilities_for(99), SCHEMA_4_CAPABILITIES);
+    }
+
+    #[test]
+    fn authority_is_absent_rather_than_guessed_when_the_server_has_none() {
+        let p = VersionPayload {
+            current: "0.1.0".to_string(),
+            latest: None,
+            update_available: false,
+            checked_at: None,
+            schema_version: 3,
+            capabilities: vec![],
+            server_instance_id: None,
+            authority: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(
+            !s.contains("authority"),
+            "a pre-v4 server implied a cutover state it cannot have"
+        );
+
+        let p = VersionPayload {
+            authority: Some(AuthorityPayload {
+                mode: "pre_cutover".to_string(),
+                cutover_at: None,
+            }),
+            schema_version: 4,
+            ..p
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"mode\":\"pre_cutover\""));
+        assert!(s.contains("\"cutover_at\":null"));
     }
 
     #[test]
@@ -249,6 +400,7 @@ mod tests {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id: None,
+            authority: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"tag\":\"v0.2.0\""));

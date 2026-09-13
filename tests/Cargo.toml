@@ -28,3 +28,9 @@ tokio.workspace = true
 sqlx.workspace = true
 tiktoken-rs = "0.12"
 chrono.workspace = true
+# SC-737 compares the workspace dependency manifest against
+# `feature005/dependency-baseline.toml` and fails on any added datastore,
+# broker or worker-platform entry. Reading a Cargo.toml needs a TOML parser,
+# and `toml_edit` is already a workspace dependency — adding a second one to
+# run the "we added no dependencies" assertion would be its own small joke.
+toml_edit.workspace = true

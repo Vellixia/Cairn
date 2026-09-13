@@ -703,6 +703,13 @@ the subject section it amends.
   it, MUST refuse the item rather than storing it, and MUST report the refusal to the
   pushing client as a rejection class without echoing the offending content. (amends
   Privacy boundary and the promotion gate)
+- **FR-577a**: The identity set the content validator screens against MUST be the union of
+  every project the caller is a member of, whether or not that project has been deleted.
+  Deletion MUST NOT narrow the screen: a project's deletion is soft and the personal, team
+  and pattern knowledge derived from it outlives it untouched (FR-519), so its name stays
+  disclosable after it is gone. Loss of membership, and only loss of membership, removes a
+  project from the set. Server-side ingest and the server's knowledge-command routes MUST
+  derive this set from one implementation. (amends Privacy boundary and the promotion gate)
 - **FR-578**: Applicability values MUST be validated by the same content validator and
   against the same classes as free-text content; a value that would be refused as content
   MUST be refused as an applicability value. (amends Privacy boundary and the promotion

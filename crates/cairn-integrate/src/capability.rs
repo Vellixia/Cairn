@@ -1633,3 +1633,568 @@ mod compatibility {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Feature 005 — the per-agent, per-event health matrix (T035)
+// ---------------------------------------------------------------------------
+//
+// Feature 002's `Capability` answers "can this agent do the thing at all",
+// derived from vendor documentation and this installation's evidence. Feature
+// 005 asks a different question of the same agents: for each canonical event
+// kind and each delivery point, on *this machine*, what has actually been
+// observed. A cell is never blank, and "we have never observed this" is a
+// first-class answer rather than an absent row (FR-728, FR-855).
+
+use cairn_core::event::{EventKind, PipelineStage};
+
+/// One cell of the matrix: what Cairn can say about one capability, for one
+/// agent, on one machine.
+///
+/// Six values, and the distinctions between them are the point. Collapsing any
+/// two would make the matrix say something Cairn has not established:
+///
+/// - `unsupported_by_vendor` is a claim about the vendor and needs vendor
+///   evidence.
+/// - `declined_by_cairn` is a claim about *us*, and OpenCode delivery is the
+///   live example: the hooks exist, they are beta, and Cairn declines to rest
+///   an automatic guarantee on them. Reporting that as a vendor absence would
+///   be untrue (FR-838b).
+/// - `no_evidence` is the honest answer when nothing has been observed, and it
+///   is what receipt acknowledgement reports for every agent, because no
+///   vendor mechanism was established — an absence of evidence, not a vendor
+///   statement (FR-838e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixStatus {
+    Supported,
+    UnsupportedByVendor,
+    DeclinedByCairn,
+    AdapterUnimplemented,
+    RuntimeFailure,
+    NoEvidence,
+}
+
+impl MatrixStatus {
+    pub const ALL: &'static [MatrixStatus] = &[
+        MatrixStatus::Supported,
+        MatrixStatus::UnsupportedByVendor,
+        MatrixStatus::DeclinedByCairn,
+        MatrixStatus::AdapterUnimplemented,
+        MatrixStatus::RuntimeFailure,
+        MatrixStatus::NoEvidence,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatrixStatus::Supported => "supported",
+            MatrixStatus::UnsupportedByVendor => "unsupported_by_vendor",
+            // Its own name, which it did not have. This returned
+            // `unsupported_by_vendor`, so every decline Cairn made was written
+            // down as a vendor absence — the exact confusion the doc comment
+            // above spends a paragraph forbidding, and the one that blames
+            // OpenCode for a choice Cairn made about OpenCode's beta surfaces.
+            //
+            // `parse` searches by `as_str`, so the collision also made
+            // `declined_by_cairn` unparseable and silently resolved every
+            // `unsupported_by_vendor` to whichever variant came first.
+            MatrixStatus::DeclinedByCairn => "declined_by_cairn",
+            MatrixStatus::AdapterUnimplemented => "adapter_unimplemented",
+            MatrixStatus::RuntimeFailure => "runtime_failure",
+            MatrixStatus::NoEvidence => "no_evidence",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<MatrixStatus> {
+        MatrixStatus::ALL.iter().copied().find(|v| v.as_str() == s)
+    }
+
+    /// Whether this status may be reported without any observation behind it.
+    ///
+    /// Only the three that are *about* the absence of one. `supported` and
+    /// `runtime_failure` are claims about behaviour, and a claim about
+    /// behaviour needs an observation — asserting `supported` from
+    /// configuration alone is exactly the conflation FR-852 forbids.
+    pub fn is_claimable_without_observation(self) -> bool {
+        matches!(
+            self,
+            MatrixStatus::UnsupportedByVendor
+                | MatrixStatus::DeclinedByCairn
+                | MatrixStatus::AdapterUnimplemented
+                | MatrixStatus::NoEvidence
+        )
+    }
+}
+
+impl fmt::Display for MatrixStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the matrix has a cell for (FR-728, FR-838a–f).
+///
+/// Twenty-one capture capabilities — one per canonical event kind — plus three
+/// delivery points and receipt. Enumerated rather than free-form, because a
+/// matrix whose row set is whatever happened to be reported cannot have a blank
+/// cell *detected*: the row would simply not be there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatrixCapability {
+    /// `event:<kind>` — this agent's capture of one canonical event kind.
+    Event(EventKind),
+    /// `deliver:session_open`.
+    DeliverSessionOpen,
+    /// `deliver:prompt_time`.
+    DeliverPromptTime,
+    /// `deliver:post_compaction`.
+    ///
+    /// Delivered *at session open* with a `compact` trigger, not by returning
+    /// context from a post-compaction event — at least one committed vendor
+    /// documents that its post-compaction event cannot carry returned context
+    /// at all (FR-838d). The capability is named for what it achieves, and the
+    /// mechanism is session open.
+    DeliverPostCompaction,
+    /// `receipt` — confirmation that delivered context reached the agent.
+    ///
+    /// `no_evidence` for every agent in this feature. No vendor mechanism was
+    /// established from the documentation reviewed, and that is an absence of
+    /// evidence rather than a vendor statement that none exists (FR-838e).
+    Receipt,
+}
+
+impl MatrixCapability {
+    /// Every cell a complete matrix has for one agent.
+    pub fn all() -> Vec<MatrixCapability> {
+        let mut out: Vec<MatrixCapability> = EventKind::ALL
+            .iter()
+            .map(|k| MatrixCapability::Event(*k))
+            .collect();
+        out.push(MatrixCapability::DeliverSessionOpen);
+        out.push(MatrixCapability::DeliverPromptTime);
+        out.push(MatrixCapability::DeliverPostCompaction);
+        out.push(MatrixCapability::Receipt);
+        out
+    }
+
+    /// The stored form, which is also what the web plane renders.
+    pub fn key(self) -> String {
+        match self {
+            MatrixCapability::Event(kind) => format!("event:{}", kind.as_str()),
+            MatrixCapability::DeliverSessionOpen => "deliver:session_open".into(),
+            MatrixCapability::DeliverPromptTime => "deliver:prompt_time".into(),
+            MatrixCapability::DeliverPostCompaction => "deliver:post_compaction".into(),
+            MatrixCapability::Receipt => "receipt".into(),
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<MatrixCapability> {
+        match key {
+            "deliver:session_open" => Some(MatrixCapability::DeliverSessionOpen),
+            "deliver:prompt_time" => Some(MatrixCapability::DeliverPromptTime),
+            "deliver:post_compaction" => Some(MatrixCapability::DeliverPostCompaction),
+            "receipt" => Some(MatrixCapability::Receipt),
+            other => other
+                .strip_prefix("event:")
+                .and_then(|k| k.parse::<EventKind>().ok())
+                .map(MatrixCapability::Event),
+        }
+    }
+
+    /// The pipeline stage a cell's evidence belongs to.
+    ///
+    /// A capture failure must be visible *with the stage it failed at*
+    /// (FR-858): "capture is broken" and "the server refused what capture
+    /// produced" call for different actions, and one health flag conflates
+    /// them.
+    pub fn default_stage(self) -> PipelineStage {
+        match self {
+            MatrixCapability::Event(_) => PipelineStage::RuntimeHookFired,
+            MatrixCapability::DeliverSessionOpen
+            | MatrixCapability::DeliverPromptTime
+            | MatrixCapability::DeliverPostCompaction => PipelineStage::ContextGenerated,
+            MatrixCapability::Receipt => PipelineStage::ContextReceiptConfirmed,
+        }
+    }
+}
+
+impl fmt::Display for MatrixCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.key())
+    }
+}
+
+/// One matrix cell as it is reported and stored.
+///
+/// `writer_id` is part of the identity because a capability is observed on a
+/// **machine** (FR-857). One account on two laptops can legitimately see two
+/// different answers, and collapsing them would let a working machine hide a
+/// broken one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixCell {
+    pub agent: String,
+    pub capability: String,
+    pub stage: String,
+    pub status: MatrixStatus,
+    /// Absent when the status is one that needs no observation behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_kind: Option<EvidenceKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<bool>,
+}
+
+impl MatrixCell {
+    /// A cell nothing has been observed for.
+    ///
+    /// The default, and the reason a matrix can be complete before anything has
+    /// run: every cell exists, and the ones nothing is known about say so
+    /// rather than being missing.
+    pub fn no_evidence(agent: &str, capability: MatrixCapability) -> Self {
+        Self {
+            agent: agent.to_string(),
+            capability: capability.key(),
+            stage: capability.default_stage().as_str().to_string(),
+            status: MatrixStatus::NoEvidence,
+            evidence_kind: None,
+            observed_at: None,
+            degraded: None,
+        }
+    }
+
+    /// Whether this cell's status and evidence are consistent.
+    ///
+    /// Two rules, and both are about not claiming more than was established:
+    /// a behavioural status needs an observation, and a status that is about
+    /// the *absence* of behaviour must not carry one — a `no_evidence` cell
+    /// with an observation attached is a contradiction that would read as
+    /// confidence.
+    pub fn is_coherent(&self) -> bool {
+        match self.status {
+            // **Both behavioural claims need an observation, and need it to be
+            // one.** `supported` checked only that a timestamp was present, so a
+            // configuration file read back and stamped with a time was accepted
+            // as a capability working — which is precisely the collapse FR-852
+            // draws the `evidence_kind` distinction to prevent. Configured is not
+            // working.
+            //
+            // `runtime_failure` checked nothing at all, so anything could be
+            // declared failing with no evidence whatever. That is the same
+            // overclaim pointing the other way: it turns silence into a fault,
+            // sends somebody to debug an integration nobody has exercised, and
+            // makes `no_evidence` — the honest answer — indistinguishable from a
+            // real failure. A failure is a claim that something *ran and did not
+            // work*, and it is owed evidence exactly as a success is.
+            MatrixStatus::Supported | MatrixStatus::RuntimeFailure => {
+                self.evidence_kind == Some(EvidenceKind::Observation) && self.observed_at.is_some()
+            }
+            MatrixStatus::NoEvidence => self.evidence_kind.is_none(),
+            // A vendor absence, a Cairn decision or an unimplemented adapter
+            // may be established by reading configuration back, and may equally
+            // rest on nothing but the decision itself.
+            _ => {
+                self.evidence_kind != Some(EvidenceKind::Observation) || self.observed_at.is_some()
+            }
+        }
+    }
+}
+
+/// A complete matrix for one agent on one machine, with no blank cells.
+///
+/// Built from the full capability list rather than from what has been reported,
+/// which is what makes SC-726's "zero cells are blank" checkable at all: a
+/// matrix assembled from reports has no way to notice the report that never
+/// arrived.
+pub fn complete_matrix(agent: &str) -> Vec<MatrixCell> {
+    MatrixCapability::all()
+        .into_iter()
+        .map(|c| MatrixCell::no_evidence(agent, c))
+        .collect()
+}
+
+/// What Cairn declares about an agent **before anything has run** (FR-728,
+/// SC-706).
+///
+/// Every one of the twenty-five cells gets an answer. A cell whose support is a
+/// claim about *behaviour* stays `no_evidence` until an observation arrives —
+/// `MatrixCell::is_coherent` forbids claiming `supported` without one, and a
+/// matrix that promised support it had not seen would be exactly the overclaim
+/// the status vocabulary exists to prevent. A cell Cairn will never fill says
+/// **which** absence it is, because "the vendor does not offer this", "Cairn
+/// declined to depend on it" and "nobody has written the adapter" call for
+/// three different actions.
+///
+/// The declaration is fixed here rather than derived from the routing tables on
+/// purpose. SC-706 makes the matrix the population under test, so a criterion
+/// that read the implementation could always be satisfied by narrowing the
+/// implementation.
+pub fn declared_matrix(agent: &str) -> Vec<MatrixCell> {
+    MatrixCapability::all()
+        .into_iter()
+        .map(|capability| {
+            let mut cell = MatrixCell::no_evidence(agent, capability);
+            if let Some(status) = declared_absence(agent, capability) {
+                cell.status = status;
+            }
+            cell
+        })
+        .collect()
+}
+
+/// The cells Cairn can answer without ever observing anything.
+///
+/// `None` means "this is a behavioural claim, and no observation has been made
+/// yet" — the honest default, and the only one `no_evidence` may carry.
+fn declared_absence(agent: &str, capability: MatrixCapability) -> Option<MatrixStatus> {
+    match agent {
+        "claude_code" | "codex" => match capability {
+            // Both vendors expose a subagent *stop* hook and no start hook, so
+            // the beginning of a subagent is not observable at all. That is a
+            // fact about the vendor and is reported as one.
+            MatrixCapability::Event(EventKind::SubagentStarted) => {
+                Some(MatrixStatus::UnsupportedByVendor)
+            }
+            // No receipt-acknowledgement mechanism was established for any
+            // committed agent from the documentation reviewed. That is an
+            // absence of evidence and never a vendor statement that none exists
+            // (FR-838e) — so it stays `no_evidence` here and must not be
+            // upgraded without a named vendor mechanism behind it.
+            _ => None,
+        },
+        "opencode" => match capability {
+            // `session.idle` means the agent went quiet. OpenCode signals no
+            // session end at all (FR-116), so there is nothing to capture.
+            MatrixCapability::Event(EventKind::SessionClosed) => {
+                Some(MatrixStatus::UnsupportedByVendor)
+            }
+            MatrixCapability::Event(EventKind::SubagentStarted)
+            | MatrixCapability::Event(EventKind::SubagentCompleted) => {
+                Some(MatrixStatus::UnsupportedByVendor)
+            }
+            // Cairn's decision, not a vendor absence. The v1 surfaces are
+            // undocumented and experimentally named and the v2 ones are beta,
+            // and Cairn declines to rest a capture guarantee on either
+            // (FR-838b). Reporting this as `unsupported_by_vendor` would be
+            // untrue: OpenCode 2 does expose prompt and context hooks.
+            MatrixCapability::Event(EventKind::UserInstructionSignal)
+            | MatrixCapability::Event(EventKind::DecisionSignal)
+            | MatrixCapability::DeliverSessionOpen
+            | MatrixCapability::DeliverPromptTime
+            | MatrixCapability::DeliverPostCompaction => Some(MatrixStatus::DeclinedByCairn),
+            // A resume is expressible for this vendor and Cairn has not written
+            // it. That is a gap in Cairn and says so.
+            MatrixCapability::Event(EventKind::SessionResumed) => {
+                Some(MatrixStatus::AdapterUnimplemented)
+            }
+            _ => None,
+        },
+        // Agents reachable only through generic MCP stay supported for manual
+        // use and are not part of the automatic capture or delivery population.
+        // Their capability is reported as absent rather than as healthy
+        // (FR-729, FR-838f).
+        _ => Some(MatrixStatus::AdapterUnimplemented),
+    }
+}
+
+#[cfg(test)]
+mod feature005_matrix_tests {
+    use super::*;
+
+    #[test]
+    fn a_matrix_has_a_cell_for_every_event_kind_and_every_delivery_point() {
+        let all = MatrixCapability::all();
+        // Twenty-one kinds, three delivery points, receipt.
+        assert_eq!(all.len(), EventKind::ALL.len() + 4);
+        assert_eq!(all.len(), 25);
+        let keys: std::collections::BTreeSet<String> = all.iter().map(|c| c.key()).collect();
+        assert_eq!(keys.len(), all.len(), "two capabilities share a key");
+        assert!(keys.contains("event:tool_failed"));
+        assert!(keys.contains("deliver:post_compaction"));
+        assert!(keys.contains("receipt"));
+    }
+
+    #[test]
+    fn every_capability_key_round_trips() {
+        for capability in MatrixCapability::all() {
+            assert_eq!(
+                MatrixCapability::parse(&capability.key()),
+                Some(capability),
+                "{capability} did not round-trip"
+            );
+        }
+        assert_eq!(MatrixCapability::parse("event:not_a_kind"), None);
+        assert_eq!(MatrixCapability::parse("deliver:telepathy"), None);
+        assert_eq!(MatrixCapability::parse(""), None);
+    }
+
+    #[test]
+    fn every_agent_declares_all_twenty_five_cells_coherently() {
+        // SC-706's precondition. The matrix is the population under test, so a
+        // missing cell is not a small gap — it is a signal Cairn would drop
+        // without anyone being able to notice.
+        for agent in ["claude_code", "codex", "opencode", "generic_mcp"] {
+            let matrix = declared_matrix(agent);
+            assert_eq!(matrix.len(), 25, "{agent} is missing a cell");
+            for cell in &matrix {
+                assert!(
+                    cell.is_coherent(),
+                    "{agent}:{} is incoherent",
+                    cell.capability
+                );
+                // Nothing may claim support before an observation exists.
+                assert_ne!(cell.status, MatrixStatus::Supported);
+            }
+        }
+    }
+
+    #[test]
+    fn opencodes_semantic_decline_is_cairns_and_not_the_vendors() {
+        // FR-838b. Reporting this as `unsupported_by_vendor` would be untrue:
+        // OpenCode 2 exposes prompt and context hooks. They are beta, and
+        // declining to rest a guarantee on a beta surface is Cairn's decision.
+        let matrix = declared_matrix("opencode");
+        let status = |key: &str| {
+            matrix
+                .iter()
+                .find(|c| c.capability == key)
+                .map(|c| c.status)
+                .unwrap_or_else(|| panic!("{key} is not in the matrix"))
+        };
+        for declined in [
+            "event:user_instruction_signal",
+            "event:decision_signal",
+            "deliver:session_open",
+            "deliver:prompt_time",
+            "deliver:post_compaction",
+        ] {
+            assert_eq!(
+                status(declined),
+                MatrixStatus::DeclinedByCairn,
+                "{declined}"
+            );
+        }
+        // A session end OpenCode does not signal is a vendor absence, and is
+        // told apart from the decline above.
+        assert_eq!(
+            status("event:session_closed"),
+            MatrixStatus::UnsupportedByVendor
+        );
+        // Structural capture is unaffected: these await an observation like any
+        // other behavioural claim, rather than being declined.
+        for structural in [
+            "event:file_changed",
+            "event:command_executed",
+            "event:test_result",
+        ] {
+            assert_eq!(status(structural), MatrixStatus::NoEvidence, "{structural}");
+        }
+    }
+
+    #[test]
+    fn receipt_is_no_evidence_for_every_agent_that_has_an_adapter() {
+        // FR-838e. No receipt mechanism was established for any committed agent
+        // from the documentation reviewed, and that is an absence of evidence
+        // rather than a vendor statement that none exists.
+        for agent in ["claude_code", "codex", "opencode"] {
+            let matrix = declared_matrix(agent);
+            let receipt = matrix
+                .iter()
+                .find(|c| c.capability == "receipt")
+                .expect("every matrix has a receipt cell");
+            assert_eq!(receipt.status, MatrixStatus::NoEvidence, "{agent}");
+            assert!(receipt.evidence_kind.is_none());
+        }
+    }
+
+    #[test]
+    fn a_generic_mcp_agent_is_absent_rather_than_healthy() {
+        // FR-729, FR-838f: usable through the explicit tool surface, and not
+        // part of the automatic capture or delivery population.
+        for cell in declared_matrix("generic_mcp") {
+            assert_eq!(cell.status, MatrixStatus::AdapterUnimplemented);
+        }
+    }
+
+    #[test]
+    fn a_complete_matrix_starts_with_no_blank_cells_and_no_claims() {
+        let matrix = complete_matrix("claude_code");
+        assert_eq!(matrix.len(), 25, "a cell is missing before anything ran");
+        for cell in &matrix {
+            // Every cell exists and says what it honestly knows, which is
+            // nothing. A missing row would render as neither "works" nor
+            // "never seen" (SC-726).
+            assert_eq!(cell.status, MatrixStatus::NoEvidence);
+            assert!(cell.is_coherent());
+            assert!(cell.evidence_kind.is_none());
+        }
+    }
+
+    #[test]
+    fn a_behavioural_claim_needs_an_observation_behind_it() {
+        let mut cell = MatrixCell::no_evidence("codex", MatrixCapability::DeliverSessionOpen);
+
+        // Configuration read-back is not a runtime observation, and reporting
+        // it as `supported` is the conflation FR-852 forbids.
+        cell.status = MatrixStatus::Supported;
+        cell.evidence_kind = Some(EvidenceKind::Introspection);
+        cell.observed_at = Some("2026-09-02T10:00:00Z".into());
+        assert!(!cell.is_coherent(), "configuration alone claimed support");
+
+        cell.evidence_kind = Some(EvidenceKind::Observation);
+        assert!(cell.is_coherent());
+
+        // And an observation with no time is not an observation.
+        cell.observed_at = None;
+        assert!(!cell.is_coherent());
+    }
+
+    #[test]
+    fn no_evidence_may_not_carry_evidence() {
+        let mut cell = MatrixCell::no_evidence("opencode", MatrixCapability::Receipt);
+        cell.evidence_kind = Some(EvidenceKind::Observation);
+        assert!(
+            !cell.is_coherent(),
+            "a cell claiming no evidence carried some, which reads as confidence"
+        );
+    }
+
+    #[test]
+    fn the_three_absence_statuses_are_told_apart() {
+        // Collapsing any two would make the matrix say something Cairn has not
+        // established. OpenCode delivery is the live case: the hooks exist and
+        // are beta, so it is Cairn's decision and not a vendor absence
+        // (FR-838b).
+        assert!(MatrixStatus::DeclinedByCairn.is_claimable_without_observation());
+        assert!(MatrixStatus::UnsupportedByVendor.is_claimable_without_observation());
+        assert!(MatrixStatus::AdapterUnimplemented.is_claimable_without_observation());
+        assert!(MatrixStatus::NoEvidence.is_claimable_without_observation());
+        // These two are claims about behaviour.
+        assert!(!MatrixStatus::Supported.is_claimable_without_observation());
+        assert!(!MatrixStatus::RuntimeFailure.is_claimable_without_observation());
+
+        let names: std::collections::BTreeSet<&str> =
+            MatrixStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(names.len(), 6, "two statuses share a name");
+        for s in MatrixStatus::ALL {
+            assert_eq!(MatrixStatus::parse(s.as_str()), Some(*s));
+        }
+    }
+
+    #[test]
+    fn a_capture_cell_and_a_delivery_cell_report_different_stages() {
+        // A capture failure must be visible with the stage it failed at
+        // (FR-858); one health flag for "something is wrong" conflates a broken
+        // hook with a server that refused what the hook produced.
+        assert_eq!(
+            MatrixCapability::Event(EventKind::ToolFailed).default_stage(),
+            PipelineStage::RuntimeHookFired
+        );
+        assert_eq!(
+            MatrixCapability::DeliverPromptTime.default_stage(),
+            PipelineStage::ContextGenerated
+        );
+        assert_eq!(
+            MatrixCapability::Receipt.default_stage(),
+            PipelineStage::ContextReceiptConfirmed
+        );
+    }
+}

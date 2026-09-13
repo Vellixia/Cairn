@@ -96,12 +96,38 @@ fn capture_hook_latency_stays_within_its_absolute_budget() {
 
     // Capture must actually have happened; a fast run that recorded nothing
     // would prove the opposite of what this test claims.
-    s.settle(&format!("{} captured observations", ROUNDS * CALLS), |s| {
-        s.json(&["status"])["observation_count"]
+    //
+    // **Sized to the work, and it was not.** This used the plain `settle`, whose
+    // deadline is five seconds — the right size for one write, and the wrong
+    // size for six hundred that land asynchronously after six hundred hooks
+    // have run. `perf_capture.rs` makes the same claim about the same six
+    // hundred and already allows sixty. The Windows runner, which is the slow
+    // one and builds in debug, timed out here while every latency number the
+    // test actually asserts was well inside budget: median 31 ms, p95 33 ms.
+    // That is a mis-sized wait reported as a capture failure.
+    //
+    // The count comes with the failure, because "none arrived" and "most
+    // arrived" are different defects and the old message could not tell them
+    // apart: a shortfall of one is a drain still running, a shortfall of
+    // hundreds is capture dropping work.
+    let want = (ROUNDS * CALLS) as i64;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut seen = 0;
+    while std::time::Instant::now() < deadline {
+        seen = s.json(&["status"])["observation_count"]
             .as_i64()
-            .unwrap_or(0)
-            >= (ROUNDS * CALLS) as i64
-    });
+            .unwrap_or(0);
+        if seen >= want {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        seen >= want,
+        "only {seen} of {want} captured observations had landed after sixty \
+         seconds; the latency this test asserts was measured against hooks \
+         whose work did not arrive"
+    );
 
     // Informational: what the same hooks cost end to end, alongside the same
     // work without Cairn. Reported, never asserted (D17).

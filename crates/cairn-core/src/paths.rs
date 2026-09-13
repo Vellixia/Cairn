@@ -82,6 +82,35 @@ pub fn daemon_log_path() -> PathBuf {
     home().join("cairnd.log")
 }
 
+/// Capture drops the hook could not report to the daemon, awaiting collection.
+///
+/// **The hook is the only process that knows** (FR-749c). A capture-class event
+/// whose delivery misses its deadline never reaches the daemon, so the daemon
+/// cannot count what it never saw — and the hook is a short-lived process with
+/// no store, so it cannot count it either. Between those two facts the one
+/// outcome FR-749c names by hand, `capture_deadline_exceeded`, was produced by
+/// nothing: the disposition existed in the vocabulary, in both schemas' CHECK
+/// constraints and in the health funnel, and no code path anywhere ever wrote
+/// it. The agent saw success, Cairn dropped the event, and Cairn's own account
+/// of itself said nothing happened at all — which is the exact silence
+/// Principle X and FR-749c forbid.
+///
+/// So the hook appends one line here, the daemon collects it on its next tick,
+/// and the count reaches capture health by the same door every other
+/// disposition uses. A file rather than the store because this path runs
+/// *because* something was already unreachable: an append is the one write that
+/// still works when the daemon is gone, the store is locked, or a migration
+/// holds it.
+///
+/// It carries no payload content — the agent, the vendor event name, the
+/// canonical kind where one was determined, and the working directory that says
+/// which project to count it under (FR-749d, FR-741). The working directory is
+/// machine configuration and stays on this machine: the daemon resolves it to a
+/// project and the line is deleted (FR-753).
+pub fn capture_drop_journal_path() -> PathBuf {
+    home().join("capture-drops.ndjson")
+}
+
 /// The per-machine salt behind a pattern's `origin_ref` (FR-393).
 pub fn machine_salt_path() -> PathBuf {
     home().join("machine-salt")

@@ -398,6 +398,11 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                 depth: args
                     .get("depth")
                     .and_then(|v| serde_json::from_value::<ContextDepth>(v.clone()).ok()),
+                // Absent: this tool always retrieves as an explicit pull
+                // (`contracts/retrieval-delivery.md` §3) -- FR-831's manual
+                // override, never a push, and never reported `transmitted`.
+                trigger: None,
+                open_trigger: None,
             })
             .await?;
             // The agent gets the rendered briefing plus the raw envelope, so it
