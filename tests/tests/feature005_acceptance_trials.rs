@@ -594,7 +594,21 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
             incomplete_at_close.push(trial);
         }
         // **Why a decline declined**, which is the one thing the kind list
-        // cannot say. A trial that produced no durable record because its
+        // cannot say — read from where the field actually is.
+        //
+        // `EventContent` is an externally tagged enum, so a decline's content is
+        // `{"CaptureOutcome": {"disposition": …, "stage": …, "decline_reason":
+        // …}}` and `content->>'disposition'` is NULL for every row that has ever
+        // existed. This diagnostic was added to answer exactly one question —
+        // why a trial's signal was declined — and it answered `?/?` every time,
+        // which is why the reason stayed unrecoverable across three rounds of
+        // investigation. A query that cannot fail loudly has to be checked
+        // against a real row, and this one now is.
+        //
+        // `decline_reason` is carried too. The disposition says what Cairn did
+        // with the event and the reason says what the mapping found, and the
+        // two are different questions: `declined_by_policy` covers three
+        // reasons, and only one of them is about the vocabulary. A trial that produced no durable record because its
         // decision signal was never captured looks, in the kinds alone, exactly
         // like a trial whose extractor found nothing — `capture_declinedx1`
         // either way. The disposition separates them, and they are different
@@ -605,8 +619,9 @@ fn run_trials(agent: &'static str, build: fn(&str) -> Session) -> Option<AgentRe
         // frozen corpus.
         let declines = server
             .query_column(&format!(
-                "SELECT COALESCE(content->>'disposition', '?')
-                        || '/' || COALESCE(content->>'stage', '?')
+                "SELECT COALESCE(content->'CaptureOutcome'->>'disposition', '?')
+                        || '/' || COALESCE(content->'CaptureOutcome'->>'stage', '?')
+                        || '/' || COALESCE(content->'CaptureOutcome'->>'decline_reason', '?')
                    FROM safe_events
                   WHERE session_id = '{session}' AND kind = 'capture_declined'
                   ORDER BY session_seq"
