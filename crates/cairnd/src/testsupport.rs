@@ -32,6 +32,40 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Point `CAIRN_HOME` at a throwaway directory, once per test process.
+///
+/// # Why this exists
+///
+/// `cairn_core::paths::home()` falls back to the platform data directory when
+/// `CAIRN_HOME` is unset, and `Daemon::mutate_credentials` writes `config.json`
+/// and the token file through those paths. The store in these fixtures is
+/// in-memory, so it looked as though nothing here touched the disk — but the
+/// credential half does, and none of the twenty call sites in `sync.rs` set the
+/// variable.
+///
+/// So `cargo test -p cairnd` wrote its fixtures into the developer's **real**
+/// Cairn home. Observed on a developer machine: `config.json` carrying
+/// `server_url: https://one.example` and a token file containing the literal
+/// `token-a`, both straight out of the tests below, which unlinked that machine
+/// from its server and left its outbox queued for a host that does not exist.
+///
+/// **Set once for the whole process, not per test.** `set_var` mutates state
+/// every thread shares, and `cargo test` runs tests on many threads; setting it
+/// repeatedly would race with the reads it is meant to fix. `Once` makes it a
+/// single write, and every fixture funnels through `daemon_with`, so it happens
+/// before anything can read a path.
+///
+/// The directory is deliberately leaked: it must outlive every test in the
+/// process, and the OS reclaims it.
+fn isolate_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = tempfile::TempDir::new().expect("a temporary CAIRN_HOME");
+        std::env::set_var("CAIRN_HOME", dir.path());
+        std::mem::forget(dir);
+    });
+}
+
 /// A daemon with an empty in-memory store and no server configured.
 pub async fn daemon() -> Daemon {
     daemon_with(CairnConfig::default(), ServerCredentials::default()).await
@@ -39,6 +73,7 @@ pub async fn daemon() -> Daemon {
 
 /// A daemon with a specific config and server credentials.
 pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daemon {
+    isolate_home();
     let store = Store::open_memory().await.expect("in-memory store");
     let user_id = repo::ensure_local_user(&store).await.expect("local user");
     Daemon {
@@ -273,5 +308,61 @@ impl Repo {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         std::fs::write(path, contents).expect("write");
+    }
+}
+
+#[cfg(test)]
+mod isolation {
+    use super::*;
+
+    /// **A fixture must never be able to write into a developer's real Cairn
+    /// home.**
+    ///
+    /// The store these fixtures build is in-memory, which is what made this look
+    /// safe for so long. `mutate_credentials` is the half that is not: it writes
+    /// `config.json` and the token file through `cairn_core::paths`, and those
+    /// fall back to the platform data directory when `CAIRN_HOME` is unset.
+    /// Twenty call sites in `sync.rs` do exactly that, and on a real machine they
+    /// left `server_url: https://one.example` and a token file reading `token-a`
+    /// in the developer's own Cairn home — unlinking it from its server.
+    ///
+    /// Asserted on the variable rather than by comparing against the real data
+    /// directory, because the failure is precisely that the variable is absent:
+    /// with it unset every path in this process resolves somewhere real.
+    ///
+    /// **Falsified by** deleting the `isolate_home()` call in `daemon_with`.
+    #[tokio::test]
+    async fn a_fixture_writes_its_credentials_somewhere_disposable() {
+        let d = daemon().await;
+
+        let home = std::env::var_os("CAIRN_HOME").unwrap_or_default();
+        assert!(
+            !home.is_empty(),
+            "CAIRN_HOME is unset, so every credential this suite writes lands in \
+             the developer's real Cairn home"
+        );
+
+        // The write the sync tests make, made here on purpose: it is the one
+        // that reaches the filesystem.
+        d.mutate_credentials(|c| {
+            c.url = Some("https://isolation.example".into());
+            c.token = Some("isolation-token".into());
+        })
+        .await
+        .expect("store a credential");
+
+        let config = cairn_core::paths::config_path();
+        assert!(
+            config.starts_with(&home),
+            "a credential was written to {}, which is outside the temporary \
+             CAIRN_HOME at {}",
+            config.display(),
+            std::path::Path::new(&home).display()
+        );
+        assert!(
+            config.exists(),
+            "the credential write did not reach {}",
+            config.display()
+        );
     }
 }
