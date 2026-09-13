@@ -58,9 +58,46 @@ fn a_non_repository_fails_cleanly_and_creates_no_state() {
     }
 }
 
+/// TEMPORARY (Feature 005 Windows diagnosis): the on-disk state of the store.
+///
+/// Removed once the Windows failure of `a_corrupt_database_is_detected_and_reported`
+/// has a demonstrated cause.
+fn snapshot(s: &Sandbox, label: &str) -> String {
+    let mut out = format!("--- {label} ---\n");
+    for (name, path) in [
+        ("db", s.db_path()),
+        ("-wal", s.sidecar("-wal")),
+        ("-shm", s.sidecar("-shm")),
+    ] {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let head: String = bytes
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                out.push_str(&format!(
+                    "  {name} {} len={} head={head}\n",
+                    path.display(),
+                    bytes.len()
+                ));
+            }
+            Err(e) => out.push_str(&format!(
+                "  {name} {} absent/unreadable: {:?}\n",
+                path.display(),
+                e.kind()
+            )),
+        }
+    }
+    out
+}
+
 #[test]
 fn a_corrupt_database_is_detected_and_reported() {
     let s = Sandbox::new();
+    let mut diag = String::new();
+    diag.push_str(&snapshot(&s, "before anything is stopped"));
 
     // Wait for the daemon *process* to be gone, not merely for its socket to
     // stop answering. SQLite checkpoints the write-ahead log into the main
@@ -81,13 +118,17 @@ fn a_corrupt_database_is_detected_and_reported() {
     // checkpoint still in flight. The guard was a no-op on exactly the platform
     // that needed it, which is why this surfaced there and only there.
     let victims = cairn_sys::daemons_for_socket(&s.socket);
+    diag.push_str(&format!("victims={victims:?}\n"));
     s.stop_daemon();
     for pid in &victims {
+        let exited = cairn_sys::wait_for_exit(*pid, std::time::Duration::from_secs(5));
+        diag.push_str(&format!("wait_for_exit({pid})={exited}\n"));
         assert!(
-            cairn_sys::wait_for_exit(*pid, std::time::Duration::from_secs(5)),
-            "daemon {pid} should exit after `daemon stop`"
+            exited,
+            "daemon {pid} should exit after `daemon stop`\n{diag}"
         );
     }
+    diag.push_str(&snapshot(&s, "after the daemon exited"));
 
     // Overwrite the database with garbage — *and* remove the write-ahead log
     // beside it. Truncating only the main file does not reliably corrupt the
@@ -95,15 +136,27 @@ fn a_corrupt_database_is_detected_and_reported() {
     // database and `status` succeeds. That is what made this test flaky rather
     // than wrong, and it failed roughly three runs in five.
     for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(s.sidecar(suffix));
+        let removed = std::fs::remove_file(s.sidecar(suffix));
+        diag.push_str(&format!(
+            "remove({suffix})={}\n",
+            match &removed {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("{:?} os={:?}", e.kind(), e.raw_os_error()),
+            }
+        ));
     }
     std::fs::write(s.db_path(), b"not a valid sqlite database").expect("write");
+    diag.push_str(&snapshot(&s, "after writing garbage"));
 
     let out = s.cairn(&["--json", "status"]);
+    diag.push_str(&snapshot(&s, "after `status`"));
+    diag.push_str(&format!(
+        "status code={} stdout={} stderr={}\n",
+        out.code, out.stdout, out.stderr
+    ));
     assert!(
         !out.ok(),
-        "a corrupt database must not report success: {}",
-        out.stderr
+        "a corrupt database must not report success\n{diag}"
     );
     // And it must fail as a reported storage problem, not a panic. Asserting
     // only `!ok` would pass on a crash, which is the failure mode this is
