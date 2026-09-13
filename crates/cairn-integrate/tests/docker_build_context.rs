@@ -108,6 +108,40 @@ fn embedded_roots() -> Vec<String> {
     roots
 }
 
+/// Whether one `COPY` puts `root` at `/src/root`, which is where the compiler
+/// looks for it.
+///
+/// Source and destination are read as the positions they are, not as "the word
+/// appears somewhere on the line". `COPY unrelated skills` names `skills` only
+/// as a destination and `COPY skills /tmp/skills` puts it somewhere the build
+/// never looks: both would satisfy a substring match and neither makes the
+/// crate compile.
+///
+/// The destination has to be the directory itself. `COPY skills ./` copies the
+/// *contents* of `skills` into `/src`, leaving no `/src/skills` — the same
+/// failure with a different shape.
+fn copies_to_workdir(line: &str, root: &str) -> bool {
+    let mut words: Vec<&str> = line.split_whitespace().skip(1).collect();
+    // `--from=…`, `--chown=…` and friends are not paths.
+    words.retain(|w| !w.starts_with("--"));
+    let Some((destination, sources)) = words.split_last() else {
+        return false;
+    };
+    if sources.is_empty() {
+        return false;
+    }
+    let named = sources
+        .iter()
+        .any(|s| *s == root || *s == format!("{root}/").as_str());
+    let landed = matches!(
+        destination.trim_end_matches('/'),
+        d if d == root
+            || d == format!("./{root}").as_str()
+            || d == format!("/src/{root}").as_str()
+    );
+    named && landed
+}
+
 #[test]
 fn the_server_image_copies_everything_this_crate_embeds() {
     let dockerfile = repo_root().join("docker/server.Dockerfile");
@@ -131,10 +165,7 @@ fn the_server_image_copies_everything_this_crate_embeds() {
         let copied = build_stage
             .lines()
             .filter(|l| l.trim_start().starts_with("COPY "))
-            .any(|l| {
-                l.split_whitespace()
-                    .any(|w| w == root.as_str() || w == format!("{root}/").as_str())
-            });
+            .any(|l| copies_to_workdir(l, root));
         assert!(
             copied,
             "`cairn-integrate` embeds `{root}/` at compile time and \
@@ -145,4 +176,29 @@ fn the_server_image_copies_everything_this_crate_embeds() {
             dockerfile.display()
         );
     }
+}
+
+/// The shapes a substring match accepts and a build does not.
+///
+/// Each of these leaves `/src/skills` absent, so each would reproduce the
+/// release failure while reporting that the guard is satisfied.
+#[test]
+fn a_copy_that_does_not_land_the_directory_does_not_count() {
+    assert!(copies_to_workdir("COPY skills ./skills", "skills"));
+    assert!(copies_to_workdir("COPY skills /src/skills", "skills"));
+    assert!(copies_to_workdir("COPY skills skills/", "skills"));
+
+    // Named only as the destination.
+    assert!(!copies_to_workdir("COPY unrelated skills", "skills"));
+    // Landed somewhere the build never looks.
+    assert!(!copies_to_workdir("COPY skills /tmp/skills", "skills"));
+    // Contents into the work directory, leaving no `skills/` at all.
+    assert!(!copies_to_workdir("COPY skills ./", "skills"));
+    // A different directory entirely.
+    assert!(!copies_to_workdir("COPY crates ./crates", "skills"));
+    // Not copied from this build context at all.
+    assert!(!copies_to_workdir(
+        "COPY --from=build /src/skills ./skills",
+        "skills"
+    ));
 }
