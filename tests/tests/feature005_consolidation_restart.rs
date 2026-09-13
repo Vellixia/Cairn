@@ -172,9 +172,33 @@ impl Drop for Worker {
 /// Run a real consolidation worker only for as long as `body` needs one, then
 /// kill it. The restart injector this file uses: everywhere a scenario needs
 /// "nobody is consolidating right now" it simply does not hold a `Worker`.
+///
+/// **Killing the process is not all of "nobody is consolidating".** A worker
+/// killed mid-pass leaves its session `claimed` with `claim_expires_at` five
+/// minutes out (`CLAIM_LEASE`), and nothing may reclaim a session whose lease
+/// has not lapsed — that guard is what stops two workers owning one session.
+/// So the lease outlives the process by design, and a scenario that kills a
+/// worker and then waits for a *second* one to drain the same session is
+/// waiting on a clock, not on the machinery it is testing. Thirty seconds of a
+/// three-hundred-second lease is not a slow test; it cannot succeed.
+///
+/// Nobody is holding these claims — this helper is the only thing in the file
+/// that starts a worker, and the suite serialises itself — so the lease is
+/// lapsed here rather than waited out. The timestamp is all that moves:
+/// `state` and `claimed_by` are left exactly as the crash left them, because
+/// that is what an expired lease looks like in the field and several scenarios
+/// assert on them.
 fn with_worker<R>(pg: &Pg, body: impl FnOnce() -> R) -> R {
-    let _worker = Worker::start(&pg.server.database_url);
-    body()
+    let out = {
+        let _worker = Worker::start(&pg.server.database_url);
+        body()
+    };
+    pg.server.execute(
+        "UPDATE consolidation_session
+            SET claim_expires_at = now() - make_interval(secs => 1)
+          WHERE state = 'claimed' AND claim_expires_at > now()",
+    );
+    out
 }
 
 // ---------------------------------------------------------------------------

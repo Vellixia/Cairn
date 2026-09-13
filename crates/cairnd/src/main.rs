@@ -443,8 +443,12 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
             .create(name.as_str())?;
         let daemon = Arc::clone(&daemon);
         let shutdown = shutdown_tx.clone();
+        // The first connection is still a connection, and it is the *earliest*
+        // one: skipping it here would leave the hook that opened this daemon
+        // racing every hook behind it (`arrival`).
+        let ticket = arrivals.take();
         tokio::spawn(async move {
-            if let Err(e) = serve(daemon, handled, shutdown).await {
+            if let Err(e) = serve(daemon, handled, shutdown, ticket).await {
                 tracing::debug!(error = %e, "connection ended");
             }
         });

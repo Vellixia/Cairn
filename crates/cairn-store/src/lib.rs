@@ -79,6 +79,13 @@ pub struct Store {
     pool: SqlitePool,
 }
 
+/// How long opening a store may spend waiting for its first connection.
+///
+/// Opening is create-if-missing plus `PRAGMA journal_mode = WAL`, which is a
+/// handful of small writes; ten seconds is a budget for a wedged disk, not for
+/// a busy one.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl Store {
     /// Open (creating if needed) the database at `path` and migrate it.
     ///
@@ -111,9 +118,26 @@ impl Store {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
-            .acquire_timeout(Duration::from_secs(10))
+            .acquire_timeout(OPEN_TIMEOUT)
             .connect_with(options)
-            .await?;
+            .await
+            // **Name the file and the budget.** `PoolTimedOut` is what sqlx
+            // reports when the pool could not hand out a connection in time,
+            // and it says nothing about which store or how long it waited —
+            // the underlying connect error is swallowed with it. That reached
+            // a user as `storage_unavailable: PoolTimedOut`, and reached a
+            // test as one line naming a pool. It is a real state: a private,
+            // newly created database timing out here cannot be contending with
+            // anybody, so it is the machine and the message should say which
+            // machine and which file.
+            .map_err(|e| match e {
+                sqlx::Error::PoolTimedOut => StoreError::Corrupt(format!(
+                    "{} could not be opened within {}s",
+                    path.display(),
+                    OPEN_TIMEOUT.as_secs()
+                )),
+                other => StoreError::from(other),
+            })?;
 
         migrate::run(&pool).await?;
         Ok(Self { pool })
