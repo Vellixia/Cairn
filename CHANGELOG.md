@@ -124,14 +124,21 @@ every Feature 003 reconciliation semantic untouched.
 
 ### Migration and upgrade notes
 
-- **Upgrade the server before the clients.** The server schema advances with this
-  release and applies its migrations on start; a client on alpha.6 talking to a
-  server on alpha.5 is refused rather than silently degraded.
+- **Upgrade the server before the clients**, though nothing breaks if you do
+  not. The server schema advances with this release and applies its migrations on
+  start. Compatibility is negotiated per capability rather than per version: a
+  server advertises what its schema can hold, a client queues and marks blocked
+  only the work that needs something the server lacks, names the missing
+  capability in `cairn status`, and drains it within seconds of the server being
+  upgraded. Every namespace the server does support keeps flowing meanwhile. An
+  alpha.6 client against an alpha.5 server is not refused and loses nothing; it
+  waits to deliver the new kinds of work.
 - Local stores gain migrations `0007` through `0012`, applied on first daemon
   start. Data written by alpha.5 remains readable.
-- Autonomous capture and consolidation are active after the upgrade. With no
-  server linked, capture and local knowledge work and consolidated knowledge does
-  not accumulate.
+- Autonomous capture and consolidation are active after the upgrade.
+  Consolidation is server-side, so with no server linked capture still runs and
+  local knowledge still works, but durable consolidated knowledge does not
+  accumulate until a server is linked.
 - Knowledge created before this release carries no autonomous provenance, which
   is correct: nothing observed it being created.
 
