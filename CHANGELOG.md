@@ -140,7 +140,7 @@ every Feature 003 reconciliation semantic untouched.
   only the work that needs something the server lacks, names the missing
   capability in `cairn status`, and drains it within seconds of the server being
   upgraded. Every namespace the server does support keeps flowing meanwhile. An
-  alpha.6 client against an alpha.5 server is not refused and loses nothing; it
+  alpha.7 client against an alpha.5 server is not refused and loses nothing; it
   waits to deliver the new kinds of work.
 - Local stores gain migrations `0007` through `0012`, applied on first daemon
   start. Data written by alpha.5 remains readable.
@@ -151,7 +151,7 @@ every Feature 003 reconciliation semantic untouched.
 - Knowledge created before this release carries no autonomous provenance, which
   is correct: nothing observed it being created.
 
-## [0.1.0-alpha.6] — tagged, never published
+## 0.1.0-alpha.6 — tagged, never published
 
 Withdrawn. The tag exists and the release build failed at the container image
 job before any artifact was uploaded, so there is no release, no archives and no
