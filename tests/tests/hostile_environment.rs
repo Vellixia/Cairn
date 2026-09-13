@@ -115,10 +115,14 @@ fn a_corrupt_database_is_detected_and_reported() {
     // `daemons_for_socket` scans processes by name and environment, so it still
     // finds a daemon that is shutting down and the wait below does its job. On
     // Windows it asks the named pipe who is serving it, and a pipe that has
-    // already gone answers nothing: the list came back empty, the loop below
-    // iterated over nothing, and the garbage was written straight into a
-    // checkpoint still in flight. The guard was a no-op on exactly the platform
-    // that needed it, which is why this surfaced there and only there.
+    // already gone answers nothing: the list came back empty and the loop below
+    // iterated over nothing.
+    //
+    // That guard is necessary and was not sufficient. What actually kept
+    // failing on Windows is below, at the sidecars: a file with a live handle
+    // cannot be unlinked there, the removal was discarded, and the surviving
+    // log carried the whole database past the garbage. Both halves are
+    // repaired; neither replaces the other.
     let victims = cairn_sys::daemons_for_socket(&s.socket);
     diag.push_str(&format!("victims={victims:?}\n"));
     s.stop_daemon();

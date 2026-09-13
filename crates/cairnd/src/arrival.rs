@@ -106,6 +106,32 @@ impl Arrivals {
     fn arrived_at(&self, n: u64) -> bool {
         self.gate.lock().expect("arrival gate").turn >= n
     }
+
+    /// Give up on everything before `n` and let it through.
+    ///
+    /// Called by the one waiter that outlasts the bound, so the ticket nobody
+    /// retired is paid for once rather than by every capture behind it in turn.
+    /// It also bounds `early`: without this a connection that never ends would
+    /// hold the gate at its own number while every later ticket accumulated
+    /// behind it for the life of the daemon.
+    fn abandon_before(&self, n: u64) {
+        {
+            let mut gate = self.gate.lock().expect("arrival gate");
+            if gate.turn >= n {
+                return;
+            }
+            gate.turn = n;
+            gate.early.retain(|t| *t >= n);
+            loop {
+                let turn = gate.turn;
+                if !gate.early.remove(&turn) {
+                    break;
+                }
+                gate.turn += 1;
+            }
+        }
+        self.wake.notify_waiters();
+    }
 }
 
 /// One connection's place in the accept order. Retires when dropped.
@@ -135,6 +161,7 @@ impl Ticket {
                     ticket = self.n,
                     "a capture took its ordinal without waiting out the arrival gate"
                 );
+                self.arrivals.abandon_before(self.n);
                 return;
             }
         }
@@ -203,6 +230,43 @@ mod tests {
         let _never = arrivals.take();
         let second = arrivals.take();
         second.wait_turn(Duration::from_millis(20)).await;
+    }
+
+    /// And it costs it **once**. The waiter that outlasts the bound abandons
+    /// the ticket it was waiting on, so a connection that never ends is not a
+    /// bound paid again by every capture behind it — and `early` does not grow
+    /// for the life of the daemon holding tickets for a turn that cannot come.
+    #[tokio::test]
+    async fn outlasting_the_bound_abandons_the_ticket_it_waited_on() {
+        let arrivals = Arrivals::new();
+        let _never = arrivals.take();
+        let mut second = arrivals.take();
+        let third = arrivals.take();
+
+        // Retired while the gate is still shut, so it can only be folded in by
+        // the abandonment below.
+        third.arrivals.retire(third.n);
+        assert_eq!(
+            arrivals.gate.lock().expect("gate").early.len(),
+            1,
+            "a ticket retired out of turn should be remembered until its turn"
+        );
+
+        second.wait_turn(Duration::from_millis(20)).await;
+        assert!(
+            arrivals.arrived_at(second.n),
+            "the gate did not move past the ticket nobody retired"
+        );
+
+        // And the ticket behind it is no longer waiting on a turn that cannot
+        // come: the only thing left ahead of it is the waiter itself.
+        second.retire();
+        assert!(arrivals.arrived_at(third.n));
+        assert_eq!(
+            arrivals.gate.lock().expect("gate").early.len(),
+            0,
+            "tickets were kept for a turn that can never come"
+        );
     }
 
     /// Dropping a ticket retires it, so a connection that ends any way at all

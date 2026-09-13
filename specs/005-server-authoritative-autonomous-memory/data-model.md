@@ -120,6 +120,27 @@ retries carry the same `event_id`; the server's primary key makes a redelivery a
 rather than a second event (FR-770); a genuinely repeated act gets a new ordinal and is a
 distinct event (FR-738); and nothing depends on a clock (FR-780).
 
+**The ordinal is an order, not just an identity.** `contracts/extraction.md` §309 has the
+rules read a session's events in `session_seq` order and §311 justifies a signal's tokens only
+by events with a lower one, so the counter above has a second obligation: the numbers it hands
+out must be the order the agent's hooks actually ran in. That does not follow from allocating
+them in a transaction. Each hook is its own short-lived process that writes one request and
+exits without waiting — deliberately, because the hook is on the agent's critical path
+(SC-007) — and the daemon serves each accepted connection in a task of its own, so two hooks
+the agent ran in order were two tasks racing to the counter. The loser's event took the lower
+ordinal, and the stream that resulted was dense, terminated, and in an order that never
+happened: R1's "a failure, then the changes made while it was open, then a pass" reads a
+session in which the file changed before anything was wrong, and states nothing. No
+completeness check can see it, because nothing is missing.
+
+The order is not lost at the socket. A hook exits before the next one starts, so its bytes are
+already queued when the next connects, and `accept` returns the connections in that order.
+`cairnd::arrival` takes a ticket there and holds a capture until every earlier ticket has been
+retired. Boundary events are not held — one can be *waited on* by the captures around it (H3) —
+and the wait is bounded by the capture deadline, so a connection that is accepted and then
+says nothing costs that bound rather than the daemon. The hook is unchanged and still does not
+wait.
+
 **The server re-derives and verifies.** `event_id` travels on the wire, but the server
 recomputes `UUIDv5(CAIRN_EVENT_NS, session_id ‖ session_seq)` and refuses a mismatch
 (`event_id_mismatch`). Without this, idempotency would be client-controlled: a buggy or hostile
