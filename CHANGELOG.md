@@ -9,7 +9,7 @@ schemas, and the wire protocol without a deprecation period.
 
 ## [Unreleased]
 
-## [0.1.0-alpha.6] — 2026-09-13
+## [0.1.0-alpha.7] — 2026-09-13
 
 Autonomous memory. Cairn captures the work an agent is already doing,
 consolidates it into durable knowledge without being asked, and delivers that
@@ -121,6 +121,15 @@ every Feature 003 reconciliation semantic untouched.
   left fixtures and upgrade paths operating on a store they had not replaced.
 - A store that cannot be opened names the file and the budget it exceeded rather
   than reporting an internal connection-pool error.
+- **The `cairn-server` image builds.** `cairn-server` gained a dependency on
+  `cairn-integrate`, which embeds `skills/cairn` at compile time via
+  `include_dir!` — a path outside its own crate, and one `docker/server.Dockerfile`
+  had never copied because the server had never compiled that crate. Nothing
+  before a tag could see it: the workspace builds, and the images are built only
+  by the release workflow. `v0.1.0-alpha.6` is where it surfaced. The Dockerfile
+  copies `skills/` now, and `cairn-integrate/tests/docker_build_context.rs`
+  asserts that every compile-time path leaving the crate is in the image's build
+  context.
 
 ### Migration and upgrade notes
 
@@ -141,6 +150,15 @@ every Feature 003 reconciliation semantic untouched.
   accumulate until a server is linked.
 - Knowledge created before this release carries no autonomous provenance, which
   is correct: nothing observed it being created.
+
+## [0.1.0-alpha.6] — tagged, never published
+
+Withdrawn. The tag exists and the release build failed at the container image
+job before any artifact was uploaded, so there is no release, no archives and no
+images under it. The cause and its fix are in `0.1.0-alpha.7`, which carries the
+same content. The tag is left in place rather than moved or deleted: a published
+ref is not something to reuse, and `cairn update` reads releases rather than
+tags, so nothing offers it to anyone.
 
 ## [0.1.0-alpha.5] — 2026-08-21
 
@@ -506,7 +524,7 @@ upgradeable to this one, and have been retired.
   may change without a deprecation period before 1.0.0.
 - Sharing requires running your own Cairn server; no hosted service exists.
 
-[0.1.0-alpha.6]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.6
+[0.1.0-alpha.7]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.7
 [0.1.0-alpha.5]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.3
