@@ -9,15 +9,42 @@ schemas, and the wire protocol without a deprecation period.
 
 ## [Unreleased]
 
-### Fixed
+## [0.1.0-alpha.6] — 2026-09-13
 
-- **Five authorization holes in the sync and link paths.** Self-registration and
-  self-join are gone; project discovery is scoped to the caller's memberships;
-  tombstones and sync upserts carry a `project_id` predicate, so one project's
-  records can no longer overwrite or delete another's. An operator now creates
-  accounts with `cairn-server users add` rather than a public route.
+Autonomous memory. Cairn captures the work an agent is already doing,
+consolidates it into durable knowledge without being asked, and delivers that
+knowledge back when the next session opens — with the server, not the local
+machine, as the authority on what is true.
 
-### Added — Feature 004, collaborative global memory (in progress)
+Two features land together: **004, collaborative global memory** (personal and
+team knowledge) and **005, server-authoritative autonomous memory**.
+
+Nothing here needs a model, an embedding or a vector store, and none was added.
+Extraction is a fixed set of deterministic rules over a session's own recorded
+events.
+
+### Added — Feature 005, server-authoritative autonomous memory
+
+- **Autonomous capture.** Agent hooks emit safe canonical events through a local
+  privacy screen, spool them durably, and deliver them when a server is
+  reachable. Capture is fire-and-forget: a hook that misses its deadline drops
+  its event and exits successfully rather than delaying the agent.
+- **Autonomous consolidation.** A server-side worker claims a closed session's
+  accepted events under a lease and turns them into durable knowledge through
+  eight deterministic rules — a fix confirmed by tests, a persistent failure, an
+  established command, a repeated procedure, a test-suite identity, a decision
+  near a change, a recorded decision, a standing instruction.
+- **Automatic retrieval.** Session-open delivery returns the knowledge relevant
+  to a project into the agent's context within a budget, with no tool call.
+- **The privacy boundary is a token vocabulary.** Semantic material crosses as
+  structured tokens that the session's own earlier events already justify, and
+  the server re-derives that justification independently. Prose never crosses.
+- **Capture health.** `cairn status` and `cairn doctor` report spool depth, the
+  oldest undelivered entry, per-disposition counts and a closed, ordered
+  vocabulary of reasons delivery is blocked.
+- Server schema `0004` and `0005`; local schema `0008` through `0012`.
+
+### Added — Feature 004, collaborative global memory
 
 Two knowledge domains that follow the *person* rather than the project:
 **personal** memory, private to one account and synchronized across that
@@ -25,26 +52,88 @@ account's devices, and **team** memory, proposed by any member and made
 authoritative only by an administrator.
 
 Cairn gains no `MemoryScope::Global`. Scope answers "how narrow inside a
-project"; a new orthogonal **domain** answers "whose knowledge is this", and the
-two never meet — which is what leaves the `memories` table, its four-variant
-`CHECK` and every Feature 003 reconciliation semantic untouched.
+project"; an orthogonal **domain** answers "whose knowledge is this", and the
+two never meet — which leaves the `memories` table, its four-variant `CHECK` and
+every Feature 003 reconciliation semantic untouched.
 
-Landed so far (Phase 2, the foundation):
-
-- `KnowledgeDomain`, `ApplicabilityKind`, `TeamState`, `PromotionTarget`,
-  `ServerRole`, `UserStatus`, `ApplicabilityFact`, `ProjectTrait`,
-  `SyncNamespace`, `WriterIdentity`
 - `PersonalKnowledge` and `TeamKnowledge`, neither of which has a field for a
   project identifier, an evidence reference, an observation identifier, or
   verification of any kind
 - the applicability match predicate — AND across kinds, OR within a kind, no
   facts means universal
-- `validate_global_content`, the one implementation of nine content rejection
+- `validate_global_content`, one implementation of nine content rejection
   classes, run at every path that can create global knowledge
 - the eight-check promotion gate, which delegates content screening to that
   validator rather than repeating it
 - the salted, machine-local origin digest, which never crosses the wire
-- both migrations: local `0007`, server `0003`
+- the team lifecycle: proposed, ratified, retired, with the acting account
+  recorded at each transition
+- server schema `0003`; local schema `0007`
+
+### Changed
+
+- **Durable knowledge is server-authoritative.** The daemon renders what the
+  server selected and reports what it transmitted, rather than deciding what is
+  true. Where a server is unreachable, Cairn says so and continues locally.
+- `cairn sync now` reports per lane: the account it filtered by, what moved, what
+  it withheld and why. Six distinct situations previously rendered as
+  `applied 0`.
+- A team entry's ordering key is a revision allocated from a counter row, so
+  allocation order is commit order (FR-791a1). The previous transaction-clock
+  timestamp could not order two states, and the sequence that replaced it was
+  monotonic without being ordered against commit.
+
+### Fixed
+
+- **Five authorization holes in the sync and link paths.** Self-registration and
+  self-join are gone; project discovery is scoped to the caller's memberships;
+  tombstones and sync upserts carry a `project_id` predicate, so one project's
+  records can no longer overwrite or delete another's. An operator now creates
+  accounts with `cairn-server users add` rather than a public route.
+- **A session's ordinals are the order its hooks ran in.** Each hook is a
+  separate short-lived process that writes one request and exits without waiting,
+  and the daemon served each connection in a task of its own — so two hooks the
+  agent ran in order raced to allocate their ordinal. The resulting stream is
+  dense and terminated, so no completeness check could see it, and a rule that
+  reads a sequence recorded nothing. Ordering is established in the accept loop,
+  where it is still true, and the hook is unchanged.
+- **Delivery status survives a daemon replacement.** The observed server instance
+  and reachability were per-process, and a daemon exits within one supervision
+  tick of another taking its socket — so the process that saw a replacement
+  arrive was usually gone before anyone asked. Status now takes a fresh, bounded,
+  read-only peer-identity probe, and detection still requires no network.
+- **A queued item authored as one account is never submitted as another.**
+- **A retirement records who performed it, on every device.** A pull page fetched
+  before a local transition and applied after it wrote NULL over the lifecycle
+  columns; the merge is guarded by the server's ordering key, and a transition
+  that was not recorded now fails instead of reporting success.
+- **A deleted project keeps contributing privacy identities.** The command path
+  screened against every membership and the ingest path filtered deleted
+  projects, so the same text was refused by one door and accepted by the other.
+  Both read one gatherer (FR-577a).
+- **`capture_deadline_exceeded` is produced by something.** The disposition was
+  named by FR-749c, admitted by both schemas and written by no code path. The
+  hook journals the drop and the daemon collects it (FR-749c1), and a decline
+  caused by Cairn's own deadline is no longer reported as a decline about the
+  content (FR-749c2).
+- **Windows file handling.** Several faults of one shape: a file with a live
+  handle cannot be unlinked on Windows as it can on Unix, and the discarded error
+  left fixtures and upgrade paths operating on a store they had not replaced.
+- A store that cannot be opened names the file and the budget it exceeded rather
+  than reporting an internal connection-pool error.
+
+### Migration and upgrade notes
+
+- **Upgrade the server before the clients.** The server schema advances with this
+  release and applies its migrations on start; a client on alpha.6 talking to a
+  server on alpha.5 is refused rather than silently degraded.
+- Local stores gain migrations `0007` through `0012`, applied on first daemon
+  start. Data written by alpha.5 remains readable.
+- Autonomous capture and consolidation are active after the upgrade. With no
+  server linked, capture and local knowledge work and consolidated knowledge does
+  not accumulate.
+- Knowledge created before this release carries no autonomous provenance, which
+  is correct: nothing observed it being created.
 
 ## [0.1.0-alpha.5] — 2026-08-21
 
@@ -410,6 +499,8 @@ upgradeable to this one, and have been retired.
   may change without a deprecation period before 1.0.0.
 - Sharing requires running your own Cairn server; no hosted service exists.
 
+[0.1.0-alpha.6]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.6
+[0.1.0-alpha.5]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.2
