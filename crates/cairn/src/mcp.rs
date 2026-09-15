@@ -1,4 +1,4 @@
-//! The MCP server: exactly six tools, no more (FR-040).
+//! The MCP server: exactly five tools, no more.
 //!
 //! Speaks JSON-RPC 2.0 over stdio — `initialize`, `tools/list`, `tools/call` —
 //! and forwards every call to the local daemon. Each tool takes an `action`
@@ -19,13 +19,12 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// version back would claim support Cairn does not have.
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// The six tools. Anything beyond this list is a scope violation (FR-040).
+/// The five agent tools.
 pub const TOOL_NAMES: &[&str] = &[
     "cairn_context",
     "cairn_search",
     "cairn_remember",
     "cairn_session",
-    "cairn_task",
     "cairn_handoff",
 ];
 
@@ -115,7 +114,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_context",
             "description": "Build the bounded briefing for the current repository: project, \
-                            branch, commit, working tree, task goal, previous handoff, and \
+                            branch, commit, working tree, previous handoff, and \
                             relevant scoped memory — plus the minimum safe continuity, drift \
                             and conflict warnings, and whether your checkpoint diverged.",
             "inputSchema": {
@@ -139,7 +138,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_search",
             "description": "Search durable memory. Results are ranked scope-first — current \
-                            task, then branch, then project — with lexical relevance and \
+                            session, then branch, then project — with lexical relevance and \
                             recency breaking ties within a scope. Filter by verification state \
                             or subject; ask for reusable patterns explicitly.",
             "inputSchema": {
@@ -150,7 +149,7 @@ fn tool_definitions() -> Vec<Value> {
                     "query": { "type": "string" },
                     "memory_id": { "type": "string", "description": "Required for `graph`; seed memory id." },
                     "hops": { "type": "integer", "description": "Graph depth, capped at two." },
-                    "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
+                    "scope": { "type": "string", "enum": ["project", "branch", "session"] },
                     "scope_key": { "type": "string" },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "state": { "type": "string", "enum": ["active", "stale", "superseded"] },
@@ -169,7 +168,7 @@ fn tool_definitions() -> Vec<Value> {
                     // own corpus and returned in its own array; there is no
                     // comparator across them (FR-471, FR-472).
                     "domains": { "type": "array", "items": { "type": "string", "enum": ["project", "personal", "team"] }, "description": "Which knowledge domains to search. Omit for all three; personal and team return sibling arrays, never merged into results" },
-                    "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your task" },
+                    "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your session" },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
                 "required": ["cwd"]
@@ -194,7 +193,7 @@ fn tool_definitions() -> Vec<Value> {
                         "reconcile", "promote", "record_outcome", "governance"
                     ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
-                    "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
+                    "scope": { "type": "string", "enum": ["project", "branch", "session"] },
                     "scope_key": { "type": "string" },
                     "content": { "type": "string" },
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
@@ -280,50 +279,14 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint", "replay"] },
+                    "action": { "type": "string", "enum": ["current", "start", "end", "checkpoint", "replay"] },
                     "agent": { "type": "string" },
                     "agent_session_key": { "type": "string" },
                     "session_id": { "type": "string" },
-                    "task_id": { "type": "string" },
                     "status": { "type": "string", "enum": ["completed", "interrupted"] },
                     // checkpoint
                     "next_action": { "type": "string", "description": "What you were about to do" },
                     "relevant_paths": { "type": "array", "items": { "type": "string" }, "description": "Repository-relative paths this work depends on" }
-                },
-                "required": ["cwd", "action"]
-            }
-        }),
-        json!({
-            "name": "cairn_task",
-            "description": "List, read, create or update tasks — title, goal, acceptance \
-                            criteria and status. Update one criterion at a time and pass the \
-                            `expected_revision` you read.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": [
-                        "list", "get", "create", "update",
-                        "add_criterion", "update_criterion", "blocker", "readiness"
-                    ] },
-                    "task_id": { "type": "string" },
-                    "title": { "type": "string" },
-                    "goal": { "type": "string" },
-                    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
-                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] },
-                    // add_criterion / update_criterion
-                    "text": { "type": "string" },
-                    "criterion_id": { "type": "string" },
-                    "state": { "type": "string", "enum": ["pending", "satisfied", "blocked", "waived"] },
-                    "verification": { "type": "string", "enum": ["unverified", "verified", "failed"] },
-                    "evidence_observation_id": { "type": "string" },
-                    // This store's local concurrency token, read from `get`. It
-                    // is not a version anyone else shares (D80).
-                    "expected_revision": { "type": "integer" },
-                    // blocker
-                    "description": { "type": "string" },
-                    "blocker_id": { "type": "string" },
-                    "clear": { "type": "boolean" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -389,7 +352,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .get("token_budget")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
-                // The six tools are fixed; diagnostics stay a CLI affordance.
+                // The five tools are fixed; diagnostics stay a web affordance.
                 explain: false,
 
                 // `minimum` excludes personal_notes/team_guidance entirely;
@@ -654,16 +617,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         cwd,
                         agent: str_arg(args, "agent").unwrap_or_else(|| "mcp-client".into()),
                         agent_session_key: key,
-                        task_id: uuid_arg(args, "task_id").ok(),
-                    })
-                    .await?
-                }
-                "bind_task" => {
-                    client::send(&Request::SessionBindTask {
-                        cwd,
-                        session_id: None,
-                        agent_session_key: key,
-                        task_id: uuid_arg(args, "task_id")?,
+                        task_id: None,
                     })
                     .await?
                 }
@@ -694,108 +648,6 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .await?
                 }
                 "replay" => client::send(&Request::Replay { cwd }).await?,
-                other => return Err(WireError::invalid(format!("unknown action: {other}"))),
-            };
-            Ok(pretty(&value))
-        }
-
-        "cairn_task" => {
-            let action = required_action(args)?;
-            let value = match action.as_str() {
-                "list" => {
-                    client::send(&Request::TaskList {
-                        cwd,
-                        status: enum_arg(args, "status"),
-                    })
-                    .await?
-                }
-                "get" => {
-                    client::send(&Request::TaskGet {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                    })
-                    .await?
-                }
-                "create" => {
-                    client::send(&Request::TaskCreate {
-                        cwd,
-                        title: str_arg(args, "title")
-                            .ok_or_else(|| WireError::invalid("title is required"))?,
-                        goal: str_arg(args, "goal")
-                            .ok_or_else(|| WireError::invalid("goal is required"))?,
-                        acceptance_criteria: string_list(args, "acceptance_criteria"),
-                    })
-                    .await?
-                }
-                "update" => {
-                    client::send(&Request::TaskUpdate {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                        title: str_arg(args, "title"),
-                        goal: str_arg(args, "goal"),
-                        acceptance_criteria: args
-                            .get("acceptance_criteria")
-                            .map(|_| string_list(args, "acceptance_criteria")),
-                        status: enum_arg(args, "status"),
-                    })
-                    .await?
-                }
-                "add_criterion" => {
-                    client::send(&Request::TaskCriterionAdd {
-                        cwd,
-                        agent_session_key: key,
-                        session_id: uuid_opt(args, "session_id"),
-                        task_id: uuid_arg(args, "task_id")?,
-                        text: str_arg(args, "text")
-                            .ok_or_else(|| WireError::invalid("text is required"))?,
-                    })
-                    .await?
-                }
-                "update_criterion" => {
-                    client::send(&Request::TaskCriterionSet {
-                        cwd,
-                        agent_session_key: key,
-                        session_id: uuid_opt(args, "session_id"),
-                        criterion_id: uuid_arg(args, "criterion_id")?,
-                        state: enum_arg(args, "state"),
-                        text: str_arg(args, "text"),
-                        // Omitting it applies the write and records a blind
-                        // write; supplying what you read is the protection
-                        // (FR-490).
-                        expected_revision: args.get("expected_revision").and_then(|v| v.as_i64()),
-                    })
-                    .await?
-                }
-                // One action, because a blocker has exactly one transition:
-                // `clear: true` closes the one named, anything else opens one.
-                "blocker" => {
-                    if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        client::send(&Request::TaskBlockerClear {
-                            cwd,
-                            agent_session_key: key,
-                            session_id: uuid_opt(args, "session_id"),
-                            blocker_id: uuid_arg(args, "blocker_id")?,
-                        })
-                        .await?
-                    } else {
-                        client::send(&Request::TaskBlockerOpen {
-                            cwd,
-                            agent_session_key: key,
-                            session_id: uuid_opt(args, "session_id"),
-                            task_id: uuid_arg(args, "task_id")?,
-                            description: str_arg(args, "description")
-                                .ok_or_else(|| WireError::invalid("description is required"))?,
-                        })
-                        .await?
-                    }
-                }
-                "readiness" => {
-                    client::send(&Request::TaskReadiness {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                    })
-                    .await?
-                }
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -980,18 +832,6 @@ fn applicability_facts_arg(args: &Value) -> Result<Vec<String>, WireError> {
         .collect()
 }
 
-fn string_list(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -1001,18 +841,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_exactly_six_tools() {
+    fn exposes_exactly_five_tools_without_task_binding() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 6, "FR-040 caps the tool surface at six");
+        assert_eq!(tools.len(), 5, "MCP exposes exactly five tools");
         let names: Vec<&str> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(names, TOOL_NAMES);
+        assert!(!names.contains(&"cairn_task"));
+
+        for name in ["cairn_session", "cairn_handoff"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("surviving tool");
+            assert!(tool["inputSchema"]["properties"].get("task_id").is_none());
+        }
+
+        for name in ["cairn_search", "cairn_remember"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("surviving tool");
+            let scopes = tool["inputSchema"]["properties"]["scope"]["enum"]
+                .as_array()
+                .expect("scope enum");
+            assert!(!scopes.iter().any(|scope| scope == "task"));
+        }
     }
 
     #[test]
-    fn advanced_actions_stay_typed_inside_the_six_tool_surface() {
+    fn advanced_actions_stay_typed_inside_the_five_tool_surface() {
         let tools = tool_definitions();
         let action_values = |name: &str| {
             tools
@@ -1027,7 +887,7 @@ mod tests {
         assert!(action_values("cairn_search").contains(&"graph"));
         assert!(action_values("cairn_session").contains(&"replay"));
         assert!(action_values("cairn_remember").contains(&"governance"));
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 5);
     }
 
     #[test]
@@ -1092,10 +952,9 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_is_still_exactly_six_tools() {
-        // FR-128, SC-106: a test fails if a seventh appears.
-        assert_eq!(TOOL_NAMES.len(), 6, "the MCP surface grew a seventh tool");
-        assert_eq!(tool_definitions().len(), 6);
+    fn the_surface_is_exactly_five_tools() {
+        assert_eq!(TOOL_NAMES.len(), 5, "the MCP surface grew a sixth tool");
+        assert_eq!(tool_definitions().len(), 5);
         for forbidden in [
             "cairn_doctor",
             "cairn_repair",
