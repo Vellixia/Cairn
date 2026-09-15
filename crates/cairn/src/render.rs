@@ -539,7 +539,11 @@ pub fn search_result(r: &cairn_core::wire::MemoryResult) -> String {
         line.push_str(" · pinned");
     }
     line.push_str(&format!(
-        "\n    from {} session {} · {} evidence\n",
+        "\n    score: lexical {:.3} · vector {:.3} · relation {:.3} · recency {:.3}\n    from {} session {} · {} evidence\n",
+        r.rank.relevance,
+        r.rank.vector,
+        r.rank.relation,
+        r.rank.recency,
         r.provenance.agent.as_deref().unwrap_or("unknown"),
         r.provenance.session_id,
         r.provenance.evidence_count

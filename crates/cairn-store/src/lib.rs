@@ -29,6 +29,8 @@ pub mod search;
 /// for the server, with durable ordinals and an exact per-account claim.
 pub mod spool;
 pub mod traits;
+/// Versioned, file-backed V1 export/import manifests and retry-safe restore.
+pub mod transfer;
 pub mod tx;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};

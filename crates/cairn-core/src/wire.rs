@@ -1018,6 +1018,24 @@ pub enum Request {
         query: MemoryQuery,
     },
 
+    /// Capped relation view from authenticated server records. Read-only.
+    Graph {
+        cwd: String,
+        memory_id: Uuid,
+        #[serde(default)]
+        hops: Option<i64>,
+    },
+
+    /// Accepted safe-event metadata from authenticated server records only.
+    Replay {
+        cwd: String,
+    },
+
+    /// Read-only team-governance state. No MCP request can ratify or retire.
+    Governance {
+        cwd: String,
+    },
+
     // ---- Reusable cross-project patterns (`contracts/patterns.md`) --------
     //
     // A pattern is local to the machine and has no project identity, so none of
@@ -1087,6 +1105,17 @@ pub enum Request {
     /// Re-attempt every retained record, on demand.
     MigrateRetryRetained {
         cwd: String,
+    },
+    /// Write a portable V1 manifest and its checkpointed SQLite snapshot.
+    MigrateExport {
+        cwd: String,
+        manifest_path: String,
+    },
+    /// Resume a V1 import from its manifest. Existing stable identities are
+    /// retained, so rerunning after interruption is safe.
+    MigrateImport {
+        cwd: String,
+        manifest_path: String,
     },
     /// Propose a promotion. Runs the ten-check gate; `dry_run` reports the
     /// outcome without writing (FR-395).
@@ -1661,7 +1690,19 @@ pub struct Provenance {
 pub struct RankInfo {
     pub scope_bucket: i64,
     pub relevance: f64,
+    /// Reserved explainable component. No vector backend exists yet, so every
+    /// result reports the stable neutral value rather than implying a score.
+    #[serde(default)]
+    pub vector: f64,
+    /// Relation expansion is not used by lexical search; normal results carry
+    /// its neutral component so score explanations stay complete.
+    #[serde(default)]
+    pub relation: f64,
     pub age_days: i64,
+    /// Deterministic tie-break contribution. Ranking aid only: never truth,
+    /// verification, ownership, evidence, or lifecycle state.
+    #[serde(default)]
+    pub recency: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

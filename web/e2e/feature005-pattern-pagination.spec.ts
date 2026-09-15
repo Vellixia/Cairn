@@ -159,7 +159,7 @@ test("the pattern panel shows one bounded page and reaches the rest through Show
   page,
 }) => {
   await signInAs(page, fx.owner);
-  await page.goto(`/projects/${fx.projectId}/domains`);
+  await page.goto(`/projects/${fx.projectId}#domains`);
   await expect(page.getByTestId("domain-patterns")).toBeVisible();
 
   // 1. The initial view is bounded — one page, not the owner's whole corpus.
@@ -206,7 +206,7 @@ test("the pattern panel shows one bounded page and reaches the rest through Show
 
 test("paging never reaches another owner's patterns", async ({ page }) => {
   await signInAs(page, fx.owner);
-  await page.goto(`/projects/${fx.projectId}/domains`);
+  await page.goto(`/projects/${fx.projectId}#domains`);
   await expect(page.getByTestId("domain-patterns")).toBeVisible();
 
   const more = page.getByTestId("domain-patterns-more");

@@ -488,6 +488,16 @@ fn a_dropped_capture_exits_zero_and_is_still_counted_as_cairns_own_loss() {
         cairn_e2e::journal_exists(&s),
         "the hook did not record the capture it could not deliver"
     );
+    let journal = std::fs::read_to_string(s.cairn_home().join("capture-drops.ndjson"))
+        .expect("read capture-drop journal");
+    assert_eq!(
+        journal
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1,
+        "one failed hook wrote more than one capture-drop record: {journal}"
+    );
     s.restart_daemon();
     s.settle_within(
         "the daemon to count the capture-class event this machine dropped",

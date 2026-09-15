@@ -791,6 +791,12 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         Request::MigrateRun { cwd } => migrate_run(d, &cwd).await,
         Request::MigrateStatus { cwd } => migrate_status(d, &cwd).await,
         Request::MigrateRetryRetained { cwd } => migrate_retry_retained(d, &cwd).await,
+        Request::MigrateExport { cwd, manifest_path } => {
+            migrate_export(d, &cwd, &manifest_path).await
+        }
+        Request::MigrateImport { cwd, manifest_path } => {
+            migrate_import(d, &cwd, &manifest_path).await
+        }
         Request::PatternPromote {
             cwd,
             memory_id,
@@ -1089,6 +1095,21 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             session_id,
             query,
         } => memory_search(d, &cwd, agent_session_key, session_id, query).await,
+        Request::Graph {
+            cwd,
+            memory_id,
+            hops,
+        } => server_graph(d, &cwd, memory_id, hops).await,
+        Request::Replay { cwd } => server_replay(d, &cwd).await,
+        Request::Governance { cwd } => {
+            // Resolve caller's repository before a server-wide governance read;
+            // an arbitrary cwd must not become an authenticated control path.
+            d.resolve(&cwd).await?;
+            crate::sync::client(d)
+                .await?
+                .get("/api/team/knowledge?limit=50")
+                .await
+        }
 
         Request::PrivacyExclude { cwd, path, command } => {
             privacy(d, &cwd, path, command, true).await
@@ -3391,6 +3412,33 @@ fn resolve_scope(
     Ok((scope, key))
 }
 
+async fn server_graph(d: &Daemon, cwd: &str, memory_id: Uuid, hops: Option<i64>) -> Reply {
+    let resolved = d.resolve(cwd).await?;
+    let project_id = resolved
+        .project
+        .server_project_id
+        .ok_or_else(|| WireError::new(codes::NOT_LINKED, "project is not linked to a server"))?;
+    let hops = hops.unwrap_or(1).clamp(1, 2);
+    crate::sync::client(d)
+        .await?
+        .get(&format!(
+            "/api/projects/{project_id}/graph?memory_id={memory_id}&hops={hops}"
+        ))
+        .await
+}
+
+async fn server_replay(d: &Daemon, cwd: &str) -> Reply {
+    let resolved = d.resolve(cwd).await?;
+    let project_id = resolved
+        .project
+        .server_project_id
+        .ok_or_else(|| WireError::new(codes::NOT_LINKED, "project is not linked to a server"))?;
+    crate::sync::client(d)
+        .await?
+        .get(&format!("/api/projects/{project_id}/replay"))
+        .await
+}
+
 async fn memory_search(
     d: &Daemon,
     cwd: &str,
@@ -4317,6 +4365,48 @@ async fn migrate_retry_retained(d: &Daemon, cwd: &str) -> Reply {
     }))
 }
 
+/// V1 portable transfer. This does not replace the Feature 005 authority
+/// cutover above; callers retain that path until the replacement is exercised
+/// end-to-end and its preservation checks are part of the release gate.
+async fn migrate_export(d: &Daemon, cwd: &str, manifest_path: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let manifest_path = std::path::PathBuf::from(manifest_path);
+    let snapshot = manifest_path.with_extension("sqlite");
+    let mut manifest = cairn_store::transfer::export_snapshot(&d.store, &snapshot)
+        .await
+        .map_err(store_failure)?;
+    // Export pair may move together. Keep payload resolution relative to the
+    // manifest instead of embedding a machine-specific absolute source path.
+    manifest.snapshot = snapshot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| WireError::invalid("migration snapshot needs a UTF-8 filename"))?
+        .to_string();
+    cairn_store::transfer::write_manifest(&manifest, &manifest_path).map_err(store_failure)?;
+    Ok(json!({
+        "ok": true,
+        "export": {
+            "manifest_path": manifest_path,
+            "snapshot_path": snapshot,
+            "manifest": manifest,
+        }
+    }))
+}
+
+async fn migrate_import(d: &Daemon, cwd: &str, manifest_path: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let manifest_path = std::path::PathBuf::from(manifest_path);
+    let manifest = cairn_store::transfer::read_manifest(&manifest_path).map_err(store_failure)?;
+    let base = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let snapshot = base.join(&manifest.snapshot);
+    let report = cairn_store::transfer::import_snapshot(&d.store, &manifest, &snapshot)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "import": report }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4337,6 +4427,60 @@ mod tests {
         let json = serde_json::to_value(&envelope).expect("serializable envelope");
         assert_eq!(json["ok"], false, "expected failure, got {json}");
         json["error"].clone()
+    }
+
+    #[tokio::test]
+    async fn v1_transfer_export_import_is_dispatchable_and_reports_retry_state() {
+        let repo = Repo::new().await;
+        let artifacts = tempfile::tempdir().expect("artifacts");
+        let manifest = artifacts.path().join("v1-manifest.json");
+        let manifest_path = manifest.display().to_string();
+
+        let exported = ok(
+            &repo,
+            Request::MigrateExport {
+                cwd: repo.cwd.clone(),
+                manifest_path: manifest_path.clone(),
+            },
+        )
+        .await;
+        assert_eq!(exported["export"]["manifest"]["version"], 1);
+        assert!(artifacts.path().join("v1-manifest.sqlite").is_file());
+
+        let first = ok(
+            &repo,
+            Request::MigrateImport {
+                cwd: repo.cwd.clone(),
+                manifest_path: manifest_path.clone(),
+            },
+        )
+        .await;
+        let second = ok(
+            &repo,
+            Request::MigrateImport {
+                cwd: repo.cwd.clone(),
+                manifest_path: manifest_path.clone(),
+            },
+        )
+        .await;
+        assert!(first["import"]["accepted"].is_u64());
+        assert_eq!(second["import"]["accepted"], 0);
+        assert!(second["import"]["retained"].is_u64());
+
+        let mut incompatible: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).expect("json");
+        incompatible["version"] = json!(999);
+        std::fs::write(&manifest, serde_json::to_vec(&incompatible).expect("json"))
+            .expect("write incompatible manifest");
+        let failure = err(
+            &repo,
+            Request::MigrateImport {
+                cwd: repo.cwd.clone(),
+                manifest_path,
+            },
+        )
+        .await;
+        assert_eq!(failure["code"], "unsupported_manifest");
     }
 
     /// The blocked-reason precedence is the stated one, at every level

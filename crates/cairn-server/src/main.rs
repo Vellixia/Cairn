@@ -16,6 +16,8 @@ mod retrieve;
 mod sync;
 mod verifysummary;
 mod version;
+#[cfg(test)]
+mod web_contract_tests;
 
 use axum::http::{header, Method};
 use axum::Router;

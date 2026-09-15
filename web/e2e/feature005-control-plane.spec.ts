@@ -1,5 +1,4 @@
 import { expect, test, type Page } from "@playwright/test";
-import { openNav } from "./nav";
 import {
   API,
   SESSION_COOKIE,
@@ -68,28 +67,16 @@ test.beforeEach(async ({ page }) => {
 // The path, walked
 // ---------------------------------------------------------------------------
 
-test("the whole lifecycle is reachable from the project page", async ({
-  page,
-}, testInfo) => {
+test("the whole lifecycle is reachable from the project page", async ({ page }) => {
   // 1. The funnel — the project's own summary of what it has been doing.
   await page.goto(`/projects/${fx.projectId}`);
   await expect(page.getByTestId("funnel")).toBeVisible();
   await expect(page.getByTestId("funnel-stage-sessions")).toBeVisible();
   await expect(page.getByTestId("funnel-count-sessions")).not.toHaveText("0");
 
-  // 2. Activity — the events that session produced, and the decision made about
-  //    them. Reached by navigation rather than by URL, because the claim is that
-  //    a person can *find* this.
-  await openNav(page, testInfo);
-  await page.getByTestId("nav-activity").click();
-  await expect(page.getByTestId("activity-list")).toBeVisible();
-
-  // The default set is declared, so the accepted decision may be behind the
-  // show-everything control rather than in the first page.
-  await page.getByTestId("activity-show-everything").click();
-  await expect(
-    page.getByTestId("activity-list").getByTestId("activity-family").first(),
-  ).toBeVisible();
+  // 2. Activity is a bounded Overview panel, reached by its stable anchor.
+  await page.goto(`/projects/${fx.projectId}#activity`);
+  await expect(page.getByTestId("overview-activity")).toBeVisible();
 
   // 3. The knowledge that decision produced, at its own page.
   await page.goto(`/projects/${fx.projectId}/memory/${fx.knowledgeId}`);
@@ -170,37 +157,42 @@ test("memory detail summarises its evidence and shows none of it", async ({
   await expect(page.locator("body")).not.toContainText(fx.evidenceCommand);
 });
 
-test("retrieval detail names what was selected and never the briefing", async ({
+test("overview summarises retrieval without rendering a briefing", async ({
   page,
 }) => {
-  await page.goto(`/projects/${fx.projectId}/retrievals/${fx.traceId}`);
+  await page.goto(`/projects/${fx.projectId}#retrieval`);
+  await expect(page.getByTestId("overview-retrieval")).toBeVisible();
+
+  // Detail is deliberately gone: overview reports bounded delivery state, not
+  // a reconstructed briefing or an alternate raw-history workflow.
+  await expect(page.getByTestId("trace-detail")).toHaveCount(0);
+});
+
+test("retrieval history keeps trace detail reachable beyond compact overview", async ({ page }) => {
+  await page.goto(`/projects/${fx.projectId}/retrievals`);
+  await expect(page.getByTestId("retrieval-history")).toBeVisible();
+  const trace = page.getByTestId("retrieval-history-row").filter({ hasText: "session_open" }).first();
+  await expect(trace).toBeVisible();
+  await trace.click();
   await expect(page.getByTestId("trace-detail")).toBeVisible();
-
-  // What it selected, what it cost, how far the pipeline got.
-  await expect(page.getByTestId("trace-item").first()).toBeVisible();
-  await expect(page.getByTestId("detail-delivery-state")).toBeVisible();
-  await expect(page.getByTestId("no-briefing-notice")).toBeVisible();
-
-  // The assembled text does not exist server-side and must not be reconstructed
-  // here. The selected item's own content is the thing a reconstruction would
-  // most naturally paste in, so that is what is asserted absent.
-  await expect(page.locator("body")).not.toContainText(fx.knowledgeContent);
 });
 
 // ---------------------------------------------------------------------------
 // Complete references (FR-708c, `data-model.md` §6.1)
 // ---------------------------------------------------------------------------
 
-test("a rendered reference carries both of its parts", async ({ page }) => {
+test("retrieval detail names selected references without a raw briefing", async ({ page }) => {
   await page.goto(`/projects/${fx.projectId}/retrievals/${fx.traceId}`);
   await expect(page.getByTestId("trace-detail")).toBeVisible();
-
+  await expect(page.getByTestId("trace-item").first()).toBeVisible();
+  await expect(page.getByTestId("detail-delivery-state")).toBeVisible();
+  await expect(page.getByTestId("no-briefing-notice")).toBeVisible();
   const reference = page.getByTestId("reference").first();
   await expect(reference).toBeVisible();
-  // Two domains can hold the same UUID, so an id alone does not name anything.
   await expect(reference.getByTestId("reference-kind")).toBeVisible();
   await expect(reference.getByTestId("reference-id")).toBeVisible();
   await expect(reference).toHaveAttribute("data-reference-key", fx.referenceKey);
+  await expect(page.locator("body")).not.toContainText(fx.knowledgeContent);
 });
 
 // ---------------------------------------------------------------------------
@@ -210,7 +202,7 @@ test("a rendered reference carries both of its parts", async ({ page }) => {
 test("the domains page keeps the four domains visibly apart", async ({
   page,
 }) => {
-  await page.goto(`/projects/${fx.projectId}/domains`);
+  await page.goto(`/projects/${fx.projectId}#domains`);
   for (const panel of [
     "domain-project",
     "domain-personal",
@@ -234,7 +226,7 @@ test("a project co-member sees the project and never the owner's personal domain
   // entitlement they already had. This is the sharpest privacy assertion in the
   // file: storing a pattern centrally is durability, not publication.
   await signInAs(page, fx.mate);
-  await page.goto(`/projects/${fx.projectId}/domains`);
+  await page.goto(`/projects/${fx.projectId}#domains`);
   await expect(page.getByTestId("domain-project")).toBeVisible();
 
   await expect(page.getByTestId("domain-personal-list")).not.toContainText(

@@ -452,12 +452,12 @@ pub struct CategoryDurability {
 /// module's tests is what holds the two in step: a table added by a future
 /// migration and forgotten here fails that test rather than quietly vanishing
 /// from the inventory.
-struct CategorySpec {
-    category: &'static str,
+pub(crate) struct CategorySpec {
+    pub(crate) category: &'static str,
     class: DurabilityClass,
     /// A statement returning exactly one integer column.
     count_sql: &'static str,
-    tables: &'static [&'static str],
+    pub(crate) tables: &'static [&'static str],
 }
 
 /// Every category of data this store holds, with the class each one is in.
@@ -479,7 +479,7 @@ struct CategorySpec {
 /// what makes "they stay local" a property of the schema rather than a promise
 /// (FR-503, FR-707). This table restates that classification; it does not form
 /// a second opinion about it.
-const CATEGORIES: &[CategorySpec] = &[
+pub(crate) const CATEGORIES: &[CategorySpec] = &[
     // -- Cache: the server owns these, and a refill writes them back ---------
     CategorySpec {
         // Project memory, which is the bulk of what a user would think they

@@ -319,7 +319,8 @@ fn the_trust_statement_lint_fails_when_the_statement_is_absent() {
 #[test]
 fn the_web_client_names_the_same_handoff_fields_the_rust_type_does() {
     let root = workspace_root();
-    let api = std::fs::read_to_string(root.join("web/lib/api.ts")).expect("web/lib/api.ts");
+    let api = std::fs::read_to_string(root.join("web/lib/generated/server-api-v1.ts"))
+        .expect("web/lib/generated/server-api-v1.ts");
 
     // The Rust type is the authority for the name.
     let domain =
@@ -346,7 +347,7 @@ fn the_web_client_names_the_same_handoff_fields_the_rust_type_does() {
         .split("tests_executed:")
         .nth(1)
         .and_then(|rest| rest.split(';').next())
-        .expect("web/lib/api.ts declares tests_executed");
+        .expect("generated web contract declares tests_executed");
     assert!(
         declared.contains("runner"),
         "the web client's `tests_executed` does not name `runner`: {declared}"

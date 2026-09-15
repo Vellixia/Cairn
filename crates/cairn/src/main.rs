@@ -15,6 +15,8 @@ mod update;
 
 use cairn_core::domain::*;
 use cairn_core::wire::*;
+#[cfg(test)]
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
@@ -22,7 +24,8 @@ use uuid::Uuid;
 #[command(
     name = "cairn",
     version,
-    about = "Persistent, project-aware memory for AI coding agents"
+    about = "Persistent, project-aware memory for AI coding agents",
+    after_help = "Start here:\n  cairn setup       Track this repository\n  cairn connect     Connect an agent\n  cairn status      Check project health\n  cairn context     Read bounded project context\n  cairn search TERM Search durable memory\n\nAdvanced operations stay grouped under memory, session, task, governance, integration, sync, and admin commands."
 )]
 struct Cli {
     /// Emit the stable JSON envelope instead of human output.
@@ -34,13 +37,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Register this repository as a Cairn project.
-    Init,
+    /// Set up this repository for Cairn. `init` remains an alias.
+    #[command(alias = "init", display_order = 1)]
+    Setup,
     /// Project, repository, sessions and daemon state.
+    #[command(display_order = 3)]
     Status,
     /// Detected agents and integration managers, with their level.
     Agents,
     /// Install or update an integration for this repository.
+    #[command(display_order = 2)]
     Connect {
         /// `claude-code` | `codex` | `opencode` | `generic-mcp`. Omit for
         /// guided onboarding across everything detected.
@@ -166,6 +172,7 @@ enum Command {
         action: HandoffAction,
     },
     /// Print the briefing a session would receive.
+    #[command(display_order = 4)]
     Context {
         #[arg(long, alias = "token-budget")]
         budget: Option<usize>,
@@ -186,6 +193,13 @@ enum Command {
         /// (FR-477). Absent means `standard`, today's full assembly.
         #[arg(long)]
         depth: Option<String>,
+    },
+    /// Search durable memory. Advanced filters remain under `memory search`.
+    #[command(display_order = 5)]
+    Search {
+        query: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
     },
     /// Capture exclusions.
     Privacy {
@@ -282,6 +296,10 @@ enum Command {
     /// procedure, and because `--inspect` and `--status` are the two a user
     /// runs repeatedly while deciding whether to run the third.
     Migrate {
+        /// Portable V1 transfer operations. Legacy flags below remain until
+        /// replacement preservation tests are release-gated.
+        #[command(subcommand)]
+        action: Option<MigrationTransferAction>,
         /// Count what the store holds and change nothing else.
         #[arg(long)]
         inspect: bool,
@@ -303,6 +321,16 @@ enum Command {
         #[arg(long)]
         retry_retained: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrationTransferAction {
+    /// Create PATH plus a checkpointed sibling SQLite backup.
+    Export { path: String },
+    /// Resume an idempotent import from PATH.
+    Import { path: String },
+    /// Show legacy authority-cutover progress and retained records.
+    Status,
 }
 
 /// The operations a developer runs rarely (`contracts/integration-cli.md`).
@@ -1102,7 +1130,7 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
     match &cli.command {
         Command::Hook { .. } | Command::Mcp => unreachable!("handled in main"),
 
-        Command::Init => {
+        Command::Setup => {
             let v = client::send(&Request::Init { cwd: cwd() }).await?;
             let name = v["project"]["name"].as_str().unwrap_or("project");
             Ok(Output::with(
@@ -1163,21 +1191,27 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         }
         Command::Pattern { action } => pattern(action).await,
         Command::Migrate {
+            action,
             inspect,
             claim_patterns,
             run,
             status,
             retry_retained,
-        } => {
-            migrate(
-                *inspect,
-                claim_patterns.as_deref(),
-                *run,
-                *status,
-                *retry_retained,
-            )
-            .await
-        }
+        } => match action {
+            Some(MigrationTransferAction::Export { path }) => migrate_export(path).await,
+            Some(MigrationTransferAction::Import { path }) => migrate_import(path).await,
+            Some(MigrationTransferAction::Status) => migrate(false, None, false, true, false).await,
+            None => {
+                migrate(
+                    *inspect,
+                    claim_patterns.as_deref(),
+                    *run,
+                    *status,
+                    *retry_retained,
+                )
+                .await
+            }
+        },
         Command::Repair {
             agent,
             dry_run,
@@ -1289,6 +1323,26 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             }
             text.push_str(&render::continuity_footer(&v));
             Ok(Output::with(v, text))
+        }
+
+        Command::Search { query, limit } => {
+            memory(&MemoryAction::Search {
+                query: query.clone(),
+                scope: None,
+                scope_key: None,
+                kind: None,
+                state: None,
+                limit: *limit,
+                topic_key: None,
+                as_of: None,
+                conflicted: false,
+                corroborated: false,
+                verification: None,
+                include_patterns: false,
+                authority: None,
+                session: None,
+            })
+            .await
         }
 
         Command::Privacy { action } => privacy(action).await,
@@ -2855,6 +2909,35 @@ async fn migrate(
     Ok(Output::with(v, text))
 }
 
+async fn migrate_export(path: &str) -> Result<Output, WireError> {
+    let v = client::send(&Request::MigrateExport {
+        cwd: cwd(),
+        manifest_path: path.into(),
+    })
+    .await?;
+    let text = format!(
+        "exported manifest: {}\nbackup: {}\n",
+        v["export"]["manifest_path"].as_str().unwrap_or(path),
+        v["export"]["snapshot_path"].as_str().unwrap_or("")
+    );
+    Ok(Output::with(v, text))
+}
+
+async fn migrate_import(path: &str) -> Result<Output, WireError> {
+    let v = client::send(&Request::MigrateImport {
+        cwd: cwd(),
+        manifest_path: path.into(),
+    })
+    .await?;
+    let text = format!(
+        "accepted {} · rejected {} · retained {}\n",
+        v["import"]["accepted"].as_u64().unwrap_or(0),
+        v["import"]["rejected"].as_u64().unwrap_or(0),
+        v["import"]["retained"].as_u64().unwrap_or(0),
+    );
+    Ok(Output::with(v, text))
+}
+
 /// `cairn pattern …` (`contracts/patterns.md` §Surfaces).
 async fn pattern(action: &PatternAction) -> Result<Output, WireError> {
     match action {
@@ -3200,4 +3283,45 @@ async fn update_command(check_only: bool) -> Result<Output, WireError> {
             .collect::<Vec<_>>(),
     });
     Ok(Output::with(value, text))
+}
+
+#[cfg(test)]
+mod compact_interface_tests {
+    use super::*;
+
+    #[test]
+    fn compact_discovery_lists_setup_and_search_as_primary_commands() {
+        let cli = Cli::try_parse_from(["cairn", "setup"]);
+        assert!(cli.is_ok(), "setup must replace init in default discovery");
+        let cli = Cli::try_parse_from(["cairn", "search", "release"]);
+        assert!(
+            cli.is_ok(),
+            "search must be reachable without memory nesting"
+        );
+
+        let help = Cli::command().render_help().to_string();
+        for command in ["setup", "connect", "status", "context", "search"] {
+            assert!(help.contains(command), "default help omits `{command}`");
+        }
+        assert!(help.contains("Advanced operations stay grouped"));
+    }
+
+    #[test]
+    fn migration_group_keeps_legacy_flags_and_accepts_portable_transfer_commands() {
+        assert!(Cli::try_parse_from(["cairn", "migrate", "--status"]).is_ok());
+        assert!(Cli::try_parse_from(["cairn", "migrate", "export", "backup.json"]).is_ok());
+        assert!(Cli::try_parse_from(["cairn", "migrate", "import", "backup.json"]).is_ok());
+    }
+
+    #[test]
+    fn default_help_matches_compact_discovery_golden() {
+        assert_eq!(
+            normalize_help(&Cli::command().render_help().to_string()),
+            normalize_help(include_str!("../tests/snapshots/default-help.txt")),
+        );
+    }
+
+    fn normalize_help(help: &str) -> String {
+        help.replace("\r\n", "\n")
+    }
 }
