@@ -83,7 +83,6 @@ async fn fixture() -> Fixture {
             branch: "main",
             commit_sha: None,
             worktree_path: "/fixture/capacity",
-            task_id: None,
             daemon_run_id: Uuid::now_v7(),
             // Unlinked: nothing here is about synchronization, and a linked
             // project would queue outbox work this test would then have to

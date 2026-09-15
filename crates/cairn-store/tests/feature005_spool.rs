@@ -70,7 +70,6 @@ async fn fixture() -> Fixture {
             branch: "main",
             commit_sha: None,
             worktree_path: "/tmp/spool",
-            task_id: None,
             daemon_run_id: Uuid::now_v7(),
             policy: SyncPolicy {
                 linked: false,

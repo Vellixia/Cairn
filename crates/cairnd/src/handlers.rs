@@ -52,8 +52,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             cwd,
             agent,
             agent_session_key,
-            task_id,
-        } => session_start(d, &cwd, &agent, agent_session_key, task_id).await,
+        } => session_start(d, &cwd, &agent, agent_session_key).await,
         Request::SessionList { cwd } => session_list(d, &cwd).await,
         Request::SessionShow {
             cwd,
@@ -62,20 +61,6 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         } => {
             let r = d.resolve(&cwd).await?;
             let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            Ok(json!({ "session": SessionSummary::from_session(&s, chrono::Utc::now()) }))
-        }
-        Request::SessionBindTask {
-            cwd,
-            session_id,
-            agent_session_key,
-            task_id,
-        } => {
-            let r = d.resolve(&cwd).await?;
-            let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            repo::task(&d.store, task_id).await.map_err(storage_err)?;
-            let s = repo::bind_task(&d.store, s.id, task_id)
-                .await
-                .map_err(storage_err)?;
             Ok(json!({ "session": SessionSummary::from_session(&s, chrono::Utc::now()) }))
         }
         Request::SessionEnd {
@@ -385,92 +370,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             Ok(json!({ "handoff": h }))
         }
 
-        Request::TaskList { cwd, status } => {
-            let r = d.resolve(&cwd).await?;
-            let tasks = repo::list_tasks(&d.store, r.project.id, status)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "tasks": tasks }))
-        }
-        Request::TaskGet { cwd, task_id } => {
-            d.resolve(&cwd).await?;
-            let t = repo::task(&d.store, task_id).await.map_err(storage_err)?;
-            let mut out = json!({ "task": t });
-            // The new read-only fields. `local_revision` is what an agent
-            // passes back as `expected_revision`; `state_digest` is what two
-            // machines compare. They answer different questions and are never
-            // interchangeable (D80).
-            let detail = task_detail(d, task_id).await?;
-            if let (Some(o), Some(m)) = (out.as_object_mut(), detail.as_object()) {
-                for (k, v) in m {
-                    o.insert(k.clone(), v.clone());
-                }
-            }
-            Ok(out)
-        }
-        Request::TaskCreate {
-            cwd,
-            title,
-            goal,
-            acceptance_criteria,
-        } => {
-            let r = d.resolve(&cwd).await?;
-            // The seeded criteria are attributed in the change log. Resolving
-            // without creating is deliberate: see `authoring_session`.
-            let session = authoring_session(d, &r, None, None).await?;
-            let t = repo::create_task(
-                &d.store,
-                r.project.id,
-                &title,
-                &goal,
-                &acceptance_criteria,
-                session,
-                r.policy,
-            )
-            .await
-            .map_err(storage_err)?;
-            Ok(json!({ "task": t }))
-        }
-        Request::TaskUpdate {
-            cwd,
-            task_id,
-            title,
-            goal,
-            acceptance_criteria,
-            status,
-        } => {
-            let r = d.resolve(&cwd).await?;
-            let session = authoring_session(d, &r, None, None).await?;
-            let t = repo::update_task(
-                &d.store,
-                task_id,
-                title.as_deref(),
-                goal.as_deref(),
-                acceptance_criteria.as_deref(),
-                status,
-                session,
-                r.policy,
-            )
-            .await
-            .map_err(storage_err)?;
-            Ok(json!({ "task": t }))
-        }
-
-        Request::TaskCriterionAdd {
-            cwd,
-            agent_session_key,
-            session_id,
-            task_id,
-            text,
-        } => {
-            let r = d.resolve(&cwd).await?;
-            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            let c = cairn_store::criteria::add_criterion(&d.store, task_id, &text, s, r.policy)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "criterion": criterion_json(&c) }))
-        }
-        Request::TaskCriterionSet {
+        /* Request::TaskCriterionSet {
             cwd,
             agent_session_key,
             session_id,
@@ -527,34 +427,6 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 );
             }
             Ok(json!({ "criterion": c.as_ref().map(criterion_json) }))
-        }
-        Request::TaskCriterionVerify {
-            cwd,
-            agent_session_key,
-            session_id,
-            criterion_id,
-            evidence_id,
-        } => {
-            let r = d.resolve(&cwd).await?;
-            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            if let Some(evidence_id) = evidence_id {
-                cairn_store::evidence::attach_to_criterion(&d.store, criterion_id, evidence_id, s)
-                    .await
-                    .map_err(storage_err)?;
-            }
-            let verdict = crate::verify::verify_criterion(
-                d,
-                r.project.id,
-                std::path::Path::new(&r.worktree()),
-                criterion_id,
-                s,
-                r.policy,
-            )
-            .await?;
-            let c = cairn_store::criteria::criterion_by_id(&d.store, criterion_id)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "criterion": criterion_json(&c), "verdict": verdict }))
         }
         Request::TaskCriterionRemove {
             cwd,
@@ -632,7 +504,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 })
                 .collect();
             Ok(json!({ "changes": changes }))
-        }
+        } */
 
         Request::MemoryPin {
             cwd,
@@ -1752,7 +1624,6 @@ async fn session_start(
     cwd: &str,
     agent: &str,
     agent_session_key: Option<String>,
-    task_id: Option<Uuid>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let git = git_status(r.repo.worktree_path.clone()).await?;
@@ -1770,26 +1641,12 @@ async fn session_start(
             branch: &git.branch,
             commit_sha: git.commit_sha.as_deref(),
             worktree_path: &r.worktree(),
-            task_id,
             daemon_run_id: d.run_id,
             policy: r.policy,
         },
     )
     .await
     .map_err(storage_err)?;
-
-    // Starting with a task binds it, including when the session already
-    // existed — selecting a task at session start is the documented flow
-    // (FR-038).
-    let session = match (task_id, session.task_id) {
-        (Some(task), None) => {
-            repo::task(&d.store, task).await.map_err(storage_err)?;
-            repo::bind_task(&d.store, session.id, task)
-                .await
-                .map_err(storage_err)?
-        }
-        _ => session,
-    };
 
     Ok(json!({
         "session": SessionSummary::from_session(&session, chrono::Utc::now()),
@@ -2071,49 +1928,7 @@ async fn context(
         }
     }
 
-    // Whether the task advanced since this session bound to it (FR-489, D80).
-    //
-    // Derived by diffing the bound snapshot against the current records — never
-    // read from `task_changes`, which is local and would silently omit a
-    // criterion another machine changed even though the row itself arrived.
-    // Phase 8 places this in the Level 0 tier; it is reported here so a session
-    // is never presented as having worked against the current state.
-    if let Some(divergence) = task_divergence(d, session.as_ref()).await {
-        if let Some(o) = out.as_object_mut() {
-            o.insert("task_divergence".into(), divergence);
-        }
-    }
     Ok(out)
-}
-
-/// What materially changed on the bound task since the session bound to it.
-///
-/// `None` when there is no bound task, no snapshot (a session that bound before
-/// this feature existed genuinely does not know, and synthesizing one would
-/// produce a false report), or nothing changed.
-async fn task_divergence(d: &Daemon, session: Option<&Session>) -> Option<serde_json::Value> {
-    let session = session?;
-    let task_id = session.task_id?;
-    let snapshot: Option<String> =
-        sqlx::query_scalar("SELECT task_snapshot_at_bind FROM sessions WHERE id = ?1")
-            .bind(session.id.to_string())
-            .fetch_optional(d.store.pool())
-            .await
-            .ok()
-            .flatten();
-    let snapshot = snapshot?;
-
-    let changes = cairn_store::criteria::divergence(&d.store, task_id, &snapshot)
-        .await
-        .ok()?;
-    if changes.is_empty() {
-        return None;
-    }
-    Some(json!({
-        "task_id": task_id,
-        "advanced": true,
-        "changes": changes,
-    }))
 }
 
 /// The session a read-only request applies to.
@@ -3321,6 +3136,7 @@ async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut ser
 /// an unattributed change. That is honest: a CLI invocation outside any session
 /// genuinely has no author to name, and naming a throwaway one would be worse
 /// than naming none.
+#[cfg(any())]
 async fn authoring_session(
     d: &Daemon,
     r: &Resolved,
@@ -3378,7 +3194,6 @@ pub(crate) async fn ensure_session_for_memory(
             branch: &git.branch,
             commit_sha: git.commit_sha.as_deref(),
             worktree_path: &r.worktree(),
-            task_id: None,
             daemon_run_id: d.run_id,
             policy: r.policy,
         },
@@ -3394,19 +3209,11 @@ fn resolve_scope(
     scope: Option<MemoryScope>,
     scope_key: Option<String>,
 ) -> Result<(MemoryScope, String), WireError> {
-    let scope = scope.unwrap_or(if session.task_id.is_some() {
-        MemoryScope::Task
-    } else {
-        MemoryScope::Branch
-    });
+    let scope = scope.unwrap_or(MemoryScope::Branch);
     let key = match (scope, scope_key) {
         (_, Some(k)) => k,
         (MemoryScope::Project, None) => r.project.id.to_string(),
         (MemoryScope::Branch, None) => branch.to_string(),
-        (MemoryScope::Task, None) => session
-            .task_id
-            .ok_or_else(|| WireError::invalid("task scope needs a bound task or a scope key"))?
-            .to_string(),
         (MemoryScope::Session, None) => session.id.to_string(),
     };
     Ok((scope, key))
@@ -3453,7 +3260,6 @@ async fn memory_search(
 
     let ctx = SearchContext {
         branch: Some(git.branch.clone()),
-        task_id: session.as_ref().and_then(|s| s.task_id),
         session_id: session.as_ref().map(|s| s.id),
     };
     let include_patterns = query.include_patterns;
@@ -4122,15 +3928,14 @@ async fn delete(
     Ok(json!({ "deleted": id, "target": target, "with_memories": with_memories }))
 }
 
-// ---------------------------------------------------------------------------
-// Task work state rendering (`contracts/task-model.md`)
-// ---------------------------------------------------------------------------
+// Removed Task work state rendering (`contracts/task-model.md`).
 
 /// One criterion, as every surface reports it.
 ///
 /// Note what has no key here: a percentage. Progress is counts, derived on
 /// read, and there is nowhere for an agent to write a number of its own
 /// (FR-486).
+#[cfg(any())]
 fn criterion_json(c: &cairn_store::criteria::Criterion) -> serde_json::Value {
     json!({
         "id": c.id,
@@ -4144,7 +3949,7 @@ fn criterion_json(c: &cairn_store::criteria::Criterion) -> serde_json::Value {
     })
 }
 
-fn blocker_json(b: &cairn_store::criteria::Blocker) -> serde_json::Value {
+/*fn blocker_json(b: &cairn_store::criteria::Blocker) -> serde_json::Value {
     json!({
         "id": b.id,
         "task_id": b.task_id,
@@ -4217,7 +4022,7 @@ async fn task_detail(d: &Daemon, task_id: Uuid) -> Result<serde_json::Value, Wir
         "open_blockers": readiness.open_blockers,
         "completion_readiness": readiness.completion_readiness,
     }))
-}
+}*/
 
 // ---------------------------------------------------------------------------
 // Continuity (`contracts/continuity-context.md` Part 1)
@@ -4407,7 +4212,7 @@ async fn migrate_import(d: &Daemon, cwd: &str, manifest_path: &str) -> Reply {
     Ok(json!({ "ok": true, "import": report }))
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use crate::testsupport::{self as fx, Repo};

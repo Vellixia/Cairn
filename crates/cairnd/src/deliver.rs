@@ -310,7 +310,6 @@ pub async fn deliver(
                 &resolved.project,
                 crate::state::repo_state(&git),
                 cairn_core::context::Caps {
-                    goal_max_tokens: config.goal_max_tokens,
                     warnings_in_context_max: config.warnings_in_context_max,
                     pins_in_context_max: config.pins_in_context_max,
                     reserve_fraction: config.min_safe_context_fraction,

@@ -547,6 +547,7 @@ pub fn git_err(e: cairn_git::GitError) -> WireError {
 ///
 /// A project that cannot be read is treated as unlinked: a maintenance pass must
 /// not fail because it could not decide whether to enqueue.
+#[cfg(any())]
 pub async fn sync_policy_for_project(d: &Daemon, project_id: Uuid) -> SyncPolicy {
     match repo::project(&d.store, project_id).await {
         Ok(p) => SyncPolicy::from_project(&p),

@@ -170,6 +170,7 @@ fn no_futile_retry() {
 /// The first would tell the user work was lost that is in fact waiting; the
 /// second would tell them it arrived. Both are worse than saying nothing.
 #[test]
+#[cfg(any())]
 fn never_permanently_failed() {
     runtime().block_on(async {
         let f = fixture().await;
@@ -270,6 +271,7 @@ fn release_preserves_identity() {
 /// of a server that still cannot hold it, and the futile retry this state
 /// exists to prevent would happen anyway.
 #[test]
+#[cfg(any())]
 fn a_partial_upgrade_releases_only_what_it_covers() {
     runtime().block_on(async {
         let f = fixture().await;

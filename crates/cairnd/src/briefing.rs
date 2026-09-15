@@ -58,20 +58,15 @@ pub fn unavailable(
         &ContextInputs {
             project,
             repository,
-            task: None,
             previous_handoff: None,
             decisions: &[],
             known_failures: &[],
-            task_memory: &[],
             branch_memory: &[],
             project_memory: &[],
             patterns: &[],
             has_history: true,
             degraded: false,
             level0: cairn_core::context::Level0 {
-                criteria: &[],
-                blockers: &[],
-                blocker_text: &[],
                 warnings: &[],
                 pins: &[],
                 previous_next_action: None,
@@ -163,11 +158,6 @@ pub async fn build(
     let git = crate::state::git_status(resolved.repo.worktree_path.clone()).await?;
     let repository = repo_state(&git);
 
-    let task = match session.and_then(|s| s.task_id) {
-        Some(id) => repo::task(store, id).await.ok(),
-        None => None,
-    };
-
     let previous_handoff = match session {
         Some(s) => repo::previous_handoff_for(store, s.id)
             .await
@@ -190,12 +180,6 @@ pub async fn build(
     // discarded. A budget spent on content that is about to be replaced is
     // spent, and the replacement costs its own amount on top.
     let local_durable = durable == Durable::Local;
-    let task_memory = match (local_durable, task.as_ref()) {
-        (true, Some(t)) => {
-            scope_memory(daemon, project.id, MemoryScope::Task, &t.id.to_string()).await?
-        }
-        _ => Vec::new(),
-    };
     let branch_memory = if local_durable {
         scope_memory(daemon, project.id, MemoryScope::Branch, &git.branch).await?
     } else {
@@ -219,22 +203,11 @@ pub async fn build(
     // (FR-031).
     let has_history = previous_handoff.is_some()
         || !local_durable
-        || !task_memory.is_empty()
         || !branch_memory.is_empty()
         || !project_memory.is_empty();
 
-    // ---- Level 0 -----------------------------------------------------------
-    //
-    // Read only what the bound task actually has. A project with no task reads
-    // nothing here and pays nothing, which is what keeps the no-regression
-    // property true on the daemon path as well as in the assembler (FR-442).
-    let (criteria, blockers, blocker_text) = match task.as_ref() {
-        Some(t) => level0_task_state(daemon, t.id).await,
-        None => (Vec::new(), Vec::new(), Vec::new()),
-    };
-
-    let warnings = level0_warnings(daemon, session, project.id, &git.branch, task.as_ref()).await;
-    let pins = level0_pins(daemon, project.id, &git.branch, task.as_ref()).await;
+    let warnings = level0_warnings(daemon, project.id, &git.branch).await;
+    let pins = level0_pins(daemon, project.id, &git.branch).await;
 
     let config = daemon.config.read().await.clone();
     // **Only a local build selects patterns locally** (FR-895a, the canonical
@@ -256,7 +229,6 @@ pub async fn build(
         Vec::new()
     };
     let caps = cairn_core::context::Caps {
-        goal_max_tokens: config.goal_max_tokens,
         warnings_in_context_max: config.warnings_in_context_max,
         pins_in_context_max: config.pins_in_context_max,
         reserve_fraction: config.min_safe_context_fraction,
@@ -282,9 +254,6 @@ pub async fn build(
     Ok(assemble(
         &ContextInputs {
             level0: cairn_core::context::Level0 {
-                criteria: &criteria,
-                blockers: &blockers,
-                blocker_text: &blocker_text,
                 warnings: &warnings,
                 pins: &pins,
                 previous_next_action: None,
@@ -301,11 +270,9 @@ pub async fn build(
             team_guidance: &team_guidance,
             project,
             repository,
-            task: task.as_ref(),
             previous_handoff: previous_handoff.as_ref(),
             decisions: &decisions,
             known_failures: &known_failures,
-            task_memory: &task_memory,
             branch_memory: &branch_memory,
             project_memory: &project_memory,
             patterns: &patterns,
@@ -553,66 +520,16 @@ fn store_err(e: cairn_store::StoreError) -> WireError {
 // Level 0 inputs (`contracts/continuity-context.md` Part 2)
 // ---------------------------------------------------------------------------
 
-/// The bound task's criteria and blockers, as the assembler's plain data.
-async fn level0_task_state(
-    daemon: &Daemon,
-    task_id: Uuid,
-) -> (
-    Vec<cairn_core::tasks::CriterionFacts>,
-    Vec<cairn_core::tasks::BlockerFacts>,
-    Vec<(Uuid, String)>,
-) {
-    let facts = match cairn_store::criteria::task_state_facts(&daemon.store, task_id).await {
-        Ok(f) => f,
-        // A briefing is never refused for a read that failed; it is reported
-        // degraded by the caller and the tier is simply absent (FR-046).
-        Err(_) => return (Vec::new(), Vec::new(), Vec::new()),
-    };
-    let text = cairn_store::criteria::blockers(&daemon.store, task_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|b| (b.id, b.description))
-        .collect();
-    (facts.criteria, facts.blockers, text)
-}
-
 /// The critical warnings in force.
 ///
 /// Warnings are Level 0 **content**, not diagnostics: they are here whether or
 /// not `explain` was requested (FR-464).
 async fn level0_warnings(
     daemon: &Daemon,
-    session: Option<&Session>,
     project_id: Uuid,
     branch: &str,
-    task: Option<&Task>,
 ) -> Vec<cairn_core::wire::ContextWarning> {
     let mut out = Vec::new();
-
-    // A task that advanced under a session that bound at an earlier state.
-    if let (Some(s), Some(t)) = (session, task) {
-        let snapshot: Option<String> =
-            sqlx::query_scalar("SELECT task_snapshot_at_bind FROM sessions WHERE id = ?1")
-                .bind(s.id.to_string())
-                .fetch_optional(daemon.store.pool())
-                .await
-                .ok()
-                .flatten();
-        if let Some(snapshot) = snapshot {
-            if let Ok(changes) =
-                cairn_store::criteria::divergence(&daemon.store, t.id, &snapshot).await
-            {
-                for c in changes.iter().take(4) {
-                    out.push(cairn_core::wire::ContextWarning {
-                        kind: "task_divergence".into(),
-                        subject: c.subject.clone(),
-                        detail: format!("{} ({})", c.what, c.origin),
-                    });
-                }
-            }
-        }
-    }
 
     // Conflicted subjects — the project holds competing answers and has not
     // decided between them. US3's headline behaviour: a conflict an agent is
@@ -621,7 +538,6 @@ async fn level0_warnings(
         &daemon.store,
         project_id,
         branch,
-        task.map(|t| t.id),
         4,
     )
     .await
@@ -662,9 +578,8 @@ async fn level0_pins(
     daemon: &Daemon,
     project_id: Uuid,
     branch: &str,
-    task: Option<&Task>,
 ) -> Vec<cairn_core::wire::PinnedConstraint> {
-    repo::applicable_pins(&daemon.store, project_id, branch, task.map(|t| t.id))
+    repo::applicable_pins(&daemon.store, project_id, branch)
         .await
         .unwrap_or_default()
 }
@@ -904,7 +819,7 @@ mod tests {
         )
         .await;
 
-        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        let warnings = level0_warnings(&d, p.id, "main").await;
         let conflict = warnings
             .iter()
             .find(|w| w.kind == "conflict")
@@ -935,7 +850,7 @@ mod tests {
         )
         .await;
 
-        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        let warnings = level0_warnings(&d, p.id, "main").await;
         assert!(
             !warnings.iter().any(|w| w.kind == "conflict"),
             "an agreed subject was reported as a conflict: {warnings:?}"
@@ -971,7 +886,7 @@ mod tests {
         .await
         .expect("mark");
 
-        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        let warnings = level0_warnings(&d, p.id, "main").await;
         assert!(
             warnings.iter().any(|w| w.kind == "drift"),
             "no drift warning without a bound task: {warnings:?}"

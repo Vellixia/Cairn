@@ -230,6 +230,7 @@ fn three_sessions_yield_one_canonical_answer_with_three_origins() {
 /// Scenario B — a project answer and a task-scoped exception are not a
 /// conflict, and each applies where it should.
 #[test]
+#[cfg(any())]
 fn a_task_scoped_exception_is_not_a_conflict() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {

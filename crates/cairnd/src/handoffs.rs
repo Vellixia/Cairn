@@ -55,10 +55,6 @@ async fn generate_inner(
     let decision_memories = repo::decision_memories_for_session(store, session.id)
         .await
         .map_err(storage_err)?;
-    let task = match session.task_id {
-        Some(id) => repo::task(store, id).await.ok(),
-        None => None,
-    };
 
     // A worktree that has since disappeared must not stop a handoff being
     // written — the recorded observations are the substance (FR-009).
@@ -78,7 +74,6 @@ async fn generate_inner(
     let handoff = synthesize(
         &HandoffInputs {
             session,
-            task: task.as_ref(),
             observations: &observations,
             decision_memories: &decision_memories,
             repository_state,

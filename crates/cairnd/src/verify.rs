@@ -15,7 +15,7 @@
 use crate::state::Daemon;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::{
-    CriterionVerification, EvidenceCollector, VerificationAuthority, VerifierKind, VerifyResult,
+    EvidenceCollector, VerifierKind, VerifyResult,
     VerifyTrigger,
 };
 use cairn_core::verify::{fingerprint, Observed};
@@ -415,7 +415,6 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
     // indefinitely after the evidence it rests on moved, which is the one thing
     // readiness must never do (`contracts/task-model.md` §Completion readiness).
     if !report.yielded {
-        recheck_criteria(d, project_id, worktree, &config, &mut report, started).await;
     }
     report
 }
@@ -505,6 +504,7 @@ async fn report_to_server(
 /// Bounded by what the memory pass left of `verify_pass_runs_max` and
 /// `verify_pass_wall_ms`, and attributed to no session: a background pass is
 /// Cairn's own act, not any agent's.
+#[cfg(any())]
 async fn recheck_criteria(
     d: &Daemon,
     project_id: Uuid,
@@ -1065,6 +1065,7 @@ mod tests {
 
 /// What a criterion's verification attempt established.
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg(any())]
 pub struct CriterionVerdict {
     pub criterion_id: Uuid,
     pub verification: CriterionVerification,
@@ -1090,6 +1091,7 @@ pub struct CriterionVerdict {
 /// incentive attached: if an agent could attest its way to `verified`, readiness
 /// would become self-certification. The path stays open because Cairn collects
 /// test and command outcomes itself through Feature 001's hooks.
+#[cfg(any())]
 pub async fn verify_criterion(
     d: &Daemon,
     project_id: Uuid,
@@ -1235,6 +1237,7 @@ pub async fn verify_criterion(
 ///
 /// A no-op write would still advance `local_revision` and log a change, which
 /// would make a background pass look like an edit.
+#[cfg(any())]
 async fn set_criterion_verification_if_changed(
     d: &Daemon,
     criterion_id: Uuid,

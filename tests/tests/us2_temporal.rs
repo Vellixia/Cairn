@@ -38,7 +38,6 @@ fn query() -> MemoryQuery {
 fn ctx() -> SearchContext {
     SearchContext {
         branch: None,
-        task_id: None,
         session_id: None,
     }
 }

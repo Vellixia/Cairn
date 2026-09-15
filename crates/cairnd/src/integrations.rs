@@ -159,7 +159,6 @@ async fn dispatch(
                     cwd: cwd.clone(),
                     agent: event.agent.clone(),
                     agent_session_key: key.clone(),
-                    task_id: None,
                 },
             )
             .await?;

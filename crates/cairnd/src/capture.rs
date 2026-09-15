@@ -127,7 +127,6 @@ mod tests {
                 branch: "main",
                 commit_sha: None,
                 worktree_path: "/tmp/c",
-                task_id: None,
                 daemon_run_id: new_id(),
                 policy: LOCAL,
             },

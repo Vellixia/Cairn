@@ -134,30 +134,8 @@ pub async fn write(
         .unwrap_or_else(|| session.branch.clone());
     let commit = git.as_ref().and_then(|g| g.commit_sha.clone());
 
-    // The task state a checkpoint assumes is the derived digest, never a
-    // counter: it means the same thing on any machine (D80).
-    let (task_state_digest, criteria, blockers) = match session.task_id {
-        Some(task_id) => {
-            let digest = cairn_store::criteria::state_digest(&d.store, task_id)
-                .await
-                .ok();
-            let facts = cairn_store::criteria::task_state_facts(&d.store, task_id)
-                .await
-                .ok();
-            (
-                digest,
-                facts
-                    .as_ref()
-                    .map(|f| f.criteria.clone())
-                    .unwrap_or_default(),
-                facts.map(|f| f.blockers).unwrap_or_default(),
-            )
-        }
-        None => (None, Vec::new(), Vec::new()),
-    };
-
     let pinned: Vec<Uuid> =
-        cairn_store::repo::applicable_pins(&d.store, session.project_id, &branch, session.task_id)
+        cairn_store::repo::applicable_pins(&d.store, session.project_id, &branch)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -167,8 +145,6 @@ pub async fn write(
     let assumed = Assumptions {
         branch,
         commit,
-        task_id: session.task_id,
-        task_state_digest,
         path_fingerprints: capture_fingerprints(d, session.id, worktree).await,
     };
 
@@ -180,8 +156,6 @@ pub async fn write(
             handoff_id,
             trigger,
             assumed: &assumed,
-            criteria_snapshot: &criteria,
-            open_blockers: &blockers,
             pinned_constraints: &pinned,
             next_action,
         },
@@ -216,24 +190,13 @@ pub async fn restore(
     let git = cairn_git::status(worktree).ok();
     let worktree_exists = worktree.exists();
 
-    let task_exists = match checkpoint.assumed.task_id {
-        Some(id) => cairn_store::repo::task(&d.store, id).await.is_ok(),
-        None => true,
-    };
-    let task_state_digest = match checkpoint.assumed.task_id {
-        Some(id) if task_exists => cairn_store::criteria::state_digest(&d.store, id).await.ok(),
-        _ => None,
-    };
-
     let current = CurrentState {
         branch: git
             .as_ref()
             .map(|g| g.branch.clone())
             .unwrap_or_else(|| checkpoint.assumed.branch.clone()),
         commit: git.as_ref().and_then(|g| g.commit_sha.clone()),
-        task_exists,
         worktree_exists,
-        task_state_digest,
         path_fingerprints: recompute_fingerprints(d, checkpoint, worktree).await,
     };
 

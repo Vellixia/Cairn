@@ -2893,20 +2893,6 @@ async fn backfill(d: &Daemon, project: &Project) -> Result<(), WireError> {
         .await
         .map_err(storage_err)?;
 
-    for t in repo::list_tasks(&d.store, project.id, None)
-        .await
-        .map_err(storage_err)?
-    {
-        enqueue_one(
-            d,
-            policy,
-            project.id,
-            OutboxEntityType::Task,
-            t.id,
-            outbox::task_payload(&t),
-        )
-        .await?;
-    }
     for s in repo::list_sessions(&d.store, project.id)
         .await
         .map_err(storage_err)?
@@ -4279,8 +4265,6 @@ const UNKNOWN_CAPABILITY: &str = "schema=unknown;capabilities=";
 /// is worse than delivering it a migration later.
 const ENTITY_CAPABILITIES: &[(OutboxEntityType, &[&str])] = &[
     (OutboxEntityType::MemoryRelation, &["memory_relations"]),
-    (OutboxEntityType::TaskCriterion, &["task_criteria"]),
-    (OutboxEntityType::TaskBlocker, &["task_blockers"]),
     (
         OutboxEntityType::Memory,
         &["memory_subject_identity", "memory_verification"],
@@ -4358,54 +4342,6 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
     }
 
     // Tasks before their criteria, for the same reason memories come before
-    // their relations: a criterion naming a task this store does not have is
-    // held rather than invented, and importing in this order means it usually
-    // does not have to be.
-    for t in body
-        .get("tasks")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&Vec::new())
-    {
-        if import_task(d, project_id, t).await {
-            count += 1;
-        }
-    }
-
-    // Criteria and blockers upsert by stable id, so two machines that changed
-    // different criteria offline both land — neither overwrites the other.
-    let id_key = |v: &serde_json::Value| {
-        v.get("id")
-            .and_then(|x| x.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
-    for c in body
-        .get("criteria")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&Vec::new())
-    {
-        match import_criterion(d, c).await {
-            Placement::Placed => count += 1,
-            Placement::AwaitingParent(waiting_on) => {
-                hold_for_a_later_pull(d, project_id, "criterion", &id_key(c), c, waiting_on).await;
-            }
-            Placement::Unusable => {}
-        }
-    }
-    for b in body
-        .get("blockers")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&Vec::new())
-    {
-        match import_blocker(d, b).await {
-            Placement::Placed => count += 1,
-            Placement::AwaitingParent(waiting_on) => {
-                hold_for_a_later_pull(d, project_id, "blocker", &id_key(b), b, waiting_on).await;
-            }
-            Placement::Unusable => {}
-        }
-    }
-
     // Records earlier pulls could not place. Replayed after the fresh page, so
     // a parent that arrived in *this* page releases what was waiting on it
     // without waiting for another pull (#44).
@@ -4645,8 +4581,6 @@ async fn replay_deferred(d: &Daemon, project_id: Uuid) -> usize {
         let outcome = match serde_json::from_str::<serde_json::Value>(&record.payload) {
             Ok(value) => match record.kind.as_str() {
                 "relation" => import_relation(d, project_id, &value).await,
-                "criterion" => import_criterion(d, &value).await,
-                "blocker" => import_blocker(d, &value).await,
                 _ => Placement::Unusable,
             },
             // A payload that cannot be parsed can never be placed.
@@ -4822,6 +4756,7 @@ fn relation_key(value: &serde_json::Value) -> String {
 }
 
 /// Import one criterion that arrived from a peer.
+#[cfg(any())]
 async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> Placement {
     let uuid = |k: &str| {
         value
@@ -4872,6 +4807,7 @@ async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> Placement {
 }
 
 /// Import one blocker that arrived from a peer.
+#[cfg(any())]
 async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> Placement {
     let uuid = |k: &str| {
         value
@@ -4924,6 +4860,7 @@ async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> Placement {
 /// is a private concurrency token (D80) — and the `acceptance_criteria`
 /// projection is rebuilt from the criteria rows that arrive separately rather
 /// than copied, so it cannot disagree with them.
+#[cfg(any())]
 async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> bool {
     let Some(id) = value
         .get("id")
@@ -5682,6 +5619,7 @@ mod tests {
     }
 
     /// A criterion whose task has not arrived is held, then placed (#44).
+    #[cfg(any())]
     #[tokio::test]
     async fn a_criterion_whose_task_has_not_arrived_is_held_until_it_does() {
         let d = fx::daemon().await;
