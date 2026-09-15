@@ -311,29 +311,6 @@ pub async fn attach_to_memory(
     Ok(out.rows_affected() > 0)
 }
 
-/// Attach a fact to a task criterion.
-pub async fn attach_to_criterion(
-    store: &Store,
-    criterion_id: Uuid,
-    evidence_id: Uuid,
-    session: Uuid,
-) -> Result<bool> {
-    let mut t = tx::begin(store, "attach_criterion_evidence").await?;
-    let out = sqlx::query(
-        "INSERT OR IGNORE INTO criterion_evidence
-            (criterion_id, evidence_id, attached_at, attached_by_session)
-         VALUES (?1, ?2, ?3, ?4)",
-    )
-    .bind(criterion_id.to_string())
-    .bind(evidence_id.to_string())
-    .bind(rows::now_text())
-    .bind(session.to_string())
-    .execute(&mut *t)
-    .await?;
-    tx::commit(t, "attach_criterion_evidence").await?;
-    Ok(out.rows_affected() > 0)
-}
-
 /// Every fact linked to a memory, with its role and whether it is deleted.
 pub async fn facts_for_memory(
     store: &Store,
@@ -356,20 +333,6 @@ pub async fn facts_for_memory(
             Ok((role, fact_from_row(r)?))
         })
         .collect()
-}
-
-/// Every fact linked to a criterion.
-pub async fn facts_for_criterion(store: &Store, criterion_id: Uuid) -> Result<Vec<EvidenceFact>> {
-    let rows = sqlx::query(
-        "SELECT f.* FROM criterion_evidence l
-           JOIN evidence_facts f ON f.id = l.evidence_id
-          WHERE l.criterion_id = ?1
-          ORDER BY f.id",
-    )
-    .bind(criterion_id.to_string())
-    .fetch_all(store.pool())
-    .await?;
-    rows.iter().map(fact_from_row).collect()
 }
 
 // ---------------------------------------------------------------------------

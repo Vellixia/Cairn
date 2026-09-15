@@ -516,8 +516,6 @@ pub enum Request {
         agent: String,
         #[serde(default)]
         agent_session_key: Option<String>,
-        #[serde(default)]
-        task_id: Option<Uuid>,
     },
     SessionList {
         cwd: String,
@@ -528,14 +526,6 @@ pub enum Request {
         session_id: Option<Uuid>,
         #[serde(default)]
         agent_session_key: Option<String>,
-    },
-    SessionBindTask {
-        cwd: String,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        task_id: Uuid,
     },
     SessionEnd {
         cwd: String,
@@ -809,115 +799,6 @@ pub enum Request {
         #[serde(default)]
         agent_session_key: Option<String>,
         note: String,
-    },
-
-    TaskList {
-        cwd: String,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-    },
-    TaskGet {
-        cwd: String,
-        task_id: Uuid,
-    },
-    TaskCreate {
-        cwd: String,
-        title: String,
-        goal: String,
-        #[serde(default)]
-        acceptance_criteria: Vec<String>,
-    },
-    TaskUpdate {
-        cwd: String,
-        task_id: Uuid,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        goal: Option<String>,
-        #[serde(default)]
-        acceptance_criteria: Option<Vec<String>>,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-    },
-
-    // -----------------------------------------------------------------------
-    // Feature 003 task work state (`contracts/task-model.md`).
-    //
-    // Note what is absent from every one of these: any field in which a caller
-    // could store a completion percentage, and any sprint, epic, point,
-    // assignee, estimate, board or inter-task dependency (FR-486, FR-491).
-    // -----------------------------------------------------------------------
-    TaskCriterionAdd {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        task_id: Uuid,
-        text: String,
-    },
-    TaskCriterionSet {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-        #[serde(default)]
-        state: Option<CriterionState>,
-        #[serde(default)]
-        text: Option<String>,
-        /// What the caller read. Supplying it is how a caller is protected;
-        /// omitting it applies the write and records `blind_write` (FR-490).
-        #[serde(default)]
-        expected_revision: Option<i64>,
-    },
-    /// Ask Cairn to verify a criterion from its evidence. There is no field in
-    /// which a caller can *assert* a verification — that is the whole point.
-    TaskCriterionVerify {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-        #[serde(default)]
-        evidence_id: Option<Uuid>,
-    },
-    TaskCriterionRemove {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-    },
-    TaskBlockerOpen {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        task_id: Uuid,
-        description: String,
-    },
-    TaskBlockerClear {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        blocker_id: Uuid,
-    },
-    TaskReadiness {
-        cwd: String,
-        task_id: Uuid,
-    },
-    TaskHistory {
-        cwd: String,
-        task_id: Uuid,
-        #[serde(default)]
-        limit: Option<i64>,
     },
 
     MemoryPin {
@@ -1638,7 +1519,6 @@ pub struct SessionSummary {
     pub agent: String,
     pub branch: String,
     pub commit: Option<String>,
-    pub task_id: Option<Uuid>,
     pub previous_session_id: Option<Uuid>,
     pub worktree_path: String,
     pub started_at: DateTime<Utc>,
@@ -1656,7 +1536,6 @@ impl SessionSummary {
             agent: s.agent.clone(),
             branch: s.branch.clone(),
             commit: s.commit_sha.clone(),
-            task_id: s.task_id,
             previous_session_id: s.previous_session_id,
             worktree_path: s.worktree_path.clone(),
             started_at: s.started_at,
@@ -1941,8 +1820,6 @@ pub struct Briefing {
     pub project: ProjectSummary,
     pub repository: RepositoryState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub task: Option<BriefingTask>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_handoff: Option<BriefingHandoff>,
     pub decisions: Vec<String>,
     pub known_failures: Vec<String>,
@@ -2020,45 +1897,6 @@ pub struct BriefingPattern {
     /// ran. The local matcher, which does compare, still reports its number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_overlap: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BriefingTask {
-    pub id: Uuid,
-    pub title: String,
-    pub goal: String,
-    pub acceptance_criteria: Vec<String>,
-    pub status: TaskStatus,
-    // ---- Feature 003 Tier 0a. Every one is O(1) in the size of the task, which
-    // is what makes the tier's guarantee keepable (FR-443).
-    /// Counts by state. Never a percentage — there is no field for one (FR-486).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<crate::tasks::Progress>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_readiness: Option<CompletionReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_blockers: Option<usize>,
-    /// The single most actionable open blocker, summarized to one line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocker: Option<String>,
-    /// True when the goal was truncated to `goal_max_tokens`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub goal_truncated: bool,
-    /// Criterion labels admitted as Tier 0b detail, in action order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub criteria: Vec<BriefingCriterion>,
-    /// How many criteria did not fit, with the path that retrieves them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub criteria_omitted: Option<usize>,
-}
-
-/// One criterion as Level 0 renders it — both axes named, never collapsed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BriefingCriterion {
-    pub label: String,
-    pub text: String,
-    pub state: CriterionState,
-    pub verification: CriterionVerification,
 }
 
 /// A Level 0 warning. Content, not diagnostics: present whether or not

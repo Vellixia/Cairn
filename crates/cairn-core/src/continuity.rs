@@ -17,7 +17,6 @@
 
 use crate::domain::{CheckpointState, DivergenceKind, FingerprintClass, PathOutcome};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// What one relevant path looked like.
 ///
@@ -124,12 +123,6 @@ pub struct Assumptions {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<Uuid>,
-    /// The derived cross-device task state identity at that instant — not a
-    /// counter, so it means the same thing on any machine (D80).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state_digest: Option<String>,
     /// At most 32 repository-relative paths, each with one bounded fingerprint.
     #[serde(default)]
     pub path_fingerprints: Vec<PathFingerprint>,
@@ -142,12 +135,8 @@ pub struct CurrentState {
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// False when the assumed task no longer exists.
-    pub task_exists: bool,
     /// False when the worktree the checkpoint was taken in no longer exists.
     pub worktree_exists: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state_digest: Option<String>,
     /// Recomputed for exactly the paths the checkpoint named, and no others.
     #[serde(default)]
     pub path_fingerprints: Vec<PathFingerprint>,
@@ -237,47 +226,6 @@ pub fn classify_checkpoint(
         });
     }
 
-    // A task divergence is decided by the derived digest, never by a counter:
-    // two machines can each advance a counter from 5 to 6 and mean entirely
-    // different things (D80).
-    //
-    // A digest that could not be computed is **unknown**, never "unchanged".
-    // Both sides come from a fallible store read, and requiring both to be
-    // present before comparing meant a transient failure at either end read as
-    // agreement: the checkpoint stayed `current`, and `next_action_is_live`
-    // then emitted its recorded action as the thing to do — against a task that
-    // may have moved underneath it. That is the failure FR-434 exists to
-    // prevent, and it is the same "I could not look" ≠ "nothing moved" rule the
-    // path axis already keeps with `NotFingerprintable`.
-    //
-    // Unknown therefore counts as a divergence. The cost of being wrong is one
-    // action labelled `previous` that did not need to be; the cost the other
-    // way is a stale instruction presented as live.
-    // The asymmetry is deliberate. A checkpoint that recorded **no** digest
-    // never knew the task's state — `task_snapshot_at_bind` is NULL for a
-    // session bound before the migration — and claiming a divergence there
-    // would be inventing one (migration.md §Step 4). A checkpoint that recorded
-    // one and cannot be compared against it *now* is the opposite case: we knew,
-    // we cannot check, and claiming agreement would be inventing that instead.
-    if assumed.task_id.is_some() && current.task_exists {
-        match (
-            assumed.task_state_digest.as_deref(),
-            current.task_state_digest.as_deref(),
-        ) {
-            (Some(recorded), Some(now)) if recorded != now => divergences.push(Divergence {
-                kind: DivergenceKind::Task,
-                recorded: recorded.to_string(),
-                current: now.to_string(),
-            }),
-            (Some(recorded), None) => divergences.push(Divergence {
-                kind: DivergenceKind::Task,
-                recorded: recorded.to_string(),
-                current: "unavailable".to_string(),
-            }),
-            _ => {}
-        }
-    }
-
     // Bounded to the paths the checkpoint already names. No globbing, no
     // directory walk, no repository scan (FR-471's discipline preserved).
     let mut paths = Vec::new();
@@ -324,8 +272,7 @@ pub fn classify_checkpoint(
         });
     }
 
-    let unresolvable =
-        !current.worktree_exists || (assumed.task_id.is_some() && !current.task_exists);
+    let unresolvable = !current.worktree_exists;
 
     let state = if unresolvable {
         CheckpointState::Unresolvable
@@ -350,8 +297,6 @@ mod tests {
         Assumptions {
             branch: "main".into(),
             commit: Some("abc123".into()),
-            task_id: Some(Uuid::from_u128(1)),
-            task_state_digest: Some("d0".into()),
             path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "aaa")],
         }
     }
@@ -360,9 +305,7 @@ mod tests {
         CurrentState {
             branch: "main".into(),
             commit: Some("abc123".into()),
-            task_exists: true,
             worktree_exists: true,
-            task_state_digest: Some("d0".into()),
             path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "aaa")],
         }
     }
@@ -388,10 +331,6 @@ mod tests {
         commit.commit = Some("def456".into());
         assert!(classify_checkpoint(&assumed(), &commit).has(DivergenceKind::Commit));
 
-        let mut task = current();
-        task.task_state_digest = Some("d1".into());
-        assert!(classify_checkpoint(&assumed(), &task).has(DivergenceKind::Task));
-
         let mut files = current();
         files.path_fingerprints = vec![PathFingerprint::digest("src/config.rs", "bbb")];
         assert!(classify_checkpoint(&assumed(), &files).has(DivergenceKind::Files));
@@ -402,14 +341,12 @@ mod tests {
         let mut c = current();
         c.branch = "feature/x".into();
         c.commit = Some("def456".into());
-        c.task_state_digest = Some("d1".into());
         c.path_fingerprints = vec![PathFingerprint::digest("src/config.rs", "bbb")];
         let result = classify_checkpoint(&assumed(), &c);
-        assert_eq!(result.divergences.len(), 4);
+        assert_eq!(result.divergences.len(), 3);
         for kind in [
             DivergenceKind::Branch,
             DivergenceKind::Commit,
-            DivergenceKind::Task,
             DivergenceKind::Files,
         ] {
             assert!(result.has(kind), "{kind} missing");
@@ -423,7 +360,6 @@ mod tests {
         for mutate in [
             (|c: &mut CurrentState| c.branch = "other".into()) as fn(&mut CurrentState),
             |c: &mut CurrentState| c.commit = Some("def456".into()),
-            |c: &mut CurrentState| c.task_state_digest = Some("d1".into()),
             |c: &mut CurrentState| {
                 c.path_fingerprints = vec![PathFingerprint::digest("src/config.rs", "bbb")]
             },
@@ -524,20 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_task_is_unresolvable_and_still_reports_what_it_can() {
-        let mut cur = current();
-        cur.task_exists = false;
-        cur.commit = Some("def456".into());
-        let c = classify_checkpoint(&assumed(), &cur);
-        assert_eq!(c.state, CheckpointState::Unresolvable);
-        assert!(
-            c.has(DivergenceKind::Commit),
-            "the fields that do not depend on the missing state are still delivered"
-        );
-        assert!(!c.next_action_is_live());
-    }
-
-    #[test]
     fn a_missing_worktree_is_unresolvable() {
         let mut cur = current();
         cur.worktree_exists = false;
@@ -547,58 +469,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_checkpoint_with_no_task_never_reports_a_task_divergence() {
-        // Compaction with no bound task still carries repository state,
-        // decisions, failures and a next action (spec Edge Cases).
-        let mut a = assumed();
-        a.task_id = None;
-        a.task_state_digest = None;
-        let mut cur = current();
-        cur.task_exists = false;
-        cur.task_state_digest = Some("d1".into());
-        let c = classify_checkpoint(&a, &cur);
-        assert!(!c.has(DivergenceKind::Task));
-        assert_eq!(c.state, CheckpointState::Current);
-    }
-
-    /// A digest we recorded and cannot read back is unknown, not unchanged.
-    ///
-    /// Both sides come from a fallible store read. Requiring both to be present
-    /// before comparing meant a transient failure read as agreement: the
-    /// checkpoint stayed `current`, and `next_action_is_live` then handed the
-    /// agent its recorded action as the thing to do — against a task that may
-    /// have moved. The path axis already keeps this rule with
-    /// `NotFingerprintable`; the task axis did not.
-    #[test]
-    fn a_task_digest_that_cannot_be_read_is_not_agreement() {
-        let a = assumed();
-        assert!(a.task_state_digest.is_some(), "the checkpoint recorded one");
-        let mut cur = current();
-        cur.task_state_digest = None;
-
-        let c = classify_checkpoint(&a, &cur);
-        assert!(
-            c.has(DivergenceKind::Task),
-            "an unreadable digest was reported as no change: {c:?}"
-        );
-        assert!(
-            !c.next_action_is_live(),
-            "a recorded action was offered as live against a task nobody could check"
-        );
-    }
-
-    #[test]
-    fn a_session_bound_before_this_feature_reports_no_false_divergence() {
-        // `task_snapshot_at_bind` is NULL for a session that bound before the
-        // migration. Synthesizing one would produce a false divergence report,
-        // so the absence means unknown and nothing is claimed (migration.md
-        // §Step 4).
-        let mut a = assumed();
-        a.task_state_digest = None;
-        let mut cur = current();
-        cur.task_state_digest = Some("d1".into());
-        let c = classify_checkpoint(&a, &cur);
-        assert!(!c.has(DivergenceKind::Task));
-    }
 }

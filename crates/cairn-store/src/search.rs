@@ -20,7 +20,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Default)]
 pub struct SearchContext {
     pub branch: Option<String>,
-    pub task_id: Option<Uuid>,
     pub session_id: Option<Uuid>,
 }
 
@@ -39,7 +38,7 @@ pub async fn search(
 
     let mut sql = String::from(
         "SELECT m.*, \
-                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 \
+                CASE m.scope WHEN 'session' THEN 0 WHEN 'branch' THEN 1 \
                              WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket",
     );
     if q.query.is_some() {
@@ -87,13 +86,10 @@ pub async fn search(
             scope_clause.push_str(" AND m.scope_key = ?");
         }
         let _ = scope;
-    } else if ctx.branch.is_some() || ctx.task_id.is_some() || ctx.session_id.is_some() {
+    } else if ctx.branch.is_some() || ctx.session_id.is_some() {
         let mut parts = vec!["m.scope = 'project'".to_string()];
         if ctx.branch.is_some() {
             parts.push("(m.scope = 'branch' AND m.scope_key = ?)".into());
-        }
-        if ctx.task_id.is_some() {
-            parts.push("(m.scope = 'task' AND m.scope_key = ?)".into());
         }
         if ctx.session_id.is_some() {
             parts.push("(m.scope = 'session' AND m.scope_key = ?)".into());
@@ -151,9 +147,6 @@ pub async fn search(
     } else {
         if let Some(b) = &ctx.branch {
             query = query.bind(b.clone());
-        }
-        if let Some(t) = ctx.task_id {
-            query = query.bind(t.to_string());
         }
         if let Some(s) = ctx.session_id {
             query = query.bind(s.to_string());
@@ -823,23 +816,12 @@ mod tests {
         server_project_id: None,
     };
 
-    async fn fixture() -> (Store, Uuid, Uuid, Uuid) {
+    async fn fixture() -> (Store, Uuid, Uuid) {
         let store = Store::open_memory().await.unwrap();
         let user = ensure_local_user(&store).await.unwrap();
         let p = ensure_project(&store, "/tmp/x/.git", "x", None)
             .await
             .unwrap();
-        let t = create_task(
-            &store,
-            p.id,
-            "Rate limit",
-            "429 over limit",
-            &[],
-            new_id(),
-            LOCAL,
-        )
-        .await
-        .unwrap();
         let s = start_session(
             &store,
             StartSession {
@@ -850,14 +832,13 @@ mod tests {
                 branch: "main",
                 commit_sha: None,
                 worktree_path: "/tmp/x",
-                task_id: Some(t.id),
                 daemon_run_id: new_id(),
                 policy: LOCAL,
             },
         )
         .await
         .unwrap();
-        (store, p.id, t.id, s.id)
+        (store, p.id, s.id)
     }
 
     async fn add(
@@ -891,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn scope_precedence_beats_relevance() {
-        let (store, project, task, session) = fixture().await;
+        let (store, project, session) = fixture().await;
         // The project-scoped memory is the better lexical match on purpose.
         add(
             &store,
@@ -911,19 +892,8 @@ mod tests {
             "tests need a branch fixture",
         )
         .await;
-        add(
-            &store,
-            project,
-            session,
-            MemoryScope::Task,
-            &task.to_string(),
-            "tests here",
-        )
-        .await;
-
         let ctx = SearchContext {
             branch: Some("main".into()),
-            task_id: Some(task),
             session_id: Some(session),
         };
         let q = MemoryQuery {
@@ -932,15 +902,14 @@ mod tests {
         };
         let out = search(&store, project, &q, &ctx).await.unwrap();
 
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].scope, MemoryScope::Task, "task scope must lead");
-        assert_eq!(out[1].scope, MemoryScope::Branch);
-        assert_eq!(out[2].scope, MemoryScope::Project);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].scope, MemoryScope::Branch);
+        assert_eq!(out[1].scope, MemoryScope::Project);
     }
 
     #[tokio::test]
     async fn only_active_memories_are_returned_by_default() {
-        let (store, project, _task, session) = fixture().await;
+        let (store, project, session) = fixture().await;
         let m = add(
             &store,
             project,
@@ -996,7 +965,7 @@ mod tests {
     #[tokio::test]
     async fn provenance_is_present_with_zero_evidence() {
         // Manual MCP mode records memory with no observations (FR-019).
-        let (store, project, _task, session) = fixture().await;
+        let (store, project, session) = fixture().await;
         add(
             &store,
             project,
@@ -1020,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn filters_apply_without_a_text_query() {
-        let (store, project, _task, session) = fixture().await;
+        let (store, project, session) = fixture().await;
         add(
             &store,
             project,
@@ -1063,7 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn punctuation_in_a_query_does_not_break_fts() {
-        let (store, project, _task, session) = fixture().await;
+        let (store, project, session) = fixture().await;
         add(
             &store,
             project,

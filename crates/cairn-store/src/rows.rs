@@ -105,25 +105,10 @@ pub fn project(row: &SqliteRow) -> Result<Project> {
     })
 }
 
-pub fn task(row: &SqliteRow) -> Result<Task> {
-    Ok(Task {
-        id: uuid(row, "id")?,
-        project_id: uuid(row, "project_id")?,
-        title: row.try_get("title")?,
-        goal: row.try_get("goal")?,
-        acceptance_criteria: json_field(row, "acceptance_criteria")?,
-        status: enum_val(row, "status")?,
-        created_at: ts(row, "created_at")?,
-        updated_at: ts(row, "updated_at")?,
-        deleted_at: opt_ts(row, "deleted_at")?,
-    })
-}
-
 pub fn session(row: &SqliteRow) -> Result<Session> {
     Ok(Session {
         id: uuid(row, "id")?,
         project_id: uuid(row, "project_id")?,
-        task_id: opt_uuid(row, "task_id")?,
         user_id: uuid(row, "user_id")?,
         agent: row.try_get("agent")?,
         branch: row.try_get("branch")?,

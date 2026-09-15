@@ -19,7 +19,6 @@
 use crate::{rows, tx, Result, Store, StoreError};
 use cairn_core::continuity::{Assumptions, PathFingerprint};
 use cairn_core::domain::{new_id, CheckpointTrigger};
-use cairn_core::tasks::{BlockerFacts, CriterionFacts};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -33,8 +32,6 @@ pub struct Checkpoint {
     pub handoff_id: Uuid,
     pub trigger: CheckpointTrigger,
     pub assumed: Assumptions,
-    pub criteria_snapshot: Vec<CriterionFacts>,
-    pub open_blockers: Vec<BlockerFacts>,
     pub pinned_constraints: Vec<Uuid>,
     pub next_action: String,
     pub restore_count: i64,
@@ -47,8 +44,6 @@ pub struct NewCheckpoint<'a> {
     pub handoff_id: Uuid,
     pub trigger: CheckpointTrigger,
     pub assumed: &'a Assumptions,
-    pub criteria_snapshot: &'a [CriterionFacts],
-    pub open_blockers: &'a [BlockerFacts],
     pub pinned_constraints: &'a [Uuid],
     pub next_action: &'a str,
 }
@@ -64,12 +59,8 @@ fn checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<Checkpoint> {
         assumed: Assumptions {
             branch: row.try_get("assumed_branch")?,
             commit: row.try_get("assumed_commit")?,
-            task_id: rows::opt_uuid(row, "assumed_task_id")?,
-            task_state_digest: row.try_get("assumed_task_state_digest")?,
             path_fingerprints: paths,
         },
-        criteria_snapshot: rows::json_field(row, "criteria_snapshot")?,
-        open_blockers: rows::json_field(row, "open_blockers")?,
         pinned_constraints: rows::json_field(row, "pinned_constraints")?,
         next_action: row.try_get("next_action")?,
         restore_count: row.try_get("restore_count")?,
@@ -99,10 +90,9 @@ pub async fn record(store: &Store, c: NewCheckpoint<'_>) -> Result<Checkpoint> {
     sqlx::query(
         "INSERT INTO continuity_checkpoints
             (id, session_id, project_id, handoff_id, trigger, assumed_branch,
-             assumed_commit, assumed_task_id, assumed_task_state_digest,
-             relevant_paths, path_fingerprints, criteria_snapshot, open_blockers,
+             assumed_commit, relevant_paths, path_fingerprints,
              pinned_constraints, next_action, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )
     .bind(id.to_string())
     .bind(c.session_id.to_string())
@@ -111,12 +101,8 @@ pub async fn record(store: &Store, c: NewCheckpoint<'_>) -> Result<Checkpoint> {
     .bind(c.trigger.as_str())
     .bind(&c.assumed.branch)
     .bind(c.assumed.commit.as_deref())
-    .bind(c.assumed.task_id.map(|t| t.to_string()))
-    .bind(c.assumed.task_state_digest.as_deref())
     .bind(json(&relevant))
     .bind(json(&paths))
-    .bind(json(&c.criteria_snapshot))
-    .bind(json(&c.open_blockers))
     .bind(json(&c.pinned_constraints))
     .bind(c.next_action)
     .bind(rows::now_text())

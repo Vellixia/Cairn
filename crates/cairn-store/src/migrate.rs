@@ -76,6 +76,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "team_server_revision",
         include_str!("../migrations/0012_team_server_revision.sql"),
     ),
+    (
+        13,
+        "remove_task_runtime",
+        include_str!("../migrations/0013_remove_task_runtime.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

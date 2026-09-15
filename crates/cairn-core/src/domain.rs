@@ -112,16 +112,6 @@ macro_rules! text_enum {
 pub(crate) use text_enum;
 
 text_enum!(
-    /// Task lifecycle (FR-037). No revision history exists (FR-039).
-    TaskStatus, "task status", {
-        Todo => "todo",
-        InProgress => "in_progress",
-        Done => "done",
-        Blocked => "blocked",
-    }
-);
-
-text_enum!(
     /// Session lifecycle (FR-007). A session leaves `Active` only at the
     /// deterministic boundaries in FR-009 — never on a `Stop` turn checkpoint.
     SessionStatus, "session status", {
@@ -161,7 +151,6 @@ text_enum!(
     MemoryScope, "memory scope", {
         Project => "project",
         Branch => "branch",
-        Task => "task",
         Session => "session",
     }
 );
@@ -170,10 +159,9 @@ impl MemoryScope {
     /// Ranking bucket: lower sorts first (FR-024, D3).
     pub fn bucket(&self) -> i64 {
         match self {
-            MemoryScope::Task => 0,
+            MemoryScope::Session => 0,
             MemoryScope::Branch => 1,
             MemoryScope::Project => 2,
-            MemoryScope::Session => 3,
         }
     }
 }
@@ -210,13 +198,10 @@ text_enum!(
     /// local" a property of the schema rather than a promise (FR-503, I8).
     OutboxEntityType, "outbox entity type", {
         Project => "project",
-        Task => "task",
         Session => "session",
         Memory => "memory",
         Handoff => "handoff",
         MemoryRelation => "memory_relation",
-        TaskCriterion => "task_criterion",
-        TaskBlocker => "task_blocker",
         // Feature 004's four (FR-528). Twelve names, not ten: the two relation
         // types are here because both relations tables exist in server Postgres
         // as well as locally, and a table on the server is reachable only through
@@ -665,7 +650,6 @@ text_enum!(
     DivergenceKind, "divergence kind", {
         Branch => "branch",
         Commit => "commit",
-        Task => "task",
         Files => "files",
     }
 );
@@ -760,7 +744,6 @@ text_enum!(
         ConflictWarning => "conflict_warning",
         PatternSignalMatch => "pattern_signal_match",
         CheckpointAssumption => "checkpoint_assumption",
-        TaskBinding => "task_binding",
     }
 );
 
@@ -774,35 +757,6 @@ text_enum!(
         Level2Only => "level_2_only",
         PinBudget => "pin_budget",
         CapReached => "cap_reached",
-    }
-);
-
-text_enum!(
-    /// One entry in a task's append-only local change history (FR-488).
-    TaskChangeKind, "task change kind", {
-        GoalChanged => "goal_changed",
-        TitleChanged => "title_changed",
-        StatusChanged => "status_changed",
-        CriterionAdded => "criterion_added",
-        CriterionText => "criterion_text",
-        CriterionState => "criterion_state",
-        CriterionVerification => "criterion_verification",
-        CriterionRemoved => "criterion_removed",
-        BlockerOpened => "blocker_opened",
-        BlockerCleared => "blocker_cleared",
-    }
-);
-
-text_enum!(
-    /// Derived on read, never stored as authority. Cairn never changes a task's
-    /// status on the basis of it — completing a task stays an explicit act
-    /// (FR-487).
-    CompletionReadiness, "completion readiness", {
-        NotReady => "not_ready",
-        /// Every non-waived criterion is satisfied and no blocker is open, but
-        /// at least one criterion is not verified.
-        ReadyUnverified => "ready_unverified",
-        Ready => "ready",
     }
 );
 
@@ -1023,19 +977,6 @@ pub struct Project {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub title: String,
-    pub goal: String,
-    pub acceptance_criteria: Vec<String>,
-    pub status: TaskStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub deleted_at: Option<DateTime<Utc>>,
-}
-
 /// One agent working session.
 ///
 /// Identity is `id`, keyed to `agent_session_key`. The worktree is scope and
@@ -1044,7 +985,6 @@ pub struct Task {
 pub struct Session {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub task_id: Option<Uuid>,
     pub user_id: Uuid,
     pub agent: String,
     pub branch: String,
@@ -1223,9 +1163,10 @@ mod tests {
     }
 
     #[test]
-    fn scope_precedence_is_task_branch_project() {
-        assert!(MemoryScope::Task.bucket() < MemoryScope::Branch.bucket());
+    fn scope_precedence_is_session_branch_project() {
+        assert!(MemoryScope::Session.bucket() < MemoryScope::Branch.bucket());
         assert!(MemoryScope::Branch.bucket() < MemoryScope::Project.bucket());
+        assert!("task".parse::<MemoryScope>().is_err());
     }
 
     #[test]
@@ -1269,9 +1210,8 @@ mod tests {
         // The additions, feature by feature, and the count. One arriving
         // unnoticed changes this number — which is the point of asserting it
         // rather than only the names.
-        assert_eq!(OutboxEntityType::ALL.len(), 12);
-        // Feature 003's three (D66).
-        for added in ["memory_relation", "task_criterion", "task_blocker"] {
+        assert_eq!(OutboxEntityType::ALL.len(), 9);
+        for added in ["memory_relation"] {
             assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
         }
         // Feature 004's four (FR-528). The two relation types are here because
@@ -1335,8 +1275,6 @@ mod tests {
             ContextLevel,
             SelectionReason,
             OmissionReason,
-            TaskChangeKind,
-            CompletionReadiness,
             ContinuityMode,
             BlockedReason,
             OutboxEntityType,

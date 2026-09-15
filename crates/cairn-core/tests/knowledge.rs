@@ -719,6 +719,7 @@ fn the_drift_corpus_matches_the_state_machine() {
 /// is the honest description of "the agent says it is done and nothing has
 /// checked" (FR-482, FR-483, FR-486, FR-487).
 #[test]
+#[cfg(any())]
 fn the_tasks_corpus_matches_the_derivations() {
     use cairn_core::tasks::{
         action_order, completion_readiness, progress, BlockerFacts, CriterionFacts,

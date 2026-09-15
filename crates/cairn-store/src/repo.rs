@@ -157,118 +157,6 @@ pub async fn unlink_project(store: &Store, id: Uuid) -> Result<Project> {
 }
 
 // ---------------------------------------------------------------------------
-// Tasks
-// ---------------------------------------------------------------------------
-
-/// Create a task, with a criterion row for each acceptance criterion.
-///
-/// `session` attributes the seeded criteria in the change log. Seeding happens
-/// in this transaction rather than afterwards because a task whose projection
-/// held criteria that no row backed would lose them the first time anything
-/// rewrote the projection (FR-481, FR-492).
-pub async fn create_task(
-    store: &Store,
-    project_id: Uuid,
-    title: &str,
-    goal: &str,
-    criteria: &[String],
-    session: Uuid,
-    policy: SyncPolicy,
-) -> Result<Task> {
-    let id = new_id();
-    let now = rows::now_text();
-    let mut tx = tx::begin(store, "create_task").await?;
-    sqlx::query(
-        "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status,
-                            created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'todo', ?6, ?6)",
-    )
-    .bind(id.to_string())
-    .bind(project_id.to_string())
-    .bind(title)
-    .bind(goal)
-    .bind(serde_json::to_string(criteria).unwrap_or_else(|_| "[]".into()))
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-
-    crate::criteria::seed_criteria_tx(&mut tx, id, criteria, session).await?;
-
-    // Same transaction as the change it describes (D9) — and the criteria as
-    // well as the task.
-    //
-    // Enqueuing only the task left every criterion given at creation time
-    // unqueued and therefore unshared, so a task created with `--criterion`
-    // arrived on a peer as a shell with none of them: zero criteria, and a
-    // completion readiness of `ready` because nothing was outstanding. Only
-    // criteria added *after* creation ever crossed. `enqueue_task` queues the
-    // criteria, the blockers and the task together, which is the same set every
-    // later criterion change already queues.
-    crate::criteria::enqueue_task(&mut tx, store, policy, id).await?;
-    tx::commit(tx, "create_task").await?;
-    task(store, id).await
-}
-
-pub async fn task(store: &Store, id: Uuid) -> Result<Task> {
-    let row = sqlx::query("SELECT * FROM tasks WHERE id = ?1 AND deleted_at IS NULL")
-        .bind(id.to_string())
-        .fetch_optional(store.pool())
-        .await?
-        .ok_or_else(|| StoreError::NotFound(format!("task {id}")))?;
-    rows::task(&row)
-}
-
-pub async fn list_tasks(
-    store: &Store,
-    project_id: Uuid,
-    status: Option<TaskStatus>,
-) -> Result<Vec<Task>> {
-    let rs =
-        match status {
-            Some(s) => sqlx::query(
-                "SELECT * FROM tasks WHERE project_id = ?1 AND status = ?2 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-            )
-            .bind(project_id.to_string())
-            .bind(s.as_str())
-            .fetch_all(store.pool())
-            .await?,
-            None => {
-                sqlx::query(
-                    "SELECT * FROM tasks WHERE project_id = ?1 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-                )
-                .bind(project_id.to_string())
-                .fetch_all(store.pool())
-                .await?
-            }
-        };
-    rs.iter().map(rows::task).collect()
-}
-
-/// Update whichever fields were supplied. Status transitions are unrestricted
-/// and simply recorded (FR-037).
-///
-/// Feature 003 moved the body to [`crate::criteria::update_task`], which does
-/// the same job plus the criteria diff, the local counter and the change log —
-/// all in one transaction. This stays as the name Feature 001's callers use.
-/// There is deliberately no second write path: a task edit that bypassed the
-/// counter would leave `expected_revision` unsound.
-#[allow(clippy::too_many_arguments)]
-pub async fn update_task(
-    store: &Store,
-    id: Uuid,
-    title: Option<&str>,
-    goal: Option<&str>,
-    criteria: Option<&[String]>,
-    status: Option<TaskStatus>,
-    session: Uuid,
-    policy: SyncPolicy,
-) -> Result<Task> {
-    crate::criteria::update_task(store, id, title, goal, criteria, status, session, policy).await
-}
-
-// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
@@ -280,7 +168,6 @@ pub struct StartSession<'a> {
     pub branch: &'a str,
     pub commit_sha: Option<&'a str>,
     pub worktree_path: &'a str,
-    pub task_id: Option<Uuid>,
     pub daemon_run_id: Uuid,
     pub policy: SyncPolicy,
 }
@@ -299,22 +186,20 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
         return Ok(existing);
     }
 
-    let previous =
-        previous_session_for(store, input.project_id, input.task_id, input.branch).await?;
+    let previous = previous_session_for(store, input.project_id, input.branch).await?;
     let id = new_id();
     let now = rows::now_text();
     let mut tx = tx::begin(store, "start_session").await?;
     sqlx::query(
         "INSERT INTO sessions
-            (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
+            (id, project_id, user_id, agent, branch, commit_sha, worktree_path,
              agent_session_key, previous_session_id, status, started_at, ended_at,
              last_event_at, last_turn_ended_at, daemon_run_id, end_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL, ?11, NULL, ?12, NULL)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, NULL, ?10, NULL, ?11, NULL)
          ON CONFLICT DO NOTHING",
     )
     .bind(id.to_string())
     .bind(input.project_id.to_string())
-    .bind(input.task_id.map(|t| t.to_string()))
     .bind(input.user_id.to_string())
     .bind(input.agent)
     .bind(input.branch)
@@ -342,19 +227,6 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
         }
     }
 
-    // A session that starts already bound to a task records the state it bound
-    // at, exactly as `bind_task` does — otherwise a session started with
-    // `--task` could never be told the task advanced under it (FR-489).
-    if let Some(task_id) = input.task_id {
-        if let Ok(snapshot) = crate::criteria::bind_snapshot(store, task_id).await {
-            sqlx::query("UPDATE sessions SET task_snapshot_at_bind = ?2 WHERE id = ?1")
-                .bind(id.to_string())
-                .bind(snapshot)
-                .execute(store.pool())
-                .await?;
-        }
-    }
-
     let created = session(store, id).await?;
     enqueue_session(store, input.policy, &created).await?;
     Ok(created)
@@ -377,28 +249,12 @@ async fn enqueue_session(store: &Store, policy: SyncPolicy, s: &Session) -> Resu
     Ok(())
 }
 
-/// The most recently *ended* qualifying session: same task, else same branch,
-/// with `id` breaking ties. A single link, not a graph (FR-008).
+/// The most recently ended session on this branch, with `id` breaking ties.
 async fn previous_session_for(
     store: &Store,
     project_id: Uuid,
-    task_id: Option<Uuid>,
     branch: &str,
 ) -> Result<Option<Uuid>> {
-    if let Some(task_id) = task_id {
-        let row = sqlx::query(
-            "SELECT id FROM sessions
-             WHERE project_id = ?1 AND task_id = ?2 AND status != 'active' AND deleted_at IS NULL
-             ORDER BY ended_at DESC, id DESC LIMIT 1",
-        )
-        .bind(project_id.to_string())
-        .bind(task_id.to_string())
-        .fetch_optional(store.pool())
-        .await?;
-        if let Some(r) = row {
-            return rows::uuid(&r, "id").map(Some);
-        }
-    }
     let row = sqlx::query(
         "SELECT id FROM sessions
          WHERE project_id = ?1 AND branch = ?2 AND status != 'active' AND deleted_at IS NULL
@@ -486,27 +342,6 @@ pub async fn turn_checkpoint(store: &Store, id: Uuid) -> Result<Session> {
         .bind(id.to_string())
         .execute(store.pool())
         .await?;
-    session(store, id).await
-}
-
-/// Bind a session to a task, recording the task state it bound at.
-///
-/// `task_snapshot_at_bind` is what makes a divergence report possible without
-/// synchronizing the local change log: on refresh the snapshot is diffed
-/// against the current records, so a criterion another machine changed shows up
-/// as readily as one this machine changed (FR-489, D80).
-pub async fn bind_task(store: &Store, id: Uuid, task_id: Uuid) -> Result<Session> {
-    let snapshot = crate::criteria::bind_snapshot(store, task_id).await?;
-    sqlx::query(
-        "UPDATE sessions SET task_id = ?1, task_snapshot_at_bind = ?4, last_event_at = ?2
-         WHERE id = ?3",
-    )
-    .bind(task_id.to_string())
-    .bind(rows::now_text())
-    .bind(id.to_string())
-    .bind(snapshot)
-    .execute(store.pool())
-    .await?;
     session(store, id).await
 }
 
@@ -1369,15 +1204,6 @@ pub async fn mark_stale_scopes(
         let key: String = r.try_get("scope_key")?;
         let gone = match scope {
             MemoryScope::Branch => !live_branches.iter().any(|b| b == &key),
-            MemoryScope::Task => {
-                let n: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM tasks WHERE id = ?1 AND deleted_at IS NULL",
-                )
-                .bind(&key)
-                .fetch_one(store.pool())
-                .await?;
-                n == 0
-            }
             _ => false,
         };
         if gone {
@@ -2141,11 +1967,11 @@ mod idle_tests {
     async fn seed(store: &Store, project: Uuid, id: Uuid, status: &str, last_event: &str) {
         sqlx::query(
             "INSERT INTO sessions
-               (id, project_id, task_id, user_id, agent, branch, commit_sha,
+               (id, project_id, user_id, agent, branch, commit_sha,
                 worktree_path, agent_session_key, previous_session_id, status,
                 started_at, ended_at, last_event_at, last_turn_ended_at,
                 daemon_run_id, end_reason, deleted_at)
-             VALUES (?1, ?2, NULL, ?3, 'claude-code', 'main', NULL,
+             VALUES (?1, ?2, ?3, 'claude-code', 'main', NULL,
                      '/tmp/wt', ?4, NULL, ?5,
                      ?6, NULL, ?6, NULL, ?7, NULL, NULL)",
         )
@@ -2580,21 +2406,18 @@ pub async fn applicable_pins(
     store: &Store,
     project_id: Uuid,
     branch: &str,
-    task_id: Option<Uuid>,
 ) -> Result<Vec<cairn_core::wire::PinnedConstraint>> {
     let rows = sqlx::query(
         "SELECT id, content, scope, scope_key, verification FROM memories
           WHERE project_id = ?1 AND pinned = 1 AND deleted_at IS NULL
             AND state != 'superseded'
             AND ( scope = 'project'
-               OR (scope = 'branch' AND scope_key = ?2)
-               OR (scope = 'task'   AND scope_key = ?3) )
-          ORDER BY CASE scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 ELSE 2 END,
+               OR (scope = 'branch' AND scope_key = ?2) )
+          ORDER BY CASE scope WHEN 'branch' THEN 0 ELSE 1 END,
                    importance DESC, id",
     )
     .bind(project_id.to_string())
     .bind(branch)
-    .bind(task_id.map(|t| t.to_string()).unwrap_or_default())
     .fetch_all(store.pool())
     .await?;
 

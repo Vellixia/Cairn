@@ -295,44 +295,6 @@ pub async fn rebuild_derived(store: &Store, project_id: Uuid) -> Result<Vec<Rebu
         differed: verification_differed,
     });
 
-    // 4 and 5. Per task: the criteria projection, then the state digest.
-    let tasks: Vec<Uuid> = sqlx::query_scalar::<_, String>(
-        "SELECT id FROM tasks WHERE project_id = ?1 AND deleted_at IS NULL",
-    )
-    .bind(project_id.to_string())
-    .fetch_all(store.pool())
-    .await?
-    .iter()
-    .filter_map(|s| Uuid::from_str(s).ok())
-    .collect();
-
-    let mut projection_differed = 0;
-    let mut digest_differed = 0;
-    for id in &tasks {
-        let before = crate::repo::task(store, *id).await?.acceptance_criteria;
-        let digest_before = crate::criteria::state_digest(store, *id).await?;
-
-        let after = crate::criteria::rebuild_criteria_projection(store, *id).await?;
-        let digest_after = crate::criteria::state_digest(store, *id).await?;
-
-        if before != after {
-            projection_differed += 1;
-        }
-        if digest_before != digest_after {
-            digest_differed += 1;
-        }
-    }
-    out.push(RebuildOutcome {
-        derived: "task criteria projection",
-        checked: tasks.len() as i64,
-        differed: projection_differed,
-    });
-    out.push(RebuildOutcome {
-        derived: "task state digest",
-        checked: tasks.len() as i64,
-        differed: digest_differed,
-    });
-
     // 6. Patterns have no project, so they are rebuilt whole. A pattern's trust
     // is derived from applications that may come from any project, and there is
     // no per-project slice of it to rebuild.
@@ -538,12 +500,6 @@ pub(crate) const CATEGORIES: &[CategorySpec] = &[
         tables: &["projects"],
     },
     CategorySpec {
-        category: "tasks",
-        class: DurabilityClass::Cache,
-        count_sql: "SELECT COUNT(*) FROM tasks WHERE deleted_at IS NULL",
-        tables: &["tasks", "task_criteria", "task_blockers"],
-    },
-    CategorySpec {
         category: "sessions",
         class: DurabilityClass::Cache,
         count_sql: "SELECT COUNT(*) FROM sessions WHERE deleted_at IS NULL",
@@ -673,18 +629,6 @@ pub(crate) const CATEGORIES: &[CategorySpec] = &[
         class: DurabilityClass::LocalOnly,
         count_sql: "SELECT COUNT(*) FROM pattern_applications",
         tables: &["pattern_applications"],
-    },
-    CategorySpec {
-        category: "task change history",
-        class: DurabilityClass::LocalOnly,
-        count_sql: "SELECT COUNT(*) FROM task_changes",
-        tables: &["task_changes"],
-    },
-    CategorySpec {
-        category: "criterion evidence",
-        class: DurabilityClass::LocalOnly,
-        count_sql: "SELECT COUNT(*) FROM criterion_evidence",
-        tables: &["criterion_evidence"],
     },
     CategorySpec {
         // FR-706's exclusion, counted separately from `project memory` and
@@ -1126,10 +1070,10 @@ mod durability_tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO sessions
-               (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
+               (id, project_id, user_id, agent, branch, commit_sha, worktree_path,
                 agent_session_key, previous_session_id, status, started_at, ended_at,
                 last_event_at, last_turn_ended_at, daemon_run_id, end_reason, deleted_at)
-             VALUES (?1, ?2, NULL, ?3, 'claude-code', 'main', NULL, '/tmp/wt', 'k', NULL,
+             VALUES (?1, ?2, ?3, 'claude-code', 'main', NULL, '/tmp/wt', 'k', NULL,
                      'active', ?4, NULL, ?4, NULL, ?5, NULL, NULL)",
         )
         .bind(session.to_string())

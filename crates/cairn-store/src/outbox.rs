@@ -779,24 +779,11 @@ pub fn project_payload(p: &Project) -> serde_json::Value {
     })
 }
 
-pub fn task_payload(t: &Task) -> serde_json::Value {
-    serde_json::json!({
-        "id": t.id,
-        "title": t.title,
-        "goal": t.goal,
-        "acceptance_criteria": t.acceptance_criteria,
-        "status": t.status,
-        "created_at": t.created_at,
-        "updated_at": t.updated_at,
-    })
-}
-
 /// Minimal session provenance. `worktree_path`, `agent_session_key`,
 /// `daemon_run_id` and `last_event_at` are local-only and never appear here.
 pub fn session_payload(s: &Session) -> serde_json::Value {
     serde_json::json!({
         "id": s.id,
-        "task_id": s.task_id,
         "agent": s.agent,
         "branch": s.branch,
         "commit_sha": s.commit_sha,
@@ -982,36 +969,6 @@ pub fn relation_payload(
     })
 }
 
-/// One criterion on the wire.
-///
-/// Carries the stable id and both axes, so disjoint edits converge by identity.
-/// The per-criterion `revision` is local, like the task counter, and is absent.
-pub fn criterion_payload(c: &crate::criteria::Criterion) -> serde_json::Value {
-    serde_json::json!({
-        "id": c.id,
-        "task_id": c.task_id,
-        "ordinal": c.ordinal,
-        "label": c.label,
-        "text": c.text,
-        "state": c.state,
-        "verification": c.verification,
-        "deleted": c.deleted,
-    })
-}
-
-/// One blocker on the wire. Both ends attributed; append-only.
-pub fn blocker_payload(b: &crate::criteria::Blocker) -> serde_json::Value {
-    serde_json::json!({
-        "id": b.id,
-        "task_id": b.task_id,
-        "description": b.description,
-        "state": b.state,
-        "opened_by_session": b.opened_by_session,
-        "cleared_by_session": b.cleared_by_session,
-        "deleted": b.deleted,
-    })
-}
-
 /// A stable identity for a relation, for the outbox's entity id.
 ///
 /// A relation has no id column of its own — its primary key is the endpoint
@@ -1066,7 +1023,6 @@ mod tests {
         Session {
             id: new_id(),
             project_id: new_id(),
-            task_id: None,
             user_id: new_id(),
             agent: "claude-code".into(),
             branch: "main".into(),
@@ -1200,7 +1156,7 @@ mod tests {
             &mut *tx,
             SyncPolicy::from_project(&p),
             p.id,
-            OutboxEntityType::Task,
+            OutboxEntityType::Memory,
             new_id(),
             OutboxOperation::Upsert,
             &serde_json::json!({"a": 1}),

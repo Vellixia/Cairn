@@ -617,7 +617,6 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         cwd,
                         agent: str_arg(args, "agent").unwrap_or_else(|| "mcp-client".into()),
                         agent_session_key: key,
-                        task_id: None,
                     })
                     .await?
                 }

@@ -767,7 +767,6 @@ pub async fn conflicted_subjects(
     store: &Store,
     project_id: Uuid,
     branch: &str,
-    task_id: Option<Uuid>,
     limit: usize,
 ) -> Result<Vec<(String, String)>> {
     /// How many members of one subject are read before deciding. Well past any
@@ -779,16 +778,14 @@ pub async fn conflicted_subjects(
           WHERE project_id = ?1 AND deleted_at IS NULL AND state = 'active'
             AND topic_key IS NOT NULL AND value_key IS NOT NULL
             AND (scope = 'project'
-                 OR (scope = 'branch' AND scope_key = ?2)
-                 OR (scope = 'task' AND scope_key = ?3))
+                 OR (scope = 'branch' AND scope_key = ?2))
           GROUP BY scope, scope_key, topic_key
          HAVING COUNT(DISTINCT value_key) > 1
           ORDER BY topic_key
-          LIMIT ?4",
+          LIMIT ?3",
     )
     .bind(project_id.to_string())
     .bind(branch)
-    .bind(task_id.map(|t| t.to_string()))
     .bind((limit as i64).saturating_mul(2))
     .fetch_all(store.pool())
     .await?;
