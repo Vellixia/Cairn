@@ -8,7 +8,9 @@
     "start": "next start -p 3100",
     "lint": "next lint --dir app --dir components --dir hooks --dir lib --dir e2e",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e/tsconfig.json"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e/tsconfig.json",
+    "api-contract:generate": "node scripts/generate-server-api-contract.mjs",
+    "api-contract:check": "node scripts/generate-server-api-contract.mjs --check && node --test scripts/check-server-api-contract.test.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

@@ -9,6 +9,7 @@ import { ApiErrorState } from "@/components/control-plane";
 import { MemoryFunnel } from "@/components/funnel";
 import { ListSkeleton, PageHeader, formatDate } from "@/components/page";
 import { StatusBadge } from "@/components/session";
+import DomainsPage from "./domains/page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function ProjectOverviewPage({
@@ -20,6 +21,25 @@ export default function ProjectOverviewPage({
   const overview = useQuery({
     queryKey: ["project", id],
     queryFn: () => api.project(id),
+  });
+  // Compact overview panels use the same membership-protected APIs as the
+  // former standalone pages. They summarize only bounded first pages; neither
+  // client state nor this composition makes an authorization decision.
+  const activity = useQuery({
+    queryKey: ["activity", id, "overview"],
+    queryFn: () => api.activity(id, { limit: 5 }),
+  });
+  const retrievals = useQuery({
+    queryKey: ["retrieval-traces", id, "overview"],
+    queryFn: () => api.retrievalTraces(id, { limit: 5 }),
+  });
+  const health = useQuery({
+    queryKey: ["integration-health", id, "overview"],
+    queryFn: () => api.integrationHealth(id),
+  });
+  const sync = useQuery({
+    queryKey: ["sync", id, "overview"],
+    queryFn: () => api.syncStatus(id),
   });
 
   // The header renders before the data does. Returning early instead made the
@@ -138,10 +158,51 @@ export default function ProjectOverviewPage({
               </CardContent>
             </Card>
           </div>
+
+          <div className="mt-6 grid gap-6 lg:grid-cols-2">
+            <OverviewPanel id="activity" title="Activity" testId="overview-activity">
+              <SummaryRows
+                empty="No accepted activity yet."
+                rows={activity.data?.items.map((item) => `${item.kind} · ${formatDate(item.at)}`)}
+              />
+            </OverviewPanel>
+            <OverviewPanel id="retrieval" title="Retrieval" testId="overview-retrieval">
+              <SummaryRows
+                empty="No retrievals yet."
+                rows={retrievals.data?.traces.map((trace) => `${trace.trigger} · ${trace.delivery_state}`)}
+              />
+            </OverviewPanel>
+            <OverviewPanel id="agents" title="Agent health" testId="overview-agent-health">
+              <SummaryRows
+                empty="No agent health reported."
+                rows={health.data?.rows.slice(0, 5).map((row) => `${row.agent} · ${row.capability} · ${row.status}`)}
+              />
+            </OverviewPanel>
+            <OverviewPanel id="domains" title="Knowledge domains" testId="overview-domains">
+              <DomainsPage params={Promise.resolve({ id })} />
+            </OverviewPanel>
+            <OverviewPanel id="sync" title="Sync" testId="overview-sync">
+              <p className="text-sm">
+                {sync.data
+                  ? `${sync.data.applied_items} accepted item${sync.data.applied_items === 1 ? "" : "s"}; last applied ${formatDate(sync.data.last_applied_at)}.`
+                  : "Loading server sync state…"}
+              </p>
+            </OverviewPanel>
+          </div>
         </>
       )}
     </div>
   );
+}
+
+function OverviewPanel({ id, title, testId, children }: { id: string; title: string; testId: string; children: React.ReactNode }) {
+  return <Card id={id} data-testid={testId}><CardHeader><CardTitle className="text-sm font-medium">{title}</CardTitle></CardHeader><CardContent>{children}</CardContent></Card>;
+}
+
+function SummaryRows({ rows, empty }: { rows?: string[]; empty: string }) {
+  if (!rows) return <p className="text-muted-foreground text-sm">Loading…</p>;
+  if (rows.length === 0) return <p className="text-muted-foreground text-sm">{empty}</p>;
+  return <ul className="space-y-1 text-sm">{rows.map((row, index) => <li key={`${row}-${index}`} className="truncate">{row}</li>)}</ul>;
 }
 
 /** A count nobody can click is a dead end; each one opens its own section. */

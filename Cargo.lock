@@ -388,14 +388,17 @@ version = "0.1.0-alpha.7"
 dependencies = [
  "cairn-core",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

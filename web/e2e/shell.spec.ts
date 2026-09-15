@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { openNav } from "./nav";
-import { seed, type Seeded } from "./seed";
+import { seed, seedControlPlane, type Seeded } from "./seed";
 
 /**
  * The application shell: how someone gets in, moves around, and is stopped
@@ -10,16 +10,30 @@ import { seed, type Seeded } from "./seed";
  * — sign-in, redirects, navigation, tokens, confirmations — not every screen.
  */
 let fixture: Seeded;
+let admin: Awaited<ReturnType<typeof seedControlPlane>>["admin"];
 
 test.beforeAll(async () => {
   fixture = await seed();
+  admin = (await seedControlPlane()).admin;
 });
 
-async function signIn(page: import("@playwright/test").Page, f: Seeded) {
+async function signIn(
+  page: import("@playwright/test").Page,
+  f: Pick<Seeded, "email" | "password">,
+) {
   await page.goto("/login");
+  // Sidebar role-gating is driven by `/api/auth/me`. Register this wait before
+  // submitting, so an Accounts-absent assertion cannot win a race against the
+  // member response that decides whether the admin link is rendered.
+  const authenticated = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/auth/me" &&
+      response.status() === 200,
+  );
   await page.getByTestId("email").fill(f.email);
   await page.getByTestId("password").fill(f.password);
   await page.getByTestId("submit").click();
+  await authenticated;
   await expect(page.getByTestId("project-list")).toBeVisible();
 }
 
@@ -74,7 +88,7 @@ test("an unknown address gets Cairn's own 404, not a framework default", async (
   ).toBeVisible();
 });
 
-test("navigation reaches every project section and says where you are", async ({
+test("compact navigation reaches four project workflows and global governance", async ({
   page,
 }, testInfo) => {
   await signIn(page, fixture);
@@ -84,10 +98,10 @@ test("navigation reaches every project section and says where you are", async ({
   await page.getByText("UI Fixture").first().click();
 
   for (const [testid, heading] of [
-    ["nav-tasks", "Tasks"],
-    ["nav-sessions", "Sessions"],
+    ["nav-overview", "UI Fixture"],
     ["nav-memory", "Memory"],
-    ["nav-sync", "Sync status"],
+    ["nav-sessions-replay", "Sessions & Replay"],
+    ["nav-tasks", "Tasks"],
   ] as const) {
     await openNav(page, testInfo);
     await page.getByTestId(testid).click();
@@ -96,7 +110,17 @@ test("navigation reaches every project section and says where you are", async ({
     await expect(page.getByRole("navigation").first()).toContainText("Projects");
   }
 
-  await expect(page).toHaveTitle(/Sync · Cairn/);
+  await openNav(page, testInfo);
+  await page.getByTestId("nav-team").click();
+  await expect(page.getByRole("heading", { name: "Team knowledge" })).toBeVisible();
+  await openNav(page, testInfo);
+  await expect(page.getByTestId("nav-admin-users")).toHaveCount(0);
+});
+
+test("administrator sees Accounts in global navigation", async ({ page }, testInfo) => {
+  await signIn(page, admin);
+  await openNav(page, testInfo);
+  await expect(page.getByTestId("nav-admin-users")).toBeVisible();
 });
 
 test("the mobile sidebar opens as a sheet", async ({ page }, testInfo) => {

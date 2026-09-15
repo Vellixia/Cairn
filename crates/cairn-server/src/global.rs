@@ -1,15 +1,7 @@
-//! Personal and team knowledge on the server: ingest, and the fifth validator
-//! entry point (D447, FR-545, FR-577, FR-581, SC-449, SC-456).
+//! Personal and team knowledge ingest and privacy policy.
 //!
-//! The four client-side calls to `validate_global_content` close the bypass a
-//! client's own code could open. They do nothing about a client that does not
-//! run that code at all — modified, out of date, or simply buggy. Any of those
-//! can push a `personal_knowledge` or `team_knowledge` item straight at
-//! `POST /api/sync/batch`, and before this feature nothing here re-checked it.
-//!
-//! **A privacy boundary enforced only where the client chooses to enforce it is
-//! a convention, not a boundary.** This module is the one entry point that does
-//! not trust the other four.
+//! Server revalidates every pushed item: client validation is advisory, never a
+//! privacy boundary.
 
 use crate::auth::{AdminUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
@@ -793,6 +785,13 @@ pub async fn sync_team_changes(
 pub(crate) const VIEW_PAGE_DEFAULT: i64 = 25;
 pub(crate) const VIEW_PAGE_MAX: i64 = 100;
 
+/// Server-owned bound for every ordinary web list.
+pub(crate) fn view_page_limit(requested: Option<i64>) -> i64 {
+    requested
+        .unwrap_or(VIEW_PAGE_DEFAULT)
+        .clamp(1, VIEW_PAGE_MAX)
+}
+
 /// The bound and the cursor a control-plane list takes.
 ///
 /// `cursor` rather than `since` because the direction is the opposite one. The
@@ -810,9 +809,7 @@ pub struct DomainViewQuery {
 
 impl DomainViewQuery {
     fn page(&self) -> i64 {
-        self.limit
-            .unwrap_or(VIEW_PAGE_DEFAULT)
-            .clamp(1, VIEW_PAGE_MAX)
+        view_page_limit(self.limit)
     }
 }
 
@@ -1974,6 +1971,14 @@ mod tests {
 
     fn parsed(remote: &str) -> Vec<String> {
         remote_identities(remote).into_iter().map(|i| i.0).collect()
+    }
+
+    #[test]
+    fn view_page_limit_uses_one_default_and_bound_for_every_web_list() {
+        assert_eq!(view_page_limit(None), VIEW_PAGE_DEFAULT);
+        assert_eq!(view_page_limit(Some(0)), 1);
+        assert_eq!(view_page_limit(Some(-1)), 1);
+        assert_eq!(view_page_limit(Some(VIEW_PAGE_MAX + 1)), VIEW_PAGE_MAX);
     }
 
     /// The three supported shapes agree about the same repository, and none of

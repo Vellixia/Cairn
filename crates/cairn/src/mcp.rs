@@ -146,7 +146,10 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
+                    "action": { "type": "string", "enum": ["search", "graph"], "description": "`search` is lexical retrieval. `graph` is a typed, capped related-result request; unavailable servers refuse it explicitly." },
                     "query": { "type": "string" },
+                    "memory_id": { "type": "string", "description": "Required for `graph`; seed memory id." },
+                    "hops": { "type": "integer", "description": "Graph depth, capped at two." },
                     "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
                     "scope_key": { "type": "string" },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
@@ -188,7 +191,7 @@ fn tool_definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": [
                         "create", "supersede", "forget",
                         "reinforce", "attach_evidence", "verify", "pin",
-                        "reconcile", "promote", "record_outcome"
+                        "reconcile", "promote", "record_outcome", "governance"
                     ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
@@ -277,7 +280,7 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint"] },
+                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint", "replay"] },
                     "agent": { "type": "string" },
                     "agent_session_key": { "type": "string" },
                     "session_id": { "type": "string" },
@@ -417,6 +420,15 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
         }
 
         "cairn_search" => {
+            if str_arg(args, "action").as_deref() == Some("graph") {
+                let value = client::send(&Request::Graph {
+                    cwd,
+                    memory_id: uuid_arg(args, "memory_id")?,
+                    hops: args.get("hops").and_then(|v| v.as_i64()),
+                })
+                .await?;
+                return Ok(pretty(&value));
+            }
             let query = MemoryQuery {
                 query: str_arg(args, "query"),
                 scope: enum_arg(args, "scope"),
@@ -620,6 +632,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
+                "governance" => client::send(&Request::Governance { cwd }).await?,
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -680,6 +693,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
+                "replay" => client::send(&Request::Replay { cwd }).await?,
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -995,6 +1009,25 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(names, TOOL_NAMES);
+    }
+
+    #[test]
+    fn advanced_actions_stay_typed_inside_the_six_tool_surface() {
+        let tools = tool_definitions();
+        let action_values = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["inputSchema"]["properties"]["action"]["enum"].as_array())
+                .expect("typed action enum")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(action_values("cairn_search").contains(&"graph"));
+        assert!(action_values("cairn_session").contains(&"replay"));
+        assert!(action_values("cairn_remember").contains(&"governance"));
+        assert_eq!(tools.len(), 6);
     }
 
     #[test]

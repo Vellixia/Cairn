@@ -1,6 +1,7 @@
 "use client";
 
 import { use } from "react";
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import {
@@ -10,6 +11,7 @@ import {
   PageHeader,
 } from "@/components/page";
 import { SessionRow } from "@/components/session";
+import { Button } from "@/components/ui/button";
 
 export default function SessionsPage({
   params,
@@ -24,7 +26,12 @@ export default function SessionsPage({
 
   return (
     <div>
-      <PageHeader title="Sessions" subtitle="Newest first" />
+      <PageHeader
+        title="Sessions & Replay"
+        subtitle="Accepted sessions, newest first. Replay remains read-only."
+      >
+        <Button variant="outline" size="sm" data-testid="session-replay-entry" render={<Link href={`/projects/${id}#activity`}>Replay accepted activity</Link>} />
+      </PageHeader>
 
       {sessions.isLoading && <ListSkeleton />}
       {sessions.error != null && <ErrorState error={sessions.error} />}

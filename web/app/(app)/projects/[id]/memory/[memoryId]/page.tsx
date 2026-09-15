@@ -373,7 +373,7 @@ function Usage({
           data-testid="usage-view-all"
           render={
             <Link
-              href={`/projects/${projectId}/retrievals?reference_key=${encodeURIComponent(referenceKey)}`}
+              href={`/projects/${projectId}#retrieval`}
             />
           }
         >

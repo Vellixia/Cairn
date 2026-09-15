@@ -1,0 +1,53 @@
+Persistent, project-aware memory for AI coding agents
+
+Usage: cairn [OPTIONS] <COMMAND>
+
+Commands:
+  setup        Set up this repository for Cairn. `init` remains an alias
+  connect      Install or update an integration for this repository
+  agents       Detected agents and integration managers, with their level
+  status       Project, repository, sessions and daemon state
+  context      Print the briefing a session would receive
+  doctor       Inspect integration health. Makes no change
+  search       Search durable memory. Advanced filters remain under `memory search`
+  pattern      Reusable cross-project patterns (`contracts/patterns.md`)
+  repair       Restore Cairn-owned state only
+  disconnect   Remove Cairn-owned integration for one agent
+  integration  Operations a developer runs rarely
+  session      Sessions
+  task         Tasks
+  memory       Durable memory
+  evidence     Bounded, redacted evidence facts. Local, always
+  verify       Run deterministic verification
+  handoff      Read a handoff
+  privacy      Capture exclusions
+  delete       Delete stored data
+  link         Opt this project into server sync
+  unlink       Opt this project back out
+  auth         Server credentials
+  user         Server-side accounts: admin-only (`contracts/identity- administration.md` §9)
+  team         Server-wide team knowledge (`contracts/global-memory.md` §5b)
+  personal     This account's own personal, project-independent knowledge
+  traits       This project's derived stack traits — what applicability matching reads at recall time
+  project      Shared projects: membership
+  sync         Synchronization
+  daemon       Daemon lifecycle
+  update       Check for a newer release, and install it
+  mcp          Run the MCP server over stdio
+  hook         Claude Code hook entry point. Always exits 0. A vendor lifecycle event, translated by the named agent's adapter
+  migrate      Move this store's durable knowledge to the server (`contracts/migration-cutover.md` §4-§9)
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --json     Emit the stable JSON envelope instead of human output
+  -h, --help     Print help
+  -V, --version  Print version
+
+Start here:
+  cairn setup       Track this repository
+  cairn connect     Connect an agent
+  cairn status      Check project health
+  cairn context     Read bounded project context
+  cairn search TERM Search durable memory
+
+Advanced operations stay grouped under memory, session, task, governance, integration, sync, and admin commands.

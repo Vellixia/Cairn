@@ -34,7 +34,7 @@ export default function TraceDetailPage({
         variant="ghost"
         size="sm"
         className="mb-3 -ml-2"
-        render={<Link href={`/projects/${id}/retrievals`} />}
+        render={<Link href={`/projects/${id}#retrieval`} />}
       >
         <ArrowLeft />
         All retrievals

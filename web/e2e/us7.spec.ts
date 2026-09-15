@@ -44,7 +44,7 @@ test("a teammate finds the project and reads its handoff", async ({ page }, test
 
   await expect(page.getByText("Recent sessions")).toBeVisible();
   await openNav(page, testInfo);
-  await page.getByTestId("nav-sessions").click();
+  await page.getByTestId("nav-sessions-replay").click();
   await expect(page.getByTestId("session-list")).toBeVisible();
 
   await page.getByTestId("session-list").getByRole("listitem").first().click();
@@ -96,7 +96,7 @@ test("a memory can be deleted from the browser", async ({ page }) => {
   await expect(page.getByText("No memory yet")).toBeVisible();
 });
 
-test("tasks and sync status are reachable without a terminal", async ({
+test("tasks and overview sync state are reachable without a terminal", async ({
   page,
 }, testInfo) => {
   await page.goto(`/projects/${fixture.projectId}`);
@@ -106,9 +106,8 @@ test("tasks and sync status are reachable without a terminal", async ({
   await page.getByTestId("filter-in_progress").click();
   await expect(page.getByTestId("task-list")).toContainText("Add rate limiting");
 
-  await openNav(page, testInfo);
-  await page.getByTestId("nav-sync").click();
-  await expect(page.getByTestId("sync-status")).toContainText("items applied");
+  await page.goto(`/projects/${fixture.projectId}#sync`);
+  await expect(page.getByTestId("overview-sync")).toContainText("accepted item");
 });
 
 /**

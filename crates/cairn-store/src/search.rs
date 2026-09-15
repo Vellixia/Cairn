@@ -115,6 +115,8 @@ pub async fn search(
     if q.kind.is_some() {
         sql.push_str(" AND m.type = ?");
     }
+    // Scope and lexical relevance decide first. Creation time is deterministic
+    // recency only within an otherwise equal bucket; it cannot affect truth.
     sql.push_str(" ORDER BY scope_bucket ASC, relevance DESC, m.created_at DESC LIMIT ?");
 
     let mut query = sqlx::query(&sql);
@@ -328,7 +330,10 @@ async fn build_result(
         rank: RankInfo {
             scope_bucket,
             relevance,
+            vector: 0.0,
+            relation: 0.0,
             age_days: (now - m.created_at).num_days(),
+            recency: recency_contribution(now, m.created_at),
         },
         subject,
         topic_key,
@@ -351,6 +356,13 @@ async fn build_result(
             distinct_origins: r.try_get("distinct_origin_count").unwrap_or(0),
         },
     })
+}
+
+/// Bounded, reproducible recency explanation for the existing SQL tie-break.
+/// This intentionally has no write path and no verification/state input.
+fn recency_contribution(now: DateTime<Utc>, created_at: DateTime<Utc>) -> f64 {
+    let age_days = (now - created_at).num_days().max(0) as f64;
+    1.0 / (1.0 + age_days)
 }
 
 /// Where one result stands among the other answers to its subject.
@@ -1069,5 +1081,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.len(), 1);
+        let rank = &out[0].rank;
+        assert_eq!(rank.scope_bucket, 2);
+        assert!(rank.relevance >= 0.0);
+        assert_eq!(rank.vector, 0.0);
+        assert_eq!(rank.relation, 0.0);
+        assert!(rank.age_days >= 0);
+        assert!((0.0..=1.0).contains(&rank.recency));
+    }
+
+    #[test]
+    fn recency_is_deterministic_and_has_no_truth_inputs() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-10T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let recent = chrono::DateTime::parse_from_rfc3339("2026-01-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let old = chrono::DateTime::parse_from_rfc3339("2025-12-31T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(recency_contribution(now, recent), 0.5);
+        assert_eq!(recency_contribution(now, old), 1.0 / 11.0);
+        assert!(recency_contribution(now, recent) > recency_contribution(now, old));
     }
 }

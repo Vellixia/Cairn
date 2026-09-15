@@ -272,6 +272,8 @@ jobs:
       # `e2e`, so the Playwright suite was linted by nothing and typechecked by
       # nothing while still reporting a green `web` job.
       - run: npm run lint
+      - name: API contract drift check
+        run: npm run api-contract:check
       - name: TypeScript check
         run: npm run typecheck
       - run: npm run build

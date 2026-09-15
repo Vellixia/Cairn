@@ -84,6 +84,9 @@ fn project_scoped_paths(project: Uuid) -> Vec<String> {
         format!("/api/projects/{project}/consolidation-runs"),
         format!("/api/projects/{project}/retrieval-traces"),
         format!("/api/projects/{project}/integration-health"),
+        format!("/api/projects/{project}/graph?memory_id={project}"),
+        format!("/api/projects/{project}/replay"),
+        format!("/api/projects/{project}/analytics"),
         format!("/api/sync/changes?project_id={project}"),
     ]
 }

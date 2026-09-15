@@ -661,8 +661,13 @@ fn no_mcp_action_can_author_or_ratify_team_knowledge() {
     let source = std::fs::read_to_string(workspace_root().join("crates/cairn/src/mcp.rs"))
         .expect("read mcp.rs");
 
-    // The `action` enum, read out of the schema literal.
-    let actions = enum_after(&source, "\"action\": { \"type\": \"string\", \"enum\": [")
+    let remember = source
+        .split("\"name\": \"cairn_remember\"")
+        .nth(1)
+        .expect("cairn_remember schema moved");
+
+    // The `action` enum, read out of cairn_remember's schema literal.
+    let actions = enum_after(remember, "\"action\": { \"type\": \"string\", \"enum\": [")
         .expect("the `action` enum moved; this test can no longer enumerate the surface");
     assert!(
         actions.len() >= 10,
@@ -683,7 +688,7 @@ fn no_mcp_action_can_author_or_ratify_team_knowledge() {
 
     // And `create` cannot name the team domain: the advertised enum omits it,
     // and the daemon refuses it besides.
-    let domains = enum_after(&source, "\"domain\": { \"type\": \"string\", \"enum\": [")
+    let domains = enum_after(remember, "\"domain\": { \"type\": \"string\", \"enum\": [")
         .expect("the `domain` enum is not advertised; `create` cannot be checked");
     assert_eq!(
         domains,
