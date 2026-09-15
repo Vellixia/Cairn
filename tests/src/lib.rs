@@ -79,8 +79,8 @@ impl Sandbox {
 
         // Warm the daemon before any hook fires, as `SessionStart` does in
         // practice.
-        let started = s.cairn(&["init"]);
-        assert!(started.ok(), "sandbox init failed: {}", started.stderr);
+        let started = s.cairn(&["setup"]);
+        assert!(started.ok(), "sandbox setup failed: {}", started.stderr);
         s
     }
 

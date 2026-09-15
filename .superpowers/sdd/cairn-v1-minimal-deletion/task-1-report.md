@@ -21,3 +21,23 @@ UNCERTAINTY:
 - `Request::SessionStart` in current core still requires `task_id`; MCP supplies `task_id: None` at `crates/cairn/src/mcp.rs:620` without accepting any task input. Remove that compatibility initializer when Task 2 removes the wire field.
 
 NEXT: Integrate with Task-domain wire deletion, then rerun workspace verification.
+
+## Review fix 1/5
+
+RESULT: Disabled Clap's `help` subcommand, restored global `--json` success and error envelopes for `setup`, removed stale six-tool/task test surfaces, and deleted orphan CLI integration/update modules.
+
+CHANGED:
+
+- `crates/cairn/src/main.rs`: `disable_help_subcommand = true`; strict visible-command test; `setup` text/JSON rendering seam and coverage.
+- `crates/cairn/src/integrate.rs`, `crates/cairn/src/update.rs`: deleted orphan modules.
+- `tests/src/lib.rs`: sandbox bootstrap now calls `setup` rather than deleted `init` alias.
+- `tests/tests/manual_mcp_mode.rs`, `tests/tests/generic_mcp.rs`: retained five-tool manual MCP coverage without task binding.
+- `tests/tests/cli_rendering.rs`, `tests/tests/mcp_backward_compatibility.rs`: deleted obsolete broad CLI and six-tool compatibility fixtures.
+
+VALIDATION:
+
+- RED: `PATH=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH rustup run 1.97.1 cargo test -p cairn setup_renders_stable_text_and_json_envelopes -- --nocapture` failed with missing rendering seam.
+- GREEN: `PATH=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH rustup run 1.97.1 cargo test -p cairn --bin cairn` — 24 passed.
+- `PATH=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH rustup run 1.97.1 cargo test -p cairn-e2e --test manual_mcp_mode --test generic_mcp` — 4 passed.
+- `PATH=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH rustup run 1.97.1 cargo test --workspace --all-targets --no-run` — passed.
+- `PATH=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH rustup run 1.97.1 cargo clippy -p cairn --bin cairn -- -D warnings` — passed.

@@ -1,13 +1,13 @@
 //! T079 — an MCP-compatible agent with no lifecycle hooks (FR-040, FR-042).
 //!
-//! Sessions, tasks, memory, context and handoff generation all work; only
+//! Sessions, memory, context and handoff generation all work; only
 //! automatic observation capture is unavailable.
 
 use cairn_e2e::{Mcp, Sandbox};
 use serde_json::{json, Value};
 
 #[test]
-fn the_server_advertises_exactly_six_tools() {
+fn the_server_advertises_exactly_five_tools() {
     let s = Sandbox::new();
     let mut mcp = Mcp::start(&s);
 
@@ -18,7 +18,7 @@ fn the_server_advertises_exactly_six_tools() {
     let listed = mcp.call("tools/list", json!({}));
     let tools = listed["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 6, "FR-040 caps the surface at six: {names:?}");
+    assert_eq!(names.len(), 5, "MCP caps the surface at five: {names:?}");
     assert_eq!(
         names,
         vec![
@@ -26,7 +26,6 @@ fn the_server_advertises_exactly_six_tools() {
             "cairn_search",
             "cairn_remember",
             "cairn_session",
-            "cairn_task",
             "cairn_handoff"
         ]
     );
@@ -47,21 +46,6 @@ fn an_agent_without_hooks_can_work_end_to_end() {
     );
     assert!(started.contains("\"status\": \"active\""), "{started}");
 
-    // Create and bind a task.
-    let task = mcp.tool(
-        "cairn_task",
-        json!({ "action": "create", "title": "Manual work", "goal": "prove manual mode",
-                "acceptance_criteria": ["it works"] }),
-        &cwd,
-    );
-    let parsed: Value = serde_json::from_str(&task).expect("task json");
-    let task_id = parsed["task"]["id"].as_str().expect("task id").to_string();
-    mcp.tool(
-        "cairn_session",
-        json!({ "action": "bind_task", "agent_session_key": "manual-1", "task_id": task_id }),
-        &cwd,
-    );
-
     // Record memory with no evidence — valid in manual mode (FR-019).
     let remembered = mcp.tool(
         "cairn_remember",
@@ -81,13 +65,13 @@ fn an_agent_without_hooks_can_work_end_to_end() {
     assert_eq!(search["results"][0]["provenance"]["evidence_count"], 0);
     assert!(search["results"][0]["provenance"]["session_id"].is_string());
 
-    // Context works, and leads with the bound task.
+    // Context works without hook-driven capture.
     let context = mcp.tool(
         "cairn_context",
         json!({ "reason": "refresh", "agent_session_key": "manual-1" }),
         &cwd,
     );
-    assert!(context.contains("prove manual mode"), "{context}");
+    assert!(context.contains("# Cairn context"), "{context}");
 
     // Handoff generation works without any hook having fired.
     let handoff = mcp.tool(
@@ -101,29 +85,4 @@ fn an_agent_without_hooks_can_work_end_to_end() {
         "{handoff}"
     );
 
-    let latest = mcp.tool(
-        "cairn_handoff",
-        json!({ "action": "latest", "agent_session_key": "manual-1" }),
-        &cwd,
-    );
-    assert!(latest.contains("prove manual mode"));
-}
-
-#[test]
-fn status_reports_which_mode_the_repository_is_in() {
-    // FR-042: Cairn says whether hooks are installed.
-    let s = Sandbox::new();
-    assert_eq!(s.json(&["status"])["integration_mode"], "manual-mcp");
-
-    // Detection is filesystem-only and needs no vendor binary, so the sandbox
-    // says the agent is installed by creating the directory detection looks
-    // for (FR-105).
-    s.install_agent("claude-code");
-    // Non-interactive runs need the explicit opt-in: the plan is shown and
-    // nothing is applied without it (FR-164).
-    s.must(&["connect", "claude-code", "--yes"]);
-    assert_eq!(s.json(&["status"])["integration_mode"], "claude-code-hooks");
-
-    s.must(&["disconnect", "claude-code"]);
-    assert_eq!(s.json(&["status"])["integration_mode"], "manual-mcp");
 }

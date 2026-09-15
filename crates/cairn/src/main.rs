@@ -15,9 +15,13 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "cairn",
     version,
-    about = "Persistent, project-aware memory for AI coding agents"
+    about = "Persistent, project-aware memory for AI coding agents",
+    disable_help_subcommand = true
 )]
 struct Cli {
+    /// Emit the stable JSON envelope instead of human output.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -52,6 +56,7 @@ fn main() {
 #[tokio::main]
 async fn run_async() {
     let cli = Cli::parse();
+    let json = cli.json;
     match cli.command {
         Command::Hook { event, agent } => {
             let _ = agent;
@@ -64,9 +69,13 @@ async fn run_async() {
             }
         }
         Command::Setup => match setup().await {
-            Ok(text) => print!("{text}"),
+            Ok(value) => print!("{}", render_setup_success(&value, json)),
             Err(error) => {
-                eprintln!("cairn: {}: {}", error.code, error.message);
+                if json {
+                    println!("{}", render_setup_error(&error, true));
+                } else {
+                    eprint!("{}", render_setup_error(&error, false));
+                }
                 std::process::exit(exit_code(&error));
             }
         },
@@ -79,10 +88,30 @@ fn cwd() -> String {
         .unwrap_or_else(|_| ".".into())
 }
 
-async fn setup() -> Result<String, WireError> {
+async fn setup() -> Result<serde_json::Value, WireError> {
     let value = client::send(&Request::Init { cwd: cwd() }).await?;
-    let name = value["project"]["name"].as_str().unwrap_or("project");
-    Ok(format!("Cairn is tracking {name}.\n"))
+    Ok(value)
+}
+
+fn render_setup_success(value: &serde_json::Value, json: bool) -> String {
+    if json {
+        serde_json::to_string_pretty(&cairn_core::wire::Envelope::ok(value.clone()))
+            .expect("setup envelope serializes")
+            + "\n"
+    } else {
+        let name = value["project"]["name"].as_str().unwrap_or("project");
+        format!("Cairn is tracking {name}.\n")
+    }
+}
+
+fn render_setup_error(error: &WireError, json: bool) -> String {
+    if json {
+        serde_json::to_string_pretty(&cairn_core::wire::Envelope::err(error.clone()))
+            .expect("setup error envelope serializes")
+            + "\n"
+    } else {
+        format!("cairn: {}: {}\n", error.code, error.message)
+    }
 }
 
 fn exit_code(error: &WireError) -> i32 {
@@ -103,16 +132,28 @@ mod tests {
         assert!(Cli::try_parse_from(["cairn", "setup"]).is_ok());
 
         let help = Cli::command().render_help().to_string();
-        assert!(help.contains("  setup"));
-        for command in ["connect", "status", "context", "search", "mcp", "hook", "task"] {
-            assert!(
-                !help.contains(&format!("  {command}")),
-                "default help exposes `{command}`"
-            );
-        }
+        assert_eq!(listed_commands(&help), vec!["setup"]);
         assert!(Cli::try_parse_from(["cairn", "hook", "session-start"]).is_ok());
         assert!(Cli::try_parse_from(["cairn", "mcp"]).is_ok());
         assert!(Cli::try_parse_from(["cairn", "init"]).is_err());
+    }
+
+    #[test]
+    fn setup_renders_stable_text_and_json_envelopes() {
+        let value = serde_json::json!({ "project": { "name": "demo" } });
+        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\n");
+
+        let json: serde_json::Value = serde_json::from_str(&render_setup_success(&value, true))
+            .expect("setup JSON");
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["data"], value);
+
+        let error = WireError::invalid("bad setup");
+        let json: serde_json::Value = serde_json::from_str(&render_setup_error(&error, true))
+            .expect("setup error JSON");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"]["code"], codes::INVALID_REQUEST);
+        assert_eq!(render_setup_error(&error, false), "cairn: invalid_request: bad setup\n");
     }
 
     #[test]
@@ -125,5 +166,18 @@ mod tests {
 
     fn normalize_help(help: &str) -> String {
         help.replace("\r\n", "\n")
+    }
+
+    fn listed_commands(help: &str) -> Vec<&str> {
+        help.split_once("Commands:\n")
+            .and_then(|(_, rest)| rest.split_once("\n\nOptions:"))
+            .map(|(commands, _)| {
+                commands
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("  "))
+                    .filter_map(|line| line.split_whitespace().next())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
