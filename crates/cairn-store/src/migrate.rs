@@ -8,7 +8,7 @@
 // with `MigrateError`, and importing the crate's one-argument alias under the
 // same name would shadow that. The new repositories below spell it
 // `crate::Result` instead.
-use crate::{rows, tx, Store, StoreError};
+use crate::{Store, StoreError, rows, tx};
 use cairn_core::domain::{
     KnowledgeDomain, KnowledgeRef, PatternRef, Reference, RelationKind, RelationRef,
 };
@@ -80,6 +80,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         13,
         "remove_task_runtime",
         include_str!("../migrations/0013_remove_task_runtime.sql"),
+    ),
+    (
+        14,
+        "removed_feature_manifest",
+        include_str!("../migrations/0014_removed_feature_manifest.sql"),
     ),
 ];
 
@@ -683,7 +688,7 @@ fn retained_row_from(row: &SqliteRow) -> crate::Result<Retained> {
         other => {
             return Err(StoreError::Corrupt(format!(
                 "retained_local.ref_kind: {other}"
-            )))
+            )));
         }
     };
     let reason_text: String = row.try_get("reason")?;

@@ -1,5 +1,5 @@
 //! Versioned, integrity-checked portable-store transfer.
-use crate::{diag, migrate, Result, Store, StoreError};
+use crate::{Result, Store, StoreError, diag, migrate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, Row};
@@ -307,17 +307,83 @@ async fn removed_feature_rows(
         .collect()
 }
 
+/// Rows whose values cleanup removes, or whose table/column cleanup drops.
+/// Export and cleanup share this inventory so no new deletion path can silently
+/// escape the offline artifact.
+const REMOVED_FEATURE_TASK_SELECTIONS: &[(&str, &str, &str)] = &[
+    ("tasks", "1 = 1", "id"),
+    ("sessions", "task_id IS NOT NULL", "id"),
+    ("memories", "scope = 'task'", "id"),
+    (
+        "memory_evidence",
+        "memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "memory_id || ':' || observation_id",
+    ),
+    (
+        "memory_evidence_facts",
+        "memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "memory_id || ':' || evidence_id || ':' || role",
+    ),
+    (
+        "evidence_facts",
+        "id IN (SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task'))",
+        "id",
+    ),
+    (
+        "memory_relations",
+        "from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "from_memory_id || ':' || to_memory_id || ':' || kind",
+    ),
+    ("task_criteria", "1 = 1", "id"),
+    ("task_blockers", "1 = 1", "id"),
+    ("task_changes", "1 = 1", "id"),
+    (
+        "criterion_evidence",
+        "criterion_id IN (SELECT id FROM task_criteria)",
+        "criterion_id || ':' || evidence_id",
+    ),
+    (
+        "verification_runs",
+        "criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "id",
+    ),
+    (
+        "continuity_checkpoints",
+        "assumed_task_id IS NOT NULL",
+        "id",
+    ),
+    (
+        "outbox",
+        "entity_type IN ('task', 'task_criterion', 'task_blocker')",
+        "id",
+    ),
+];
+
+async fn removed_feature_task_records(store: &Store) -> Result<Vec<RemovedFeatureRecord>> {
+    let mut records = Vec::new();
+    for (table, predicate, source_id) in REMOVED_FEATURE_TASK_SELECTIONS {
+        records.extend(removed_feature_rows(store, table, predicate, source_id).await?);
+    }
+    Ok(records)
+}
+
 /// Write a versioned, offline-only bundle before any operator considers
 /// deleting legacy Task data. This never changes source rows; a failed export
 /// therefore leaves capture and its local spool available.
-pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<RemovedFeatureBundle> {
+pub async fn export_removed_feature_tasks(
+    store: &Store,
+    path: &Path,
+) -> Result<RemovedFeatureBundle> {
     let state: Option<String> = sqlx::query_scalar(
         "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
     )
     .fetch_optional(store.pool())
     .await?;
     if state.as_deref() != Some("retained_pending_export") {
-        return Err(refused("removed_feature_export_not_pending", "Task export is already recorded"));
+        return Err(refused(
+            "removed_feature_export_not_pending",
+            "Task export is already recorded",
+        ));
     }
     if std::fs::symlink_metadata(path).is_ok() {
         return Err(refused(
@@ -325,26 +391,7 @@ pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<
             format!("refusing to overwrite {}", path.display()),
         ));
     }
-    let selections = [
-        ("tasks", "1 = 1", "id"),
-        ("sessions", "task_id IS NOT NULL", "id"),
-        ("memories", "scope = 'task'", "id"),
-        ("memory_evidence", "memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "memory_id || ':' || observation_id"),
-        ("memory_evidence_facts", "memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "memory_id || ':' || evidence_id || ':' || role"),
-        ("evidence_facts", "id IN (SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task'))", "id"),
-        ("memory_relations", "from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "from_memory_id || ':' || to_memory_id || ':' || kind"),
-        ("task_criteria", "1 = 1", "id"),
-        ("task_blockers", "1 = 1", "id"),
-        ("task_changes", "1 = 1", "id"),
-        ("criterion_evidence", "criterion_id IN (SELECT id FROM task_criteria)", "criterion_id || ':' || evidence_id"),
-        ("verification_runs", "criterion_id IN (SELECT id FROM task_criteria)", "id"),
-        ("continuity_checkpoints", "assumed_task_id IS NOT NULL", "id"),
-        ("outbox", "entity_type = 'task'", "id"),
-    ];
-    let mut records = Vec::new();
-    for (table, predicate, source_id) in selections {
-        records.extend(removed_feature_rows(store, table, predicate, source_id).await?);
-    }
+    let records = removed_feature_task_records(store).await?;
     let dispositions = BTreeMap::from([
         ("accepted".to_owned(), 0),
         ("rejected".to_owned(), 0),
@@ -359,7 +406,8 @@ pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<
         records,
         dispositions,
     };
-    let bytes = serde_json::to_vec_pretty(&bundle).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    let bytes = serde_json::to_vec_pretty(&bundle)
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -408,17 +456,40 @@ pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
     .fetch_optional(store.pool())
     .await?;
     let (path, expected_hash) = artifact.ok_or_else(|| {
-        refused("removed_feature_cleanup_not_pending", "Task bundle export must finish before cleanup")
+        refused(
+            "removed_feature_cleanup_not_pending",
+            "Task bundle export must finish before cleanup",
+        )
     })?;
     let path = Path::new(&path);
     let (_, actual_hash) = digest(path)?;
     if actual_hash != expected_hash {
-        return Err(refused("removed_feature_artifact_changed", "Task bundle hash no longer matches manifest"));
+        return Err(refused(
+            "removed_feature_artifact_changed",
+            "Task bundle hash no longer matches manifest",
+        ));
     }
     let bundle: RemovedFeatureBundle = serde_json::from_slice(&std::fs::read(path)?)
         .map_err(|e| StoreError::Corrupt(e.to_string()))?;
     if bundle.version != REMOVED_FEATURE_BUNDLE_VERSION || bundle.feature != "tasks" {
-        return Err(refused("removed_feature_artifact_invalid", "Task bundle is not a supported removed-feature artifact"));
+        return Err(refused(
+            "removed_feature_artifact_invalid",
+            "Task bundle is not a supported removed-feature artifact",
+        ));
+    }
+    let expected = removed_feature_task_records(store).await?;
+    let exported = bundle
+        .records
+        .iter()
+        .map(|record| (record.source_table.as_str(), record.source_id.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected.iter().any(|record| {
+        !exported.contains(&(record.source_table.as_str(), record.source_id.as_str()))
+    }) {
+        return Err(refused(
+            "removed_feature_bundle_incomplete",
+            "Task bundle does not conserve every row cleanup deletes",
+        ));
     }
     let mut tx = store.pool().begin().await?;
     for statement in [
@@ -429,7 +500,6 @@ pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
         "DELETE FROM memory_relations WHERE from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
         "DELETE FROM outbox WHERE entity_type IN ('task', 'task_criterion', 'task_blocker')",
         "DELETE FROM memories WHERE scope = 'task'",
-        "DELETE FROM evidence_facts WHERE id NOT IN (SELECT evidence_id FROM memory_evidence_facts)",
         "DROP TABLE IF EXISTS criterion_evidence",
         "DROP TABLE IF EXISTS task_changes",
         "DROP TABLE IF EXISTS task_blockers",
@@ -460,6 +530,16 @@ pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
         "DROP TABLE memories",
         "ALTER TABLE memories_new RENAME TO memories",
         "CREATE INDEX memories_scope ON memories (project_id, scope, scope_key, state)",
+        "CREATE INDEX memories_topic ON memories (project_id, topic_key, state) WHERE topic_key IS NOT NULL",
+        "CREATE INDEX memories_subject ON memories (project_id, scope, scope_key, topic_key) WHERE topic_key IS NOT NULL",
+        "CREATE INDEX memories_verification ON memories (project_id, verification) WHERE verification <> 'unverified'",
+        "CREATE INDEX memories_pinned ON memories (project_id, scope, scope_key) WHERE pinned = 1",
+        "CREATE INDEX memories_temporal ON memories (project_id, effective_from, superseded_at)",
+        "CREATE INDEX memories_content_norm ON memories (project_id, content_norm_digest) WHERE content_norm_digest IS NOT NULL",
+        "CREATE TRIGGER memories_fts_ai AFTER INSERT ON memories BEGIN INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content); END",
+        "CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN INSERT INTO memory_fts(memory_fts, rowid, content) VALUES ('delete', old.rowid, old.content); END",
+        "CREATE TRIGGER memories_fts_au AFTER UPDATE ON memories BEGIN INSERT INTO memory_fts(memory_fts, rowid, content) VALUES ('delete', old.rowid, old.content); INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content); END",
+        "INSERT INTO memory_fts(memory_fts) VALUES ('rebuild')",
         "CREATE TABLE memory_evidence (memory_id TEXT NOT NULL REFERENCES memories(id), observation_id TEXT NOT NULL, content_digest TEXT NOT NULL, PRIMARY KEY (memory_id, observation_id))",
         "INSERT INTO memory_evidence SELECT * FROM memory_evidence_staged",
         "DROP TABLE memory_evidence_staged",
@@ -853,6 +933,44 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn v13_manifest_upgrades_before_task_export_and_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v13.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        migrate::run_to(&pool, 13).await.unwrap();
+        sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_retained' WHERE feature = 'tasks'")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        let columns: Vec<String> = sqlx::query("PRAGMA table_info(removed_feature_manifest)")
+            .fetch_all(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get("name").unwrap())
+            .collect();
+        assert!(columns.contains(&"artifact_path".to_owned()));
+        assert!(columns.contains(&"artifact_sha256".to_owned()));
+        let state: String = sqlx::query_scalar(
+            "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, "retained_pending_export");
+
+        let bundle_path = dir.path().join("tasks.removed_feature.json");
+        export_removed_feature_tasks(&store, &bundle_path)
+            .await
+            .unwrap();
+        cleanup_removed_feature_tasks(&store).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn removed_feature_bundle_conserves_task_records_and_dependencies() {
         let store = Store::open_memory().await.unwrap();
         let pool = store.pool();
@@ -876,6 +994,26 @@ mod tests {
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO memory_relations (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis) VALUES ('m', 'm', 'reinforces', 'p', 's', 'now', 'explicit_agent')")
             .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO task_criteria (id, task_id, ordinal, label, text, state, verification, revision, created_at, updated_at) VALUES ('c', 't', 1, 'AC-1', 'criterion', 'pending', 'unverified', 1, 'now', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO task_blockers (id, task_id, description, opened_by_session, opened_at) VALUES ('b', 't', 'blocker', 's', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO task_changes (id, task_id, local_revision, kind, session_id, changed_at) VALUES ('ch', 't', 1, 'title_changed', 's', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'e', 'now', 's')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO verification_runs (id, criterion_id, project_id, verifier, result, repo_branch, checked_at, triggered_by) VALUES ('vr-c', 'c', 'p', 'test_outcome', 'verified', 'main', 'now', 'attach')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO verification_runs (id, memory_id, project_id, verifier, result, repo_branch, checked_at, triggered_by) VALUES ('vr-m', 'm', 'p', 'test_outcome', 'verified', 'main', 'now', 'attach')")
+            .execute(pool).await.unwrap();
+        for (id, entity_type) in [
+            ("o-task", "task"),
+            ("o-criterion", "task_criterion"),
+            ("o-blocker", "task_blocker"),
+        ] {
+            sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES (?, 'p', ?, 't', 'upsert', ?, '{}', 'now', 'project:p')")
+                .bind(id).bind(entity_type).bind(format!("key-{id}")).execute(pool).await.unwrap();
+        }
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tasks.removed_feature.json");
@@ -893,28 +1031,185 @@ mod tests {
             "evidence_facts",
             "memory_evidence_facts",
             "memory_relations",
+            "task_criteria",
+            "task_blockers",
+            "task_changes",
+            "criterion_evidence",
+            "verification_runs",
+            "outbox",
         ] {
-            assert!(bundle.records.iter().any(|r| r.source_table == table), "{table}");
+            assert!(
+                bundle.records.iter().any(|r| r.source_table == table),
+                "{table}"
+            );
         }
         assert!(bundle.records.iter().all(|r| r.disposition == "retained"));
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks").fetch_one(pool).await.unwrap(), 1);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE scope = 'task'").fetch_one(pool).await.unwrap(), 1);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence").fetch_one(pool).await.unwrap(), 1);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 1);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), serde_json::to_string_pretty(&bundle).unwrap());
-        cleanup_removed_feature_tasks(&store).await.unwrap();
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE id = 'm'").fetch_one(pool).await.unwrap(), 0);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence WHERE memory_id = 'm'").fetch_one(pool).await.unwrap(), 0);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence_facts WHERE memory_id = 'm'").fetch_one(pool).await.unwrap(), 0);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'e'").fetch_one(pool).await.unwrap(), 1);
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 0);
-        assert!(sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('bad', 'p', 'fact', 'task', 't', 'bad', 's', 'now', 'now')").execute(pool).await.is_err());
-        assert!(sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES ('bad', 'p', 'task', 't', 'upsert', 'bad', '{}', 'now', 'project:p')").execute(pool).await.is_err());
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks")
                 .fetch_one(pool)
                 .await
                 .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE scope = 'task'")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            serde_json::to_string_pretty(&bundle).unwrap()
+        );
+        cleanup_removed_feature_tasks(&store).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE id = 'm'")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_evidence WHERE memory_id = 'm'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_evidence_facts WHERE memory_id = 'm'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'e'")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM verification_runs")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('bad', 'p', 'fact', 'task', 't', 'bad', 's', 'now', 'now')").execute(pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES ('bad', 'p', 'task', 't', 'upsert', 'bad', '{}', 'now', 'project:p')").execute(pool).await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            0
+        );
+        let indexes: Vec<String> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memories'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get("name").unwrap())
+        .collect();
+        for name in [
+            "memories_scope",
+            "memories_topic",
+            "memories_subject",
+            "memories_verification",
+            "memories_pinned",
+            "memories_temporal",
+            "memories_content_norm",
+        ] {
+            assert!(indexes.contains(&name.to_owned()), "{name}");
+        }
+        let mut triggers: Vec<String> = sqlx::query(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'memories'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get("name").unwrap())
+        .collect();
+        triggers.sort();
+        assert_eq!(
+            triggers,
+            vec!["memories_fts_ad", "memories_fts_ai", "memories_fts_au"]
+        );
+        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('lex', 'p', 'fact', 'project', 'p', 'needle one', 's', 'now', 'now')")
+            .execute(pool).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'needle'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            1
+        );
+        sqlx::query("UPDATE memories SET content = 'needle two' WHERE id = 'lex'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'two'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            1
+        );
+        sqlx::query("DELETE FROM memories WHERE id = 'lex'")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'two'"
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
             0
         );
         assert!(!removed_feature_tasks_pending(&store).await.unwrap());

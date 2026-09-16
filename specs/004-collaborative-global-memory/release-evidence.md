@@ -584,3 +584,17 @@ Gate: **1462 passed, 0 failed**; `cargo fmt --all -- --check`,
 clean.
 
 T104 and T194 are unchanged.
+
+## Task removal repair, round 4
+
+Migration `0013_remove_task_runtime.sql` is restored as applied history. Forward migration
+`0014_removed_feature_manifest.sql` adds artifact identity to v13 databases and sends any
+unverifiable legacy disposition back to `retained_pending_export`. Task export and cleanup now
+share one row inventory: task outbox types, task-memory verification runs, criterion runs, and
+every removed link are conserved before deletion. The cleanup rebuild recreates all memory
+indexes and FTS triggers, then rebuilds `memory_fts`.
+
+Focused evidence: `transfer::tests` passes with v13→v14 export/cleanup plus lexical
+create/update/delete and schema-inventory assertions. Full workspace gates remain pending the
+integration owner; this worktree's default Cargo selects Rust 1.95, so focused tests used the
+installed Rust 1.97 compiler explicitly.
