@@ -611,3 +611,24 @@ environment overrides can be supplied.
 
 Gate: focused daemon and executable setup tests, workspace check, all-target no-run, changed
 crate Clippy with `-D warnings`, formatter check, and diff check pass under Rust 1.97.1.
+
+### Task removal repair, round 5
+
+Cleanup now compares the exact, keyed exported records immediately before any
+destructive statement: source table, source ID, disposition, canonical JSON
+payload, cardinality, and duplicate keys. Any changed, inserted, or deleted
+Task record therefore leaves the source intact and returns
+`removed_feature_bundle_incomplete`.
+
+Task-only `evidence_facts` are tracked before Task links are removed and then
+deleted only if no surviving memory link remains. Shared evidence remains.
+Migration 14 is now programmatic because SQLite cannot conditionally add a
+column: both restored pre-artifact v13 databases and the shipped artifact-column
+v13 shape migrate to 14 without duplicate-column failure.
+
+Focused `transfer::tests`, `cargo check --workspace --all-targets`,
+`cargo test --workspace --all-targets --no-run`, and changed-crate Clippy with
+`-D warnings` pass under Rust 1.97.1. Residual: daemon artifact-conflict test
+still injects an artifact directory rather than changing process-global
+`CAIRN_HOME`; executable fresh setup/rerun coverage already exists in the
+binary harness.

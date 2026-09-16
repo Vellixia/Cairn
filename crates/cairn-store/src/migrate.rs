@@ -8,7 +8,7 @@
 // with `MigrateError`, and importing the crate's one-argument alias under the
 // same name would shadow that. The new repositories below spell it
 // `crate::Result` instead.
-use crate::{Store, StoreError, rows, tx};
+use crate::{rows, tx, Store, StoreError};
 use cairn_core::domain::{
     KnowledgeDomain, KnowledgeRef, PatternRef, Reference, RelationKind, RelationRef,
 };
@@ -178,8 +178,38 @@ async fn finish(version: i64, tx: &mut sqlx::SqliteConnection) -> Result<(), Mig
         5 => criteria_from_acceptance_arrays(tx).await,
         7 => seed_writer_identity(tx).await,
         8 => seed_authority_mode(tx).await,
+        14 => repair_removed_feature_manifest(tx).await,
         _ => Ok(()),
     }
+}
+
+/// Migration 14 must accept both v13 schemas that escaped into the wild.
+/// One has no artifact columns; the briefly shipped variant already has them.
+async fn repair_removed_feature_manifest(
+    tx: &mut sqlx::SqliteConnection,
+) -> Result<(), MigrateError> {
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(removed_feature_manifest)")
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("name"))
+        .collect::<Result<_, _>>()?;
+    if !columns.iter().any(|column| column == "artifact_path") {
+        tx.execute("ALTER TABLE removed_feature_manifest ADD COLUMN artifact_path TEXT")
+            .await?;
+    }
+    if !columns.iter().any(|column| column == "artifact_sha256") {
+        tx.execute("ALTER TABLE removed_feature_manifest ADD COLUMN artifact_sha256 TEXT")
+            .await?;
+    }
+    tx.execute(
+        "UPDATE removed_feature_manifest
+            SET disposition = 'retained_pending_export'
+          WHERE feature = 'tasks'
+            AND disposition NOT IN ('retained_pending_export', 'exported_pending_cleanup', 'exported_cleaned')",
+    )
+    .await?;
+    Ok(())
 }
 
 /// Migration 5, step 6 — one `task_criteria` row per acceptance-criteria entry.
