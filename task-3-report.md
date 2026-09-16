@@ -62,3 +62,22 @@ Then remove their local callers and tests, which isolates `search`, `repo`,
 slice. Separately replace `sync::run_worker` with one typed-spool delivery loop
 before deleting `outbox`, `cursor`, `authority`, and `migrate005`; capture and
 command spool semantics remain distinct.
+
+## Task 3 phase B — typed worker seam
+
+- `cairnd::sync::run_worker` now releases stale event/command claims at start,
+  then drains only `event_spool` followed by `command_spool`.
+- Worker retry is bounded exponential backoff (500ms–30s). Typed rows retain
+  their own claim, capacity, rejection, ordering, and retry semantics.
+- Removed worker namespace targets, pull scheduling, capability probes, global
+  outbox discovery, and entity-outbox drain scheduling. Legacy `drain`,
+  `drain_global`, pull, and migration paths remain callable until their owning
+  handlers are deleted.
+- Retrieval now runs one deadline-bounded typed-spool drain before server
+  retrieval; it no longer invokes legacy `push_pending`.
+- Next dead callers: manual `sync_now` and legacy link/backfill/pull paths still
+  own entity-outbox, cursor, namespace, and authority behavior.
+
+Validation: `cargo check -p cairnd --all-targets` passed with Rust 1.97.1;
+`cargo clippy -p cairnd --all-targets -- -D warnings` passed with Rust 1.97.1;
+focused typed-worker/backoff tests passed under same toolchain.

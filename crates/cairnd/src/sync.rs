@@ -9,170 +9,38 @@ use cairn_core::domain::*;
 use cairn_core::wire::*;
 use cairn_store::{cursor, outbox, repo};
 use serde_json::json;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 const BATCH: i64 = 100;
 
-/// How often the background worker checks whether any namespace has work due.
-///
-/// This is the *check* cadence, not the *pull* cadence (§5,
-/// `contracts/sync-namespaces.md`) — see [`PULL_INTERVAL_SECONDS`], which is
-/// the interval that actually paces requests to the server.
+/// How often the typed-spool worker wakes after a successful pass.
 const WORKER_TICK: Duration = Duration::from_millis(500);
-/// Backoff after a transient failure: doubles to a ceiling, then holds.
-///
-/// Applied **per namespace** (D427, FR-497): each namespace this daemon
-/// services keeps its own [`NamespaceClock`], so a `project:*` namespace
-/// backing off from a rate limit never slows `personal:*` or `team:*`'s own
-/// retry timing, and vice versa. Before this feature `run_worker` kept one
-/// `Duration` shared by the whole loop body — the process-global backoff
-/// `contracts/sync-namespaces.md` §4 names as the defect this replaces.
+/// Bounded retry delay after ordinary delivery failure.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// How often a namespace holding **only** retained work asks the server
-/// whether it has been upgraded (FR-418, FR-561, §11a).
-///
-/// Slower than the worker tick on purpose. There is nothing to send, so this is
-/// a single small request every few seconds rather than one every half second —
-/// and noticing an upgrade a few seconds late costs nothing, while never
-/// noticing it costs the whole promise. Also per namespace, for the same
-/// reason backoff is: a `team:*` namespace blocked on a missing capability
-/// re-probes on its own schedule, never delaying `project:*`'s own probe or
-/// drain (§11a, Invariant 16).
-const CAPABILITY_PROBE: Duration = Duration::from_secs(5);
-/// How often each namespace pulls, independent of whether it has anything
-/// pending to push (FR-489, FR-589, §5).
-///
-/// **The fix for the conditional-pull defect.** `pull` used to run only after
-/// a successful `drain`, which itself only ran when the outbox held pending or
-/// blocked work — so a consume-only machine (one that only *reads* team or
-/// personal knowledge and never writes any of its own) never called `pull` in
-/// the background at all. The fix moves `pull` outside that gate entirely and
-/// paces it with this interval instead of `WORKER_TICK`: without an interval
-/// of its own, "the pull-due timer has elapsed" would be true on *every* tick,
-/// and each namespace would poll the server twice a second forever — three
-/// namespaces, six requests per second per machine, whether or not anything
-/// changed. `SC-412` asserts against this exact number (twice this interval),
-/// so a passing test does not depend on landing inside a single window.
-const PULL_INTERVAL_SECONDS: u64 = 30;
 
 type Reply = Result<serde_json::Value, WireError>;
 
-/// One namespace's independent backoff, probe and pull scheduling (D427,
-/// FR-489, FR-497, §4, §5, §11a).
-///
-/// `run_worker` keeps one of these per namespace `key()` rather than the single
-/// `backoff: Duration` and `last_probe: Instant` it used to hold for the whole
-/// process — that sharing is exactly the process-global backoff
-/// `contracts/sync-namespaces.md` §4 names as the defect this replaces. This
-/// state lives only for the worker task's lifetime; `sync_cursor.backoff_until`
-/// (`cairn_store::cursor`) is the durable counterpart a fresh process consults
-/// before it has doubled anything of its own.
-struct NamespaceClock {
+/// Delivery retry state. Typed records own their individual retry schedules;
+/// this only prevents an unreachable server from being probed continuously.
+struct WorkerBackoff {
     backoff: Duration,
-    /// Not attempted again before this instant. A transient failure pushes it
-    /// forward by `backoff`; success resets it to "now", so a healthy
-    /// namespace is never held back by a backoff it does not have.
-    retry_after: Instant,
-    last_probe: Instant,
-    last_pull: Instant,
 }
 
-impl NamespaceClock {
-    /// Due for everything immediately — a namespace seen for the first time,
-    /// or a daemon that just started next to an already-upgraded server,
-    /// should not wait out a full interval before its first attempt.
-    fn due_now(now: Instant) -> Self {
+impl WorkerBackoff {
+    fn new() -> Self {
         Self {
             backoff: BACKOFF_MIN,
-            retry_after: now,
-            last_probe: now - CAPABILITY_PROBE,
-            last_pull: now - Duration::from_secs(PULL_INTERVAL_SECONDS),
         }
     }
-
-    fn probe_due(&self, now: Instant) -> bool {
-        now.duration_since(self.last_probe) >= CAPABILITY_PROBE
+    fn success(&mut self) {
+        self.backoff = BACKOFF_MIN;
     }
-
-    fn pull_due(&self, now: Instant) -> bool {
-        now.duration_since(self.last_pull) >= Duration::from_secs(PULL_INTERVAL_SECONDS)
-    }
-
-    /// Record that this namespace just pulled.
-    ///
-    /// Separate from [`Self::record`], which folds in an *outcome*, because the
-    /// two answer different questions: `record` decides when to retry after a
-    /// failure, this decides when the next scheduled pull is due. Conflating
-    /// them is what left `last_pull` never advancing — `record` ran on every
-    /// tick and touched only the backoff, so `pull_due` stayed true forever and
-    /// `WORKER_TICK` became the pull frequency. Three namespaces polling twice a
-    /// second, indefinitely, is precisely the unbounded poll
-    /// `PULL_INTERVAL_SECONDS` exists to prevent (`sync-namespaces.md` §5), and
-    /// backoff does not save it because these requests succeed.
-    ///
-    /// Marked whether the pull succeeded or not. A failed pull is still an
-    /// attempt, and retrying it sooner is `retry_after`'s job — the backoff
-    /// clock — not this one's.
-    fn mark_pulled(&mut self, now: Instant) {
-        self.last_pull = now;
-    }
-
-    /// Record that this namespace just re-read the server's capabilities. See
-    /// [`Self::mark_pulled`].
-    fn mark_probed(&mut self, now: Instant) {
-        self.last_probe = now;
-    }
-
-    /// Fold one attempt's outcome in. `Ok` clears the backoff entirely rather
-    /// than merely not-doubling it: a namespace that just succeeded is exactly
-    /// as eligible as one that has never failed (Invariant 2).
-    fn record(&mut self, now: Instant, outcome: NamespaceOutcome) {
-        match outcome {
-            NamespaceOutcome::Transient => {
-                self.retry_after = now + self.backoff;
-                self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
-            }
-            NamespaceOutcome::Ok => {
-                self.backoff = BACKOFF_MIN;
-                self.retry_after = now;
-            }
-        }
-    }
-}
-
-/// What one namespace's attempt this tick came to — the input
-/// [`NamespaceClock::record`] folds into that namespace's own backoff, and
-/// nobody else's (Invariant 2, FR-488).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceOutcome {
-    Ok,
-    Transient,
-}
-
-/// One lane this daemon services (§1, D426).
-///
-/// `Global` covers both `personal:*` and `team:*`: both are project-less and
-/// driven the same way from here — [`drain_global`] dispatches on the
-/// namespace's own key, and neither needs anything `Project` carries.
-enum NamespaceTarget {
-    Project {
-        project_id: Uuid,
-        server_project_id: Uuid,
-    },
-    Global(SyncNamespace),
-}
-
-impl NamespaceTarget {
-    fn key(&self) -> String {
-        match self {
-            NamespaceTarget::Project { project_id, .. } => {
-                SyncNamespace::Project(*project_id).key()
-            }
-            NamespaceTarget::Global(ns) => ns.key(),
-        }
+    fn failure(&mut self) -> Duration {
+        let delay = self.backoff;
+        self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+        delay
     }
 }
 
@@ -230,332 +98,31 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         }
     }
 
-    let mut clocks: HashMap<String, NamespaceClock> = HashMap::new();
-    let mut establish_clock = NamespaceClock::due_now(Instant::now());
+    let mut backoff = WorkerBackoff::new();
     loop {
-        tokio::time::sleep(WORKER_TICK).await;
-
-        let projects = match repo::list_projects(&daemon.store).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::debug!(error = %e, "sync worker could not list projects");
-                continue;
-            }
+        let delay = if drain_typed_spools(&daemon).await {
+            backoff.success();
+            WORKER_TICK
+        } else {
+            backoff.failure()
         };
-
-        let mut targets: Vec<NamespaceTarget> = projects
-            .iter()
-            .filter(|p| p.linked)
-            .filter_map(|p| {
-                p.server_project_id
-                    .map(|server_project_id| NamespaceTarget::Project {
-                        project_id: p.id,
-                        server_project_id,
-                    })
-            })
-            .collect();
-
-        // `personal:*`/`team:*` namespaces this store has ever queued work
-        // for. Discovered from the outbox rather than assumed absent: a
-        // namespace can hold queued work before its first successful pull
-        // (`outbox::known_namespaces`'s own reasoning), and a namespace with
-        // nothing queued yet and no pull route to try (§5's fix is stated for
-        // `project:*`; a personal/team pull endpoint is a later addition) is
-        // not worth inventing a target for.
-        // Every global lane this store knows about, from two sources that
-        // answer different questions. The outbox answers "what has work
-        // queued", which is what a lane needs to *push*. `sync_cursor` answers
-        // "what lanes exist at all", which is what a lane needs to *pull* — and
-        // a consume-only machine has the second and not the first. Taking only
-        // the first is the defect §5 describes: it made the pull unreachable on
-        // exactly the machines that had nothing but pulling to do.
-        //
-        // Both sources are filtered through [`may_sync_lane`], the same rule
-        // `cairn sync now` applies. The worker used to skip it, so a lane
-        // belonging to an account this machine is no longer authenticated as was
-        // pushed and pulled under the current account's credentials on the next
-        // tick — thirty seconds later, with no one having asked for a sync
-        // (FR-593).
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Ok(known) = outbox::known_namespaces(&daemon.store).await {
-            for key in known {
-                if let Some(ns) = parse_global_namespace(&key) {
-                    if !may_sync_lane(&daemon, &ns).await {
-                        continue;
-                    }
-                    if seen.insert(key) {
-                        targets.push(NamespaceTarget::Global(ns));
-                    }
-                }
-            }
-        }
-        if let Ok(established) = cursor::established(&daemon.store).await {
-            for ns in established {
-                if matches!(ns, SyncNamespace::Project(_)) {
-                    continue;
-                }
-                if !may_sync_lane(&daemon, &ns).await {
-                    continue;
-                }
-                if seen.insert(ns.key()) {
-                    targets.push(NamespaceTarget::Global(ns));
-                }
-            }
-        }
-
-        // Establishment runs on its own cadence, whether or not global lanes
-        // already exist (FR-601). It used to be gated on there being *no* global
-        // target — "this store has never established its lanes" — and that gate
-        // held back the one thing establishment does for a store that already has
-        // lanes: **re-key a provisional one**.
-        //
-        // A lane opened against a server below schema 3 is keyed by an id derived
-        // from the endpoint, because such a server reports none. When that peer is
-        // upgraded in place it starts reporting a real id, and the lane must be
-        // re-keyed to it — but a store with such a lane has a global target, so
-        // this never ran, and the lane stayed provisional forever on the
-        // background path. That is why the drain and the pull had to accept a
-        // provisional id as if it were the peer's, which is precisely what let a
-        // *replacement* deployment at the same URL be treated as the same server
-        // (§1b). Making the re-key happen is what allows those operations to
-        // demand exact identity instead.
-        //
-        // Still on the pull cadence, not every tick: the probe is one
-        // `GET /api/version`, and doing it twice a second forever would be the
-        // unbounded poll §5 warns about.
-        if establish_clock.pull_due(Instant::now()) {
-            establish_clock.mark_pulled(Instant::now());
-            let _ = establish_global_namespaces(&daemon).await;
-        }
-
-        // The Feature 005 spools, drained on the same tick as everything else
-        // (T039). Not a second worker and not a second process: both spools are
-        // claimed under the same drain lock the sync lanes use, so a project
-        // drain and a spool drain do not interleave, and the two-process
-        // architecture is unchanged.
-        //
-        // Errors are swallowed here rather than propagated. A drain that could
-        // not reach the server has already released every row it claimed with a
-        // backoff, so there is nothing for this loop to do about it beyond
-        // trying again next tick — and an agent must never be blocked or slowed
-        // by a server that is not there (FR-781).
-        //
-        // Capture-class events this machine dropped before they ever reached
-        // here, counted from the hook's journal (FR-749c, FR-749c1). It touches
-        // neither spool and is ordered ahead of them only for readability.
-        let _ = crate::capture::collect_capture_drops(&daemon).await;
-
-        // Events first: a command may reference knowledge a consolidated event
-        // produced, and delivering commands ahead of the events behind them
-        // would make the server see the reference before the thing referenced.
-        if let Err(e) = drain_event_spool(&daemon, SPOOL_DRAIN_BATCH).await {
-            tracing::debug!(error = %e.message, "event spool drain deferred");
-        }
-        if let Err(e) = drain_command_spool(&daemon, SPOOL_DRAIN_BATCH).await {
-            tracing::debug!(error = %e.message, "command spool drain deferred");
-        }
-
-        let now = Instant::now();
-        for target in &targets {
-            let key = target.key();
-            let due = {
-                let clock = clocks
-                    .entry(key.clone())
-                    .or_insert_with(|| NamespaceClock::due_now(now));
-                now >= clock.retry_after
-            };
-            if !due {
-                // This namespace's own backoff has not elapsed yet — and only
-                // this namespace's: every other target in this same tick is
-                // still evaluated against its own clock (Invariant 2, FR-488).
-                continue;
-            }
-
-            let outcome = match target {
-                NamespaceTarget::Project {
-                    project_id,
-                    server_project_id,
-                } => {
-                    let clock = clocks.get_mut(&key).expect("just inserted above");
-                    process_project_namespace(&daemon, *project_id, *server_project_id, clock, now)
-                        .await
-                }
-                NamespaceTarget::Global(ns) => {
-                    let clock = clocks.get_mut(&key).expect("just inserted above");
-                    process_global_namespace(&daemon, ns, clock, now).await
-                }
-            };
-            clocks
-                .get_mut(&key)
-                .expect("just inserted above")
-                .record(now, outcome);
-        }
+        tokio::time::sleep(delay).await;
     }
 }
 
-/// Drain (if due) and pull (on its own interval) one linked project.
-async fn process_project_namespace(
-    d: &Daemon,
-    project_id: Uuid,
-    server_project_id: Uuid,
-    clock: &mut NamespaceClock,
-    now: Instant,
-) -> NamespaceOutcome {
-    let mut transient = false;
-
-    let (pending, _) = match outbox::counts(&d.store, project_id).await {
-        Ok(c) => c,
-        // A local read failure is not a reason to punish this namespace's
-        // retry timing — it says nothing about the server at all.
-        Err(_) => return NamespaceOutcome::Ok,
-    };
-    let blocked = if pending == 0 {
-        outbox::blocked_count(&d.store, project_id)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let probe_due = clock.probe_due(now);
-
-    // Nothing queued and nothing blocked worth re-probing: no request, no
-    // credentials needed, no noise (unchanged from before this feature).
-    if pending > 0 || (blocked > 0 && probe_due) {
-        // The drain re-reads `GET /api/version` on every run, so the probe
-        // clock advances whenever a drain happens — not only when the
-        // `probe_due` gate is what let it happen. The gate exists to stop a
-        // namespace holding *only* blocked work from re-reading capabilities on
-        // every tick; it is not the sole occasion on which a read occurs.
-        clock.mark_probed(now);
-        match drain(d, project_id, server_project_id).await {
-            Ok((applied, duplicate, rejected)) => {
-                if applied + duplicate > 0 {
-                    tracing::info!(
-                        project = %project_id, applied, duplicate, rejected,
-                        "background sync delivered queued work"
-                    );
-                }
-                if rejected == 0 {
-                    let _ =
-                        cursor::record_success(&d.store, &SyncNamespace::Project(project_id)).await;
-                }
-            }
-            Err(e) => {
-                transient = true;
-                tracing::debug!(project = %project_id, error = %e, "sync deferred");
-            }
-        }
+/// Drain only durable typed lanes. Legacy entity sync remains manually
+/// callable until its handlers are removed; it is never background work.
+pub(crate) async fn drain_typed_spools(d: &Daemon) -> bool {
+    let _ = crate::capture::collect_capture_drops(d).await;
+    let events = drain_event_spool(d, SPOOL_DRAIN_BATCH).await;
+    if let Err(e) = &events {
+        tracing::debug!(error = %e.message, "event spool drain deferred");
     }
-
-    // T094 fix (FR-489, Invariant 3): pull runs on its own interval,
-    // unconditionally — never gated on `pending == 0`. A project that only
-    // ever consumes shared records still gets them.
-    if clock.pull_due(now) {
-        clock.mark_pulled(now);
-        if pull(d, project_id, server_project_id).await.is_err() {
-            transient = true;
-        }
+    let commands = drain_command_spool(d, SPOOL_DRAIN_BATCH).await;
+    if let Err(e) = &commands {
+        tracing::debug!(error = %e.message, "command spool drain deferred");
     }
-
-    if transient {
-        NamespaceOutcome::Transient
-    } else {
-        NamespaceOutcome::Ok
-    }
-}
-
-/// Drain (if due) and pull (if due) a personal or team namespace.
-///
-/// **The pull is unconditional** — not gated on there being anything pending or
-/// blocked to push first (FR-489, `sync-namespaces.md` §5). That gating is the
-/// defect this feature had to correct in the project lane, and it bites harder
-/// here: personal and (especially) team knowledge is the first content a machine
-/// can legitimately only ever consume, so a member who never proposes anything
-/// would otherwise never learn that an admin ratified something.
-async fn process_global_namespace(
-    d: &Daemon,
-    namespace: &SyncNamespace,
-    clock: &mut NamespaceClock,
-    now: Instant,
-) -> NamespaceOutcome {
-    let mut transient = false;
-    let key = namespace.key();
-
-    // **Scoped to what this account may actually send** (FR-599). The unscoped
-    // count includes rows held for another account's author, so a lane whose only
-    // queued work belongs to a logged-out identity looked busy on every tick: the
-    // drain ran, refreshed capabilities over the network, and claimed nothing,
-    // because the claim is author-scoped and this count was not. At `WORKER_TICK`
-    // that is two `GET /api/version` a second against a queue that cannot move.
-    //
-    // Reading the account here rather than inside the drain is deliberate: this
-    // decides only whether to *attempt* an operation, and the operation takes its
-    // own credential snapshot. A switch between the two costs at most one drain
-    // that declines to claim anything — never a misrouted one.
-    let Some(author) = d.account_identity().await else {
-        return NamespaceOutcome::Ok;
-    };
-    let (pending, blocked) = outbox::claimable_counts_for_author(&d.store, &key, author)
-        .await
-        .unwrap_or((0, 0));
-    let blocked = if pending == 0 { blocked } else { 0 };
-    let probe_due = clock.probe_due(now);
-
-    if pending > 0 || (blocked > 0 && probe_due) {
-        // The drain re-reads `GET /api/version` on every run, so the probe
-        // clock advances whenever a drain happens — not only when the
-        // `probe_due` gate is what let it happen. The gate exists to stop a
-        // namespace holding *only* blocked work from re-reading capabilities on
-        // every tick; it is not the sole occasion on which a read occurs.
-        clock.mark_probed(now);
-        match drain_global(d, namespace).await {
-            // `hold` is deliberately not consulted here. A hold is *designed*
-            // behaviour rather than a failed pass — a lane whose queue belongs
-            // to a logged-out author is doing exactly what FR-594 asks — so it
-            // is reported by `sync_now` and changes nothing about what counts as
-            // a successful drain. Stated so the omission reads as a decision.
-            Ok(GlobalDrain {
-                applied,
-                duplicate,
-                rejected,
-                hold: _,
-            }) => {
-                if applied + duplicate > 0 {
-                    tracing::info!(
-                        namespace = %key, applied, duplicate, rejected,
-                        "background sync delivered queued global knowledge"
-                    );
-                }
-                if rejected == 0 {
-                    let _ = cursor::record_success(&d.store, namespace).await;
-                }
-            }
-            Err(e) => {
-                transient = true;
-                tracing::debug!(namespace = %key, error = %e, "global sync deferred");
-            }
-        }
-    }
-
-    if clock.pull_due(now) {
-        clock.mark_pulled(now);
-        match pull_global(d, namespace).await {
-            Ok(landed) if landed > 0 => {
-                tracing::info!(namespace = %key, landed, "pulled global knowledge");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                transient = true;
-                tracing::debug!(namespace = %key, error = %e, "global pull deferred");
-            }
-        }
-    }
-
-    if transient {
-        NamespaceOutcome::Transient
-    } else {
-        NamespaceOutcome::Ok
-    }
+    events.is_ok() && commands.is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,31 +1407,6 @@ pub(crate) async fn merge_pulled_team(
             tracing::debug!(team = %id, error = %e, "a pulled team row did not merge");
             Merged::Deferred
         }
-    }
-}
-
-/// Recover a non-project namespace from the plain string
-/// `outbox::known_namespaces` returns.
-///
-/// **The parsing itself is `cairn_store::cursor::parse`'s**, and this is a
-/// filter over it rather than a second reader of the same keys. It was written
-/// as its own parser when `SyncNamespace` had no public one; `cursor::parse`
-/// exists now because `sync_cursor` stores only the key and reading the table
-/// back requires exactly one parser. Keeping both meant a lane added to one was
-/// silently invisible to the other — which is what happened when the fourth
-/// lane arrived: the outbox walk simply stopped seeing it, with nothing to
-/// report.
-///
-/// `project:*` rows are excluded here, and that is this function's whole
-/// remaining job. `run_worker` already builds project targets from
-/// `repo::list_projects`, the authoritative source for a project's *current*
-/// `server_project_id`; parsing one back out of a namespace string would risk
-/// drifting from that if a project were ever re-linked to a different server
-/// project.
-fn parse_global_namespace(key: &str) -> Option<SyncNamespace> {
-    match cairn_store::cursor::parse(key) {
-        Some(SyncNamespace::Project(_)) | None => None,
-        other => other,
     }
 }
 
@@ -3187,37 +2729,6 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         // different answers and both used to render as silence (FR-593).
         "lanes_withheld": withheld,
     }))
-}
-
-/// Deliver queued work, in batches, until this drainer has nothing left.
-///
-/// Rows are *claimed* before they are sent (`outbox::claim`), so a drain running
-/// at the same time as this one works on a disjoint set rather than re-sending
-/// the same rows. A transient failure releases the claim; a permanent rejection
-/// records the row `failed` (FR-056, FR-058).
-/// Push whatever this project has queued, once, so the server knows about it.
-///
-/// Retrieval binds its project from a **session the server holds**, and a
-/// session that has only just been created has not reached the server yet — the
-/// background worker moves it on its own cadence, which is measured against
-/// nothing in particular and certainly not against a hook's deadline. Without
-/// this, automatic delivery at session open could never work: the first thing a
-/// new session does is ask for context about a session the server has never
-/// seen, and the honest answer to that is "no briefing", every time.
-///
-/// One drain pass, and its failure is not an error. If the session still is not
-/// there, retrieval degrades exactly as it does for any other unreachable
-/// server, and the next delivery point will have it.
-pub(crate) async fn push_pending(d: &Daemon, resolved: &Resolved) -> Result<(), WireError> {
-    if !resolved.project.linked {
-        return Ok(());
-    }
-    let Some(server_project_id) = resolved.project.server_project_id else {
-        return Ok(());
-    };
-    drain(d, resolved.project.id, server_project_id)
-        .await
-        .map(|_| ())
 }
 
 async fn drain(
@@ -4940,38 +4451,15 @@ mod tests {
     use crate::state::ServerCredentials;
     use crate::testsupport as fx;
 
-    // -------------------------------------------------------------------
-    // `NamespaceClock` — per-namespace backoff, probe and pull scheduling
-    // (T093, T094, T106, T107)
-    // -------------------------------------------------------------------
-
-    /// The core claim of T093: two namespaces' clocks are two independent
-    /// `Duration`s, not one shared value. A transient failure recorded against
-    /// one must not move the other's `retry_after` at all — the same guarantee
-    /// `contracts/sync-namespaces.md` §4 states as "a `project:*` namespace
-    /// hitting the server's rate limit backs off on its own schedule while
-    /// `personal:*` and `team:*` continue retrying at `BACKOFF_MIN` on theirs."
     #[test]
-    fn a_transient_failure_on_one_namespace_never_moves_another_namespaces_clock() {
-        let now = Instant::now();
-        let mut struggling = NamespaceClock::due_now(now);
-        let healthy = NamespaceClock::due_now(now);
-
-        struggling.record(now, NamespaceOutcome::Transient);
-        struggling.record(now, NamespaceOutcome::Transient);
-
-        assert!(
-            struggling.retry_after > now,
-            "a namespace with two transient failures must not be immediately eligible again"
-        );
-        assert!(
-            struggling.backoff > BACKOFF_MIN,
-            "backoff must have doubled at least once"
-        );
-        // The namespace that never failed is exactly as eligible as it was at
-        // creation — nothing about the other namespace's struggle reached it.
-        assert_eq!(healthy.retry_after, now);
-        assert_eq!(healthy.backoff, BACKOFF_MIN);
+    fn worker_backoff_is_bounded_and_resets_after_success() {
+        let mut backoff = WorkerBackoff::new();
+        for _ in 0..10 {
+            backoff.failure();
+        }
+        assert_eq!(backoff.backoff, BACKOFF_MAX);
+        backoff.success();
+        assert_eq!(backoff.backoff, BACKOFF_MIN);
     }
 
     /// Backoff doubles on repeated failure and is capped at `BACKOFF_MAX`,
@@ -5120,135 +4608,6 @@ mod tests {
         }
         assert_eq!(kinds.len(), all.len(), "two kinds share a wire name");
         assert_eq!(super::COMMAND_ENVELOPE_PATH, "/api/commands");
-    }
-
-    #[test]
-    fn backoff_doubles_to_a_ceiling_and_a_success_clears_it_entirely() {
-        let now = Instant::now();
-        let mut clock = NamespaceClock::due_now(now);
-
-        for _ in 0..10 {
-            clock.record(now, NamespaceOutcome::Transient);
-        }
-        assert_eq!(
-            clock.backoff, BACKOFF_MAX,
-            "backoff must not exceed the ceiling"
-        );
-
-        clock.record(now, NamespaceOutcome::Ok);
-        assert_eq!(
-            clock.backoff, BACKOFF_MIN,
-            "a success must clear backoff outright"
-        );
-        assert_eq!(
-            clock.retry_after, now,
-            "a successful namespace is immediately eligible again"
-        );
-    }
-
-    /// A fresh clock is due for its probe and its pull immediately — a
-    /// namespace seen for the first time, or a daemon that just restarted,
-    /// must not wait a full interval before its first attempt (FR-489,
-    /// Invariant 3).
-    /// The pull and probe clocks actually advance.
-    ///
-    /// They did not. `record` folded in an outcome and touched only the backoff,
-    /// so nothing in production ever moved `last_pull` or `last_probe`: both
-    /// predicates stayed true from the first tick onward and `WORKER_TICK`
-    /// became the pull frequency — three namespaces issuing six requests a
-    /// second, forever, against a server that answers every one of them
-    /// successfully so backoff never engages. The interval constant existed and
-    /// described nothing.
-    ///
-    /// Falsified by removing either `mark_` call from the processing functions,
-    /// or by folding them back into `record`.
-    #[test]
-    fn marking_a_pull_or_a_probe_is_what_advances_its_clock() {
-        let now = Instant::now();
-        let mut clock = NamespaceClock::due_now(now);
-        assert!(clock.pull_due(now) && clock.probe_due(now));
-
-        clock.mark_pulled(now);
-        clock.mark_probed(now);
-        assert!(
-            !clock.pull_due(now) && !clock.probe_due(now),
-            "marking did not advance the clock"
-        );
-
-        // An outcome is a different thing and must not reset either one: a
-        // namespace that just succeeded is eligible to *retry* immediately, and
-        // is not thereby due for another scheduled pull.
-        clock.record(now, NamespaceOutcome::Ok);
-        assert!(
-            !clock.pull_due(now),
-            "recording a successful outcome made the namespace due for another pull"
-        );
-        clock.record(now, NamespaceOutcome::Transient);
-        assert!(
-            !clock.pull_due(now),
-            "recording a transient failure made the namespace due for another pull"
-        );
-
-        assert!(clock.pull_due(now + Duration::from_secs(PULL_INTERVAL_SECONDS)));
-        assert!(clock.probe_due(now + CAPABILITY_PROBE));
-    }
-
-    #[test]
-    fn a_fresh_clock_is_due_for_probe_and_pull_immediately() {
-        let now = Instant::now();
-        let clock = NamespaceClock::due_now(now);
-        assert!(clock.probe_due(now));
-        assert!(clock.pull_due(now));
-    }
-
-    /// T094, the conditional-pull fix, at the unit level: the pull-due timer
-    /// is `PULL_INTERVAL_SECONDS`, not `WORKER_TICK` — a tick that has not
-    /// covered the interval yet must not read as pull-due, or every namespace
-    /// would poll the server on every 500ms tick forever (§5's exact
-    /// objection to "just move the call out of the `pending == 0` guard").
-    #[test]
-    fn pull_is_not_due_again_before_the_interval_elapses() {
-        let start = Instant::now();
-        let mut clock = NamespaceClock::due_now(start);
-        clock.last_pull = start; // as if a pull just happened
-
-        let one_tick_later = start + WORKER_TICK;
-        assert!(
-            !clock.pull_due(one_tick_later),
-            "a single worker tick must not be enough to make the next pull due"
-        );
-
-        let after_the_interval = start + Duration::from_secs(PULL_INTERVAL_SECONDS);
-        assert!(clock.pull_due(after_the_interval));
-    }
-
-    // -------------------------------------------------------------------
-    // `parse_global_namespace`
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn parse_global_namespace_round_trips_personal_and_team_keys() {
-        let personal = SyncNamespace::Personal(new_id(), new_id());
-        let team = SyncNamespace::Team(new_id());
-
-        assert_eq!(parse_global_namespace(&personal.key()), Some(personal));
-        assert_eq!(parse_global_namespace(&team.key()), Some(team));
-    }
-
-    /// `project:*` keys are deliberately not recovered here — `run_worker`
-    /// builds project targets from `repo::list_projects`, the authoritative
-    /// source, not by reparsing a namespace string.
-    #[test]
-    fn parse_global_namespace_never_recovers_a_project_namespace() {
-        let project = SyncNamespace::Project(new_id());
-        assert_eq!(parse_global_namespace(&project.key()), None);
-    }
-
-    #[test]
-    fn parse_global_namespace_rejects_garbage() {
-        assert_eq!(parse_global_namespace("nonsense"), None);
-        assert_eq!(parse_global_namespace("personal:not-a-uuid:also-not"), None);
-        assert_eq!(parse_global_namespace("team:not-a-uuid"), None);
     }
 
     /// A linked project must report the link it has.

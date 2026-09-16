@@ -52,7 +52,7 @@
 
 use crate::state::{Daemon, Resolved};
 use cairn_core::wire::ContextDepth;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use uuid::Uuid;
@@ -230,17 +230,10 @@ pub async fn deliver(
 ) -> Delivered {
     let account_id = d.account_identity().await;
 
-    // The server binds a retrieval's project from a session **it holds**, and a
-    // session created moments ago is still in this machine's outbox. Pushing
-    // first is what makes automatic delivery at session open possible at all:
-    // without it the first thing a new session does is ask about a session the
-    // server has never seen, and the honest answer to that is "no briefing",
-    // every time.
-    //
-    // Bounded by a slice of the same deadline and its failure ignored. If the
-    // push does not land, retrieval degrades exactly as it would for any other
-    // unreachable server — which is a worse briefing, never a wrong one.
-    let _ = tokio::time::timeout(deadline / 2, crate::sync::push_pending(d, resolved)).await;
+    // A session created moments ago may still be in a typed durable lane.
+    // Drain one bounded pass before retrieval so the server can bind it. This
+    // deliberately does not invoke legacy entity sync or any pull path.
+    let _ = tokio::time::timeout(deadline / 2, crate::sync::drain_typed_spools(d)).await;
 
     // A timeout is silence, exactly as a transport failure is.
     let remote = tokio::time::timeout(
