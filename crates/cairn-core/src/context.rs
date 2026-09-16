@@ -41,6 +41,7 @@ pub const SECTION_ORDER: &[&str] = &[
     "previous_handoff",
     "known_failures",
     "decisions",
+    "session_memory",
     "branch_memory",
     "project_memory",
     // Last, deliberately. A prior pattern from another project is the least
@@ -67,6 +68,7 @@ pub struct ContextInputs<'a> {
     pub previous_handoff: Option<&'a Handoff>,
     pub decisions: &'a [String],
     pub known_failures: &'a [String],
+    pub session_memory: &'a [String],
     pub branch_memory: &'a [String],
     pub project_memory: &'a [String],
     /// Signal-matched prior patterns, already capped and ordered by the caller.
@@ -204,6 +206,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         match section {
             "known_failures" => input.known_failures.len(),
             "decisions" => input.decisions.len(),
+            "session_memory" => input.session_memory.len(),
             "branch_memory" => input.branch_memory.len(),
             "project_memory" => input.project_memory.len(),
             "patterns" => input.patterns.len(),
@@ -214,6 +217,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         match section {
             "known_failures" => b.known_failures.len(),
             "decisions" => b.decisions.len(),
+            "session_memory" => b.memory.session.len(),
             "branch_memory" => b.memory.branch.len(),
             "project_memory" => b.memory.project.len(),
             "patterns" => b.patterns.len(),
@@ -235,6 +239,11 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                 briefing.decisions =
                     budget.take_while_fits(input.decisions.iter().cloned(), |s| estimate(s) + 1);
                 briefing.decisions.len() == input.decisions.len()
+            }
+            "session_memory" => {
+                briefing.memory.session = budget
+                    .take_while_fits(input.session_memory.iter().cloned(), |s| estimate(s) + 1);
+                briefing.memory.session.len() == input.session_memory.len()
             }
             "branch_memory" => {
                 briefing.memory.branch = budget
@@ -801,6 +810,7 @@ mod tests {
             previous_handoff: None,
             decisions: &[],
             known_failures: &[],
+            session_memory: &[],
             branch_memory: &[],
             project_memory: mem,
             patterns: &[],

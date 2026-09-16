@@ -1,18 +1,14 @@
--- Task records are retained only in offline migration bundles. Runtime edge
--- state has no task authority, task references, or task delivery path.
-DROP INDEX IF EXISTS sessions_task_recent;
-DROP TABLE IF EXISTS criterion_evidence;
-DROP TABLE IF EXISTS task_changes;
-DROP TABLE IF EXISTS task_blockers;
-DROP TABLE IF EXISTS task_criteria;
-DROP TABLE IF EXISTS criterion_evidence;
-ALTER TABLE sessions DROP COLUMN task_snapshot_at_bind;
-ALTER TABLE sessions DROP COLUMN task_id;
-DROP TABLE IF EXISTS tasks;
+-- Legacy Task data is never destroyed by an automatic runtime migration.
+-- Setup must first create and verify a versioned `removed_feature` bundle.
+-- Until that explicit export has a conservation report, historical rows remain
+-- intact and unreachable by the V1 runtime.
+CREATE TABLE IF NOT EXISTS removed_feature_manifest (
+    feature TEXT PRIMARY KEY,
+    bundle_version INTEGER NOT NULL,
+    disposition TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 
-ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_id;
-ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_state_digest;
-ALTER TABLE continuity_checkpoints DROP COLUMN criteria_snapshot;
-ALTER TABLE continuity_checkpoints DROP COLUMN open_blockers;
-
-DELETE FROM memories WHERE scope = 'task';
+INSERT OR IGNORE INTO removed_feature_manifest
+    (feature, bundle_version, disposition, created_at)
+VALUES ('tasks', 1, 'retained_pending_export', CURRENT_TIMESTAMP);

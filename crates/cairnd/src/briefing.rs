@@ -61,6 +61,7 @@ pub fn unavailable(
             previous_handoff: None,
             decisions: &[],
             known_failures: &[],
+            session_memory: &[],
             branch_memory: &[],
             project_memory: &[],
             patterns: &[],
@@ -180,6 +181,14 @@ pub async fn build(
     // discarded. A budget spent on content that is about to be replaced is
     // spent, and the replacement costs its own amount on top.
     let local_durable = durable == Durable::Local;
+    let session_memory = if local_durable {
+        match session {
+            Some(s) => scope_memory(daemon, project.id, MemoryScope::Session, &s.id.to_string()).await?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
     let branch_memory = if local_durable {
         scope_memory(daemon, project.id, MemoryScope::Branch, &git.branch).await?
     } else {
@@ -203,6 +212,7 @@ pub async fn build(
     // (FR-031).
     let has_history = previous_handoff.is_some()
         || !local_durable
+        || !session_memory.is_empty()
         || !branch_memory.is_empty()
         || !project_memory.is_empty();
 
@@ -273,6 +283,7 @@ pub async fn build(
             previous_handoff: previous_handoff.as_ref(),
             decisions: &decisions,
             known_failures: &known_failures,
+            session_memory: &session_memory,
             branch_memory: &branch_memory,
             project_memory: &project_memory,
             patterns: &patterns,

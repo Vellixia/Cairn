@@ -570,57 +570,6 @@ impl Reconciliation {
 }
 
 text_enum!(
-    /// The **work** state a session asserts about an acceptance criterion.
-    /// Independent of [`CriterionVerification`] (FR-482).
-    CriterionState, "criterion state", {
-        Pending => "pending",
-        Satisfied => "satisfied",
-        Blocked => "blocked",
-        Waived => "waived",
-    }
-);
-
-impl CriterionState {
-    /// Admission order for Level 0's bounded detail tier: what an agent must
-    /// act on first (`contracts/continuity-context.md` §Criterion action
-    /// order). Ties break by ascending ordinal, which the caller applies.
-    ///
-    /// `satisfied` sorts by whether it is verified, so the caller passes that
-    /// in rather than this reading two axes at once.
-    pub fn action_rank(&self, verified: bool) -> i64 {
-        match self {
-            CriterionState::Blocked => 0,
-            CriterionState::Satisfied if !verified => 1,
-            CriterionState::Pending => 2,
-            CriterionState::Satisfied => 3,
-            CriterionState::Waived => 4,
-        }
-    }
-}
-
-text_enum!(
-    /// What **evidence** establishes about a criterion. Independent of
-    /// [`CriterionState`]: `satisfied` + `unverified` is a normal, separately
-    /// reported combination — the honest description of "the agent says it is
-    /// done and nothing has checked" (FR-483).
-    CriterionVerification, "criterion verification", {
-        Unverified => "unverified",
-        Verified => "verified",
-        Failed => "failed",
-    }
-);
-
-text_enum!(
-    /// A blocker's only transition is `open → cleared`, and it is terminal:
-    /// reopening creates a new blocker, so "who said this was blocked and who
-    /// said it was not" stays answerable (FR-485).
-    BlockerState, "blocker state", {
-        Open => "open",
-        Cleared => "cleared",
-    }
-);
-
-text_enum!(
     /// What boundary produced a continuity checkpoint (FR-425).
     ///
     /// There is deliberately no turn-checkpoint trigger: `agent_quiesced` is a
@@ -1261,9 +1210,6 @@ mod tests {
             VerifyResult,
             VerifyTrigger,
             Reconciliation,
-            CriterionState,
-            CriterionVerification,
-            BlockerState,
             CheckpointTrigger,
             CheckpointState,
             DivergenceKind,
@@ -1358,19 +1304,6 @@ mod tests {
         assert_eq!(RemoteCairn.on_the_wire(), Cairn);
         assert_eq!(RemoteAttested.on_the_wire(), Attested);
         assert!(!Cairn.on_the_wire().is_imported());
-    }
-
-    #[test]
-    fn criterion_action_order_leads_with_what_blocks_progress() {
-        // `contracts/continuity-context.md` §Criterion action order.
-        let order = [
-            CriterionState::Blocked.action_rank(false),
-            CriterionState::Satisfied.action_rank(false),
-            CriterionState::Pending.action_rank(false),
-            CriterionState::Satisfied.action_rank(true),
-            CriterionState::Waived.action_rank(false),
-        ];
-        assert_eq!(order, [0, 1, 2, 3, 4], "{order:?}");
     }
 
     #[test]
