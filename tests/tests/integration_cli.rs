@@ -38,6 +38,17 @@ fn resource<'a>(health: &'a Value, kind: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no {kind} resource in {health}"))
 }
 
+#[test]
+fn setup_is_a_real_daemon_backed_human_command_and_reruns_cleanly() {
+    let s = Sandbox::new();
+    let first = s.must(&["setup"]);
+    assert!(first.stdout.contains("Cairn is tracking"), "{}", first.stdout);
+    assert!(first.stdout.contains("Legacy Task migration:"), "{}", first.stdout);
+    let second = s.must(&["setup"]);
+    assert!(second.stdout.contains("Cairn is tracking"), "{}", second.stdout);
+    assert!(second.stdout.contains("Legacy Task migration: not_pending."), "{}", second.stdout);
+}
+
 /// One command installs and configures the whole integration (FR-043).
 ///
 /// Feature 001 proved this from `crates/cairn/src/connect.rs`, which the

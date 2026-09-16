@@ -598,3 +598,16 @@ Focused evidence: `transfer::tests` passes with v13→v14 export/cleanup plus le
 create/update/delete and schema-inventory assertions. Full workspace gates remain pending the
 integration owner; this worktree's default Cargo selects Rust 1.95, so focused tests used the
 installed Rust 1.97 compiler explicitly.
+
+### Task removal repair, round 4 setup boundary
+
+The real binary harness now drives `cairn setup` through an isolated daemon and asserts the
+human renderer plus an idempotent rerun. At the daemon boundary, dispatch-driven setup is
+followed by a real signed-in `CaptureEvents` request; the event is accepted and present in
+`event_spool`. Conflict artifact behavior remains covered by the existing conservative migration
+test: its artifact directory is injected directly because the daemon reads its home directory at
+process start, while the binary harness intentionally starts the daemon before test-specific CLI
+environment overrides can be supplied.
+
+Gate: focused daemon and executable setup tests, workspace check, all-target no-run, changed
+crate Clippy with `-D warnings`, formatter check, and diff check pass under Rust 1.97.1.

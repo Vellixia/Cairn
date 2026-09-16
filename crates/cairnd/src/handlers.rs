@@ -4071,6 +4071,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_init_rerun_and_capture_remain_usable_after_setup() {
+        let repo = Repo::new().await;
+        let first = ok(&repo, Request::Init { cwd: repo.cwd.clone() }).await;
+        assert!(first["project"]["name"].is_string(), "{first}");
+        let second = ok(&repo, Request::Init { cwd: repo.cwd.clone() }).await;
+        assert_eq!(second["project"]["id"], first["project"]["id"]);
+
+        repo.daemon
+            .mutate_credentials(|credentials| credentials.account_id = Some(Uuid::now_v7()))
+            .await
+            .unwrap();
+        ok(&repo, Request::SessionStart {
+            cwd: repo.cwd.clone(), agent: "claude-code".to_owned(),
+            agent_session_key: Some("setup-capture".to_owned()),
+        }).await;
+        let captured = ok(&repo, Request::CaptureEvents {
+            cwd: repo.cwd.clone(), agent: "claude-code".to_owned(),
+            agent_session_key: "setup-capture".to_owned(),
+            output: cairn_core::event::CaptureOutput::default().event(cairn_core::event::SafeEventDraft {
+                kind: cairn_core::event::EventKind::FileRead,
+                agent: cairn_core::event::EventAgent::ClaudeCode,
+                vendor_event: None,
+                content: Some(cairn_core::event::EventContent::File {
+                    repo_file: Some("README.md".to_owned()), repo_file_from: None,
+                    change_kind: None, file_identity: cairn_core::event::FileIdentity::Present,
+                }),
+            }),
+        }).await;
+        assert_eq!(captured["accepted"], true, "{captured}");
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM event_spool")
+            .fetch_one(repo.daemon.store.pool()).await.unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_init_surfaces_a_repository_failure() {
+        let repo = Repo::new().await;
+        let error = err(&repo, Request::Init {
+            cwd: "/cairn-fixture-no-such-setup-repository".to_owned(),
+        }).await;
+        assert_eq!(error["code"], codes::NOT_A_REPOSITORY, "{error}");
+    }
+
+    #[tokio::test]
     async fn init_legacy_task_cleanup_failure_retries_existing_verified_bundle() {
         let repo = Repo::new().await;
         let artifacts = tempfile::tempdir().unwrap();
