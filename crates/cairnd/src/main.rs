@@ -13,8 +13,6 @@ mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
-mod migrate005;
-mod patterns;
 mod promote;
 mod recover;
 mod state;
@@ -539,7 +537,7 @@ async fn supervise(
 /// R1–R8 match.
 fn orders_by_arrival(request: &Request) -> bool {
     match request {
-        Request::Observe { .. } | Request::CaptureEvents { .. } => true,
+        Request::CaptureEvents { .. } => true,
         Request::CanonicalEvent { event, capture, .. } => {
             capture.is_some() && !event.event.is_boundary_class()
         }
@@ -573,7 +571,6 @@ where
                 // than a bare `Observe`, and one that is not counted is one a
                 // boundary will not wait for (D22 phase two).
                 let is_capture = match &request {
-                    Request::Observe { .. } => true,
                     Request::CanonicalEvent { event, .. } => !event.event.is_boundary_class(),
                     _ => false,
                 };
@@ -759,7 +756,7 @@ mod serve_tests {
     #[tokio::test]
     async fn a_request_that_carries_no_capture_is_not_gated() {
         let r = repo().await;
-        let cwd = r.cwd.clone();
+        let _cwd = r.cwd.clone();
         let daemon = Arc::new(r.daemon);
         let arrivals = arrival::Arrivals::new();
         // Never retired, standing in for a capture still being written.
@@ -769,10 +766,7 @@ mod serve_tests {
         let answered = connection(
             daemon,
             behind,
-            &Request::Status {
-                cwd,
-                spool_reason: false,
-            },
+            &Request::DaemonStatus,
         );
         // Well inside the gate's bound, so "was not gated" and "was gated and
         // gave up" cannot both pass this.

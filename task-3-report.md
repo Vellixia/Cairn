@@ -81,3 +81,14 @@ command spool semantics remain distinct.
 Validation: `cargo check -p cairnd --all-targets` passed with Rust 1.97.1;
 `cargo clippy -p cairnd --all-targets -- -D warnings` passed with Rust 1.97.1;
 focused typed-worker/backoff tests passed under same toolchain.
+
+## Task 3 phase C — removed wire callers
+
+- Deleted removed request test module and Feature 005 runtime tests from
+  `cairnd/src/handlers.rs`; deleted sync tests tied to removed entity lanes.
+- Deleted `migrate005` and local reusable-pattern runtime modules, their main
+  module declarations, wire variants, and daemon dispatch arms.
+- `cargo check -p cairnd --all-targets` now compiles with Rust 1.97.1, but
+  reports 128 dead-code warnings. Remaining work must trim local handlers,
+  sync entity/pull/authority code, integration mutation helpers, and promotion
+  runtime before Clippy `-D warnings` can pass.

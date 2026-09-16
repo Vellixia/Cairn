@@ -229,27 +229,12 @@ async fn dispatch(
             let observation = event
                 .observation
                 .ok_or_else(|| WireError::invalid("a tool event must carry its observation"))?;
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::Observe {
-                    cwd,
-                    agent_session_key: key,
-                    observation,
-                },
-            )
-            .await
+            crate::handlers::observe(d, &cwd, key, observation).await
         }
         // Flush pending capture, record the checkpoint, leave the session
         // active, write no handoff (FR-032, FR-230).
         CanonicalEvent::AgentQuiesced => {
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::TurnCheckpoint {
-                    cwd,
-                    agent_session_key: key,
-                },
-            )
-            .await
+            crate::handlers::turn_checkpoint(d, &cwd, key).await
         }
         CanonicalEvent::ContextCompacting => {
             crate::handlers::handle(
