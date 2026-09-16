@@ -103,10 +103,9 @@ pub mod codes {
     /// The check ran and could not establish either outcome (FR-366).
     pub const VERIFICATION_INCONCLUSIVE: &str = "verification_inconclusive";
     /// Attested evidence was offered where a deterministic check is required —
-    /// a criterion's verification, or promotion (FR-370).
+    /// a deterministic verification or promotion (FR-370).
     pub const ATTESTED_NOT_SUFFICIENT: &str = "attested_not_sufficient";
-    /// An imported verification was offered for a criterion; readiness is a
-    /// local claim (FR-368).
+    /// An imported verification was offered where a local check is required.
     pub const IMPORTED_NOT_SUFFICIENT: &str = "imported_not_sufficient";
     /// The bounded pass hit a cap; remaining work is queued.
     pub const VERIFY_PASS_YIELDED: &str = "verify_pass_yielded";

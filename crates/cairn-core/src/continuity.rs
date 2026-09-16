@@ -198,7 +198,7 @@ impl CheckpointClassification {
 /// ```text
 /// current       no divergence
 /// diverged      one or more divergences
-/// unresolvable  the assumed task or the worktree no longer exists
+/// unresolvable  the worktree no longer exists
 /// ```
 ///
 /// An `unresolvable` checkpoint still reports every divergence it *can*

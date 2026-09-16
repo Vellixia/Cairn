@@ -432,8 +432,7 @@ pub enum ScopeOverlap {
 
 /// Classify two scopes for the purposes of conflict and narrowing.
 ///
-/// Precedence is Feature 001's [`MemoryScope::bucket`], unchanged: task 0,
-/// branch 1, project 2, session 3.
+/// Precedence is [`MemoryScope::bucket`]: session 0, branch 1, project 2.
 pub fn scope_overlap(
     a_scope: MemoryScope,
     a_key: &str,
@@ -448,7 +447,7 @@ pub fn scope_overlap(
         };
     }
     if a_scope.bucket() == b_scope.bucket() {
-        // Unreachable with Feature 001's four scopes, which have distinct
+        // Unreachable with the three scopes, which have distinct
         // buckets. Stated rather than assumed, so adding a scope that shares a
         // rank has to decide this deliberately.
         return ScopeOverlap::Disjoint;

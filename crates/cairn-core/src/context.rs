@@ -13,12 +13,12 @@
 //! LEVEL 2  history and evidence       ── never automatic; explicit request only
 //! ```
 //!
-//! A budget is finite. Criterion text, blocker descriptions and warning detail
-//! are not. Guaranteeing that all of them fit would be a promise Cairn cannot
+//! A budget is finite. Warning detail and pinned context are not. Guaranteeing
+//! that all of them fit would be a promise Cairn cannot
 //! keep, so Level 0 splits:
 //!
 //! * **Tier 0a** — the guaranteed work state. Every item is O(1) in the size of
-//!   the project and the task, so the tier has a bounded worst case that fits
+//!   the project, so the tier has a bounded worst case that fits
 //!   the documented minimum budget. After any number of compactions the agent
 //!   still knows what it is doing, how far along it is, what is blocking it and
 //!   that something is wrong (FR-443).
@@ -28,7 +28,7 @@
 //!
 //! The reserve is a **cap on the lower levels, not a floor Level 0 must spend**.
 //! Unspent reserve returns to the general pool, which is why a project with no
-//! task, no warnings and no pins delivers exactly what it delivered before this
+//! active session, no warnings and no pins delivers exactly what it delivered before this
 //! feature existed (FR-442).
 
 use crate::budget::{estimate, Budget};
@@ -50,7 +50,7 @@ pub const SECTION_ORDER: &[&str] = &[
     "patterns",
     // Feature 004. Both after every project-scoped section, and personal
     // ahead of team: the same specificity gradient the order above already
-    // expresses (task > branch > project) continues past "now" — personal
+    // expresses (session > branch > project) continues past "now" — personal
     // knowledge is specific to the one account asking, team guidance is the
     // server-wide default with no actor-specific claim at all (FR-476, D422,
     // `contracts/recall-composition.md` §4).
@@ -546,13 +546,7 @@ fn admit_global_section(
 // Tier 0a — the guaranteed work state
 // ---------------------------------------------------------------------------
 
-/// Admit the O(1) work state: repository, then the task's identity, bounded
-/// goal, status, derived counts, readiness and the single most actionable
-/// blocker, then the warning **kinds** with counts.
-///
-/// Returns false only when the task itself did not fit, which at any budget at
-/// or above the documented minimum cannot happen — the tier's worst case is
-/// bounded precisely so that it cannot.
+/// Admit bounded repository state and warning kinds with counts.
 fn admit_tier_0a(
     b: &mut Briefing,
     input: &ContextInputs<'_>,
@@ -616,8 +610,7 @@ fn admit_tier_0a(
 // Tier 0b — bounded detail
 // ---------------------------------------------------------------------------
 
-/// Warning detail, then pins, then criterion text in action order, then further
-/// blockers — each until its cap or the budget binds (FR-444, FR-446, FR-448).
+/// Warning detail and pins, each until its cap or the budget binds.
 fn admit_tier_0b(
     b: &mut Briefing,
     input: &ContextInputs<'_>,

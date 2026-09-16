@@ -365,6 +365,44 @@ pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<
     Ok(bundle)
 }
 
+/// Whether the one-way Task export has not yet been explicitly completed.
+pub async fn removed_feature_tasks_pending(store: &Store) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
+    )
+    .fetch_optional(store.pool())
+    .await?
+    .as_deref()
+        == Some("retained_pending_export"))
+}
+
+/// Remove legacy Task schema only after its immutable external bundle exists.
+/// This is deliberately an explicit setup action, never an open-store action.
+pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
+    let mut tx = store.pool().begin().await?;
+    for statement in [
+        "DROP TABLE IF EXISTS criterion_evidence",
+        "DROP TABLE IF EXISTS task_changes",
+        "DROP TABLE IF EXISTS task_blockers",
+        "DROP TABLE IF EXISTS task_criteria",
+        "DROP INDEX IF EXISTS sessions_task_recent",
+        "ALTER TABLE sessions DROP COLUMN task_id",
+        "ALTER TABLE sessions DROP COLUMN task_snapshot_at_bind",
+        "ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_id",
+        "ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_state_digest",
+        "ALTER TABLE continuity_checkpoints DROP COLUMN criteria_snapshot",
+        "ALTER TABLE continuity_checkpoints DROP COLUMN open_blockers",
+        "DROP TABLE IF EXISTS tasks",
+    ] {
+        sqlx::query(statement).execute(&mut *tx).await?;
+    }
+    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_cleaned' WHERE feature = 'tasks'")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn export_snapshot(store: &Store, snapshot: &Path) -> Result<MigrationManifest> {
     if std::fs::symlink_metadata(snapshot).is_ok() {
         return Err(refused(
@@ -780,5 +818,14 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence").fetch_one(pool).await.unwrap(), 1);
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 1);
         assert_eq!(std::fs::read_to_string(path).unwrap(), serde_json::to_string_pretty(&bundle).unwrap());
+        cleanup_removed_feature_tasks(&store).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(!removed_feature_tasks_pending(&store).await.unwrap());
     }
 }

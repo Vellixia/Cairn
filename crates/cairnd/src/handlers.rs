@@ -924,11 +924,59 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     // `init` is the one place a checkout's identity is worth re-reading.
     d.forget_repo(cwd).await;
     let r = d.resolve(cwd).await?;
+    let legacy_migration = migrate_removed_feature_tasks(d).await;
     Ok(json!({
         "project": ProjectSummary::from(&r.project),
         "worktree_path": r.worktree(),
         "git_common_dir": r.repo.git_common_dir.display().to_string(),
+        "legacy_migration": legacy_migration,
     }))
+}
+
+/// Setup is the sole automatic migration boundary. Failure is a warning: the
+/// already-open store remains usable for safe capture, and no legacy row is
+/// removed until backup, manifest, and removed-feature bundle all verify.
+async fn migrate_removed_feature_tasks(d: &Daemon) -> serde_json::Value {
+    use cairn_store::transfer;
+
+    let pending = match transfer::removed_feature_tasks_pending(&d.store).await {
+        Ok(value) => value,
+        Err(error) => return json!({ "status": "warning", "detail": error.to_string() }),
+    };
+    if !pending {
+        return json!({ "status": "not_pending" });
+    }
+    let dir = cairn_core::paths::home().join("removed_feature").join("tasks-v1");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        return json!({ "status": "warning", "detail": error.to_string() });
+    }
+    let snapshot = dir.join("legacy.sqlite");
+    let manifest_path = dir.join("legacy.manifest.json");
+    let bundle_path = dir.join("removed_feature.json");
+    let result = async {
+        let manifest = transfer::export_snapshot(&d.store, &snapshot).await?;
+        transfer::write_manifest(&manifest, &manifest_path)?;
+        let bundle = transfer::export_removed_feature_tasks(&d.store, &bundle_path).await?;
+        transfer::cleanup_removed_feature_tasks(&d.store).await?;
+        Ok::<_, cairn_store::StoreError>(bundle)
+    }
+    .await;
+    match result {
+        Ok(bundle) => json!({
+            "status": "exported_cleaned",
+            "backup": snapshot,
+            "manifest": manifest_path,
+            "bundle": bundle_path,
+            "records": bundle.records.len(),
+        }),
+        Err(error) => json!({
+            "status": "warning",
+            "backup": snapshot,
+            "manifest": manifest_path,
+            "bundle": bundle_path,
+            "detail": error.to_string(),
+        }),
+    }
 }
 
 async fn status(d: &Daemon, cwd: &str, spool_reason: bool) -> Reply {
