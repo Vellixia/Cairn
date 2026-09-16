@@ -413,7 +413,7 @@ pub fn normalize_content(content: &str) -> String {
 /// Whether a single working context would select both memories.
 ///
 /// This is the precondition for conflict, and it is why the two cases people
-/// expect to be conflicts are not: a project-scoped answer and a task-scoped
+/// expect to be conflicts are not: a project-scoped answer and a session-scoped
 /// one are never simultaneously applicable, and neither are two branches
 /// (D48).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

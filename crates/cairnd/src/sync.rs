@@ -3241,8 +3241,7 @@ async fn drain(
 
     // Once this store has begun migrating, its project *knowledge* belongs to
     // the migration's transfer path and stops going out through this one. Work
-    // tracking and continuity — tasks, sessions, handoffs, criteria, blockers —
-    // are untouched and keep syncing exactly as before (FR-877).
+    // session and handoff tracking are untouched and keep syncing as before.
     let excluded: &[&str] = if legacy_writes_are_open(d).await {
         &[]
     } else {

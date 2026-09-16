@@ -873,6 +873,15 @@ mod tests {
     #[tokio::test]
     async fn scope_precedence_beats_relevance() {
         let (store, project, session) = fixture().await;
+        add(
+            &store,
+            project,
+            session,
+            MemoryScope::Session,
+            &session.to_string(),
+            "tests belong to this session",
+        )
+        .await;
         // The project-scoped memory is the better lexical match on purpose.
         add(
             &store,
@@ -902,9 +911,10 @@ mod tests {
         };
         let out = search(&store, project, &q, &ctx).await.unwrap();
 
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].scope, MemoryScope::Branch);
-        assert_eq!(out[1].scope, MemoryScope::Project);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].scope, MemoryScope::Session);
+        assert_eq!(out[1].scope, MemoryScope::Branch);
+        assert_eq!(out[2].scope, MemoryScope::Project);
     }
 
     #[tokio::test]

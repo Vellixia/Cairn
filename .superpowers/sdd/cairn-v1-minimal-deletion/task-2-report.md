@@ -103,3 +103,33 @@ shims.
   passed (existing `cairn-server` web-operation dead-code warnings).
 - `cargo test --workspace --all-targets --no-run` passed before focused tests.
 - `git diff --check` passed.
+
+## Review fix round 1 — retained-feature conservation
+
+- Migration 0013 now retains legacy Task data pending explicit export; it does
+  not destructively delete task rows or risk orphaning relations.
+- Added `transfer::export_removed_feature_tasks`, a narrow versioned external
+  `removed_feature` JSON bundle. It exports Tasks, bound sessions, task-scoped
+  memories, observation and evidence links, dependent evidence, relations,
+  criteria/history/blockers, criterion verification/evidence, task continuity,
+  and legacy task outbox rows. Every exported source row is explicitly
+  `retained`; the conservation report includes accepted/rejected zero counts.
+- The output is create-new and synced before the manifest is marked
+  `exported_retained`; an export failure leaves source data and safe capture
+  untouched.
+
+### Fix validation
+
+- RED: `cargo test -p cairn-store transfer::tests::removed_feature_bundle_conserves_task_records_and_dependencies --lib` failed because the exporter did not exist.
+- GREEN: the same focused test passes; it seeds task + task memory + evidence
+  + relation data, verifies all conservation/disposition records, and verifies
+  source tables are unchanged.
+- `cargo check -p cairn-store` passes.
+- `cargo clippy -p cairn-store -- -D warnings` passes.
+- `git diff --check` passes.
+
+### Residual follow-up
+
+- Historical schema transformer references in `cairn-store/src/migrate.rs` are
+  migration-only. The remaining disabled core task corpus and stale narrative
+  references still require physical removal in the next cleanup pass.

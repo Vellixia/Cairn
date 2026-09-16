@@ -66,6 +66,7 @@ fn inputs<'a>(
         previous_handoff: None,
         decisions: &[],
         known_failures: &[],
+        session_memory: &[],
         branch_memory: &[],
         project_memory,
         patterns: &[],

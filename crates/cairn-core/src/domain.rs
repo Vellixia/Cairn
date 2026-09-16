@@ -305,8 +305,7 @@ text_enum!(
     /// distinction.
     VerificationAuthority, "verification authority", {
         /// A deterministic check this machine ran over `collector = cairn`
-        /// evidence. The only authority a task criterion or a cross-project
-        /// promotion accepts (FR-484, FR-396).
+        /// evidence. The authority accepted for cross-project promotion.
         Cairn => "cairn",
         /// The memory is verified, and every run that established it consulted
         /// only agent-attested evidence. Useful, labelled, and visibly weaker.

@@ -1332,8 +1332,7 @@ async fn personal_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<
 //   `UPDATE` statements against `team_knowledge`, and each hardcodes the state
 //   it requires the row to already be in (`'proposed'` and `'authoritative'`
 //   respectively) in its own `WHERE` clause — the same shape the contract's
-//   own SQL gives (§3) and the same shape `crate::criteria::check_revision`
-//   already proved for task criteria, adapted from an integer revision to a
+//   own SQL gives (§3), adapted from an integer revision to a
 //   three-value state. A row not in the required state is refused, naming
 //   its actual state (FR-454) — `retired` never re-ratifies (FR-465) because
 //   no `WHERE` clause in this module ever requires `state = 'retired'` to
