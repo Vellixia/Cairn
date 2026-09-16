@@ -133,3 +133,22 @@ shims.
 - Historical schema transformer references in `cairn-store/src/migrate.rs` are
   migration-only. The remaining disabled core task corpus and stale narrative
   references still require physical removal in the next cleanup pass.
+
+## Review fix round 3 — transactional cleanup recovery
+
+- Export now records `exported_pending_cleanup` plus immutable artifact path and
+  SHA-256. Setup retries cleanup only; it never overwrites or re-exports an
+  existing bundle.
+- Cleanup validates artifact hash/schema, then transactionally deletes Task-only
+  memories, links, relations, task outbox and criterion verification rows. It
+  preserves evidence still linked from surviving memory, removes unreferenced
+  Task evidence, and rebuilds live memory/outbox/verification constraints so
+  Task scope/entity/criterion fields cannot return.
+- Human `cairn setup` now renders migration status, warning detail, and all
+  artifact paths; JSON envelope remains unchanged.
+
+### Validation
+
+- RED then GREEN: `cargo test -p cairn-store transfer::tests::removed_feature_bundle_conserves_task_records_and_dependencies --lib`.
+- `cargo test -p cairnd init_legacy_task` passes, including corrupt-bundle
+  cleanup warning, unchanged artifact, resumed cleanup, and usable store.

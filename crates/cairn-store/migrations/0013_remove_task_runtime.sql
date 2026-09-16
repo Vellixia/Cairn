@@ -5,8 +5,10 @@
 CREATE TABLE IF NOT EXISTS removed_feature_manifest (
     feature TEXT PRIMARY KEY,
     bundle_version INTEGER NOT NULL,
-    disposition TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    disposition TEXT NOT NULL CHECK (disposition IN ('retained_pending_export', 'exported_pending_cleanup', 'exported_cleaned')),
+    created_at TEXT NOT NULL,
+    artifact_path TEXT,
+    artifact_sha256 TEXT
 );
 
 INSERT OR IGNORE INTO removed_feature_manifest

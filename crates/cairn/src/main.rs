@@ -100,7 +100,20 @@ fn render_setup_success(value: &serde_json::Value, json: bool) -> String {
             + "\n"
     } else {
         let name = value["project"]["name"].as_str().unwrap_or("project");
-        format!("Cairn is tracking {name}.\n")
+        let mut output = format!("Cairn is tracking {name}.\n");
+        if let Some(migration) = value.get("legacy_migration") {
+            let status = migration["status"].as_str().unwrap_or("unknown");
+            output.push_str(&format!("Legacy Task migration: {status}.\n"));
+            if let Some(detail) = migration["detail"].as_str() {
+                output.push_str(&format!("Detail: {detail}\n"));
+            }
+            for key in ["backup", "manifest", "bundle"] {
+                if let Some(path) = migration[key].as_str() {
+                    output.push_str(&format!("{key}: {path}\n"));
+                }
+            }
+        }
+        output
     }
 }
 
@@ -140,8 +153,8 @@ mod tests {
 
     #[test]
     fn setup_renders_stable_text_and_json_envelopes() {
-        let value = serde_json::json!({ "project": { "name": "demo" } });
-        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\n");
+        let value = serde_json::json!({ "project": { "name": "demo" }, "legacy_migration": { "status": "warning", "detail": "artifact conflict", "backup": "/tmp/legacy.sqlite", "manifest": "/tmp/legacy.manifest.json", "bundle": "/tmp/removed_feature.json" } });
+        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\nLegacy Task migration: warning.\nDetail: artifact conflict\nbackup: /tmp/legacy.sqlite\nmanifest: /tmp/legacy.manifest.json\nbundle: /tmp/removed_feature.json\n");
 
         let json: serde_json::Value = serde_json::from_str(&render_setup_success(&value, true))
             .expect("setup JSON");

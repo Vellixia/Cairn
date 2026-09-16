@@ -311,6 +311,14 @@ async fn removed_feature_rows(
 /// deleting legacy Task data. This never changes source rows; a failed export
 /// therefore leaves capture and its local spool available.
 pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<RemovedFeatureBundle> {
+    let state: Option<String> = sqlx::query_scalar(
+        "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
+    )
+    .fetch_optional(store.pool())
+    .await?;
+    if state.as_deref() != Some("retained_pending_export") {
+        return Err(refused("removed_feature_export_not_pending", "Task export is already recorded"));
+    }
     if std::fs::symlink_metadata(path).is_ok() {
         return Err(refused(
             "removed_feature_bundle_exists",
@@ -359,13 +367,16 @@ pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<
     let mut output = options.open(path)?;
     output.write_all(&bytes)?;
     output.sync_all()?;
-    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_retained' WHERE feature = 'tasks'")
+    let (_, artifact_sha256) = digest(path)?;
+    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_pending_cleanup', artifact_path = ?, artifact_sha256 = ? WHERE feature = 'tasks'")
+        .bind(path.to_string_lossy().as_ref())
+        .bind(artifact_sha256)
         .execute(store.pool())
         .await?;
     Ok(bundle)
 }
 
-/// Whether the one-way Task export has not yet been explicitly completed.
+/// Whether Task export or its resumable cleanup remains outstanding.
 pub async fn removed_feature_tasks_pending(store: &Store) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, String>(
         "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
@@ -373,14 +384,52 @@ pub async fn removed_feature_tasks_pending(store: &Store) -> Result<bool> {
     .fetch_optional(store.pool())
     .await?
     .as_deref()
-        == Some("retained_pending_export"))
+        != Some("exported_cleaned"))
+}
+
+/// Artifact paths are manifest-owned, never reconstructed by a retrying caller.
+pub async fn removed_feature_tasks_exported_pending_cleanup(
+    store: &Store,
+) -> Result<Option<(String, String)>> {
+    sqlx::query_as(
+        "SELECT artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks' AND disposition = 'exported_pending_cleanup'",
+    )
+    .fetch_optional(store.pool())
+    .await
+    .map_err(Into::into)
 }
 
 /// Remove legacy Task schema only after its immutable external bundle exists.
 /// This is deliberately an explicit setup action, never an open-store action.
 pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
+    let artifact: Option<(String, String)> = sqlx::query_as(
+        "SELECT artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks' AND disposition = 'exported_pending_cleanup'",
+    )
+    .fetch_optional(store.pool())
+    .await?;
+    let (path, expected_hash) = artifact.ok_or_else(|| {
+        refused("removed_feature_cleanup_not_pending", "Task bundle export must finish before cleanup")
+    })?;
+    let path = Path::new(&path);
+    let (_, actual_hash) = digest(path)?;
+    if actual_hash != expected_hash {
+        return Err(refused("removed_feature_artifact_changed", "Task bundle hash no longer matches manifest"));
+    }
+    let bundle: RemovedFeatureBundle = serde_json::from_slice(&std::fs::read(path)?)
+        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+    if bundle.version != REMOVED_FEATURE_BUNDLE_VERSION || bundle.feature != "tasks" {
+        return Err(refused("removed_feature_artifact_invalid", "Task bundle is not a supported removed-feature artifact"));
+    }
     let mut tx = store.pool().begin().await?;
     for statement in [
+        "DELETE FROM verification_runs WHERE criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "DELETE FROM criterion_evidence",
+        "DELETE FROM memory_evidence WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "DELETE FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "DELETE FROM memory_relations WHERE from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "DELETE FROM outbox WHERE entity_type IN ('task', 'task_criterion', 'task_blocker')",
+        "DELETE FROM memories WHERE scope = 'task'",
+        "DELETE FROM evidence_facts WHERE id NOT IN (SELECT evidence_id FROM memory_evidence_facts)",
         "DROP TABLE IF EXISTS criterion_evidence",
         "DROP TABLE IF EXISTS task_changes",
         "DROP TABLE IF EXISTS task_blockers",
@@ -393,6 +442,37 @@ pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
         "ALTER TABLE continuity_checkpoints DROP COLUMN criteria_snapshot",
         "ALTER TABLE continuity_checkpoints DROP COLUMN open_blockers",
         "DROP TABLE IF EXISTS tasks",
+        "DROP INDEX IF EXISTS verification_runs_criterion",
+        "CREATE TABLE verification_runs_new (id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), verifier TEXT NOT NULL CHECK (verifier IN ('file_exists', 'file_digest', 'git_ref', 'git_commit', 'configuration', 'schema_version', 'test_outcome', 'command_outcome', 'runtime_state')), evidence_id TEXT, expected_digest TEXT, observed_digest TEXT, result TEXT NOT NULL CHECK (result IN ('verified', 'drifted', 'inconclusive')), detail TEXT, repo_branch TEXT NOT NULL, repo_commit TEXT, checked_at TEXT NOT NULL, triggered_by TEXT NOT NULL CHECK (triggered_by IN ('background_pass', 'on_demand', 'attach')))",
+        "INSERT INTO verification_runs_new (id, memory_id, project_id, verifier, evidence_id, expected_digest, observed_digest, result, detail, repo_branch, repo_commit, checked_at, triggered_by) SELECT id, memory_id, project_id, verifier, evidence_id, expected_digest, observed_digest, result, detail, repo_branch, repo_commit, checked_at, triggered_by FROM verification_runs",
+        "DROP TABLE verification_runs",
+        "ALTER TABLE verification_runs_new RENAME TO verification_runs",
+        "CREATE INDEX verification_runs_memory ON verification_runs (memory_id, checked_at DESC)",
+        "CREATE INDEX verification_runs_result ON verification_runs (project_id, result)",
+        "CREATE TABLE memory_evidence_staged (memory_id TEXT NOT NULL, observation_id TEXT NOT NULL, content_digest TEXT NOT NULL, PRIMARY KEY (memory_id, observation_id))",
+        "INSERT INTO memory_evidence_staged SELECT * FROM memory_evidence",
+        "DROP TABLE memory_evidence",
+        "CREATE TABLE memory_evidence_facts_staged (memory_id TEXT NOT NULL, evidence_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('supports', 'contradicts')), attached_at TEXT NOT NULL, attached_by_session TEXT NOT NULL, PRIMARY KEY (memory_id, evidence_id, role))",
+        "INSERT INTO memory_evidence_facts_staged SELECT * FROM memory_evidence_facts",
+        "DROP TABLE memory_evidence_facts",
+        "CREATE TABLE memories_new (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), type TEXT NOT NULL CHECK (type IN ('fact', 'decision', 'convention', 'failure', 'procedure')), scope TEXT NOT NULL CHECK (scope IN ('project', 'branch', 'session')), scope_key TEXT NOT NULL, content TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'stale', 'superseded')), superseded_by_id TEXT REFERENCES memories(id), origin_session_id TEXT NOT NULL, local_only INTEGER NOT NULL DEFAULT 0 CHECK (local_only IN (0, 1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, topic_key TEXT, value_key TEXT, content_norm_digest TEXT, importance TEXT NOT NULL DEFAULT 'normal', verification TEXT NOT NULL DEFAULT 'unverified', verification_authority TEXT, last_verified_at TEXT, effective_from TEXT, superseded_at TEXT, stale_at TEXT, pinned INTEGER NOT NULL DEFAULT 0, pinned_at TEXT, pinned_by_session TEXT, pin_reason TEXT, reinforcement_count INTEGER NOT NULL DEFAULT 0, distinct_origin_count INTEGER NOT NULL DEFAULT 1)",
+        "INSERT INTO memories_new SELECT * FROM memories",
+        "DROP TABLE memories",
+        "ALTER TABLE memories_new RENAME TO memories",
+        "CREATE INDEX memories_scope ON memories (project_id, scope, scope_key, state)",
+        "CREATE TABLE memory_evidence (memory_id TEXT NOT NULL REFERENCES memories(id), observation_id TEXT NOT NULL, content_digest TEXT NOT NULL, PRIMARY KEY (memory_id, observation_id))",
+        "INSERT INTO memory_evidence SELECT * FROM memory_evidence_staged",
+        "DROP TABLE memory_evidence_staged",
+        "CREATE TABLE memory_evidence_facts (memory_id TEXT NOT NULL REFERENCES memories(id), evidence_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('supports', 'contradicts')), attached_at TEXT NOT NULL, attached_by_session TEXT NOT NULL, PRIMARY KEY (memory_id, evidence_id, role))",
+        "INSERT INTO memory_evidence_facts SELECT * FROM memory_evidence_facts_staged",
+        "DROP TABLE memory_evidence_facts_staged",
+        "CREATE INDEX memory_evidence_facts_evidence ON memory_evidence_facts (evidence_id)",
+        "CREATE TABLE outbox_new (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), server_project_id TEXT, entity_type TEXT NOT NULL CHECK (entity_type IN ('project', 'session', 'memory', 'handoff', 'memory_relation', 'personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')), entity_id TEXT NOT NULL, operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')), idempotency_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'in_flight', 'delivered', 'failed', 'blocked')), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, delivered_at TEXT, claimed_at TEXT, blocked_reason TEXT, blocked_at_capability TEXT, namespace TEXT NOT NULL, authored_by_user_id TEXT, CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')) = (project_id IS NULL)), CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')) = (authored_by_user_id IS NOT NULL)))",
+        "INSERT INTO outbox_new SELECT * FROM outbox",
+        "DROP TABLE outbox",
+        "ALTER TABLE outbox_new RENAME TO outbox",
+        "CREATE INDEX outbox_pending ON outbox (state, created_at)",
+        "CREATE INDEX outbox_claimable ON outbox (namespace, state, created_at)",
     ] {
         sqlx::query(statement).execute(&mut *tx).await?;
     }
@@ -790,6 +870,10 @@ mod tests {
             .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('m', 'e', 'supports', 'now', 's')")
             .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('keep', 'p', 'fact', 'project', 'p', 'surviving memory', 's', 'now', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('keep', 'e', 'supports', 'now', 's')")
+            .execute(pool).await.unwrap();
         sqlx::query("INSERT INTO memory_relations (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis) VALUES ('m', 'm', 'reinforces', 'p', 's', 'now', 'explicit_agent')")
             .execute(pool).await.unwrap();
 
@@ -819,6 +903,13 @@ mod tests {
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 1);
         assert_eq!(std::fs::read_to_string(path).unwrap(), serde_json::to_string_pretty(&bundle).unwrap());
         cleanup_removed_feature_tasks(&store).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE id = 'm'").fetch_one(pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence WHERE memory_id = 'm'").fetch_one(pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence_facts WHERE memory_id = 'm'").fetch_one(pool).await.unwrap(), 0);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'e'").fetch_one(pool).await.unwrap(), 1);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 0);
+        assert!(sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('bad', 'p', 'fact', 'task', 't', 'bad', 's', 'now', 'now')").execute(pool).await.is_err());
+        assert!(sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES ('bad', 'p', 'task', 't', 'upsert', 'bad', '{}', 'now', 'project:p')").execute(pool).await.is_err());
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
                 .fetch_one(pool)

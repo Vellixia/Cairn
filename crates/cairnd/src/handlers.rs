@@ -960,6 +960,13 @@ async fn migrate_removed_feature_tasks_at(d: &Daemon, dir: &std::path::Path) -> 
     let snapshot = dir.join("legacy.sqlite");
     let manifest_path = dir.join("legacy.manifest.json");
     let bundle_path = dir.join("removed_feature.json");
+    if let Ok(Some((path, _))) = transfer::removed_feature_tasks_exported_pending_cleanup(&d.store).await {
+        let bundle_path = std::path::PathBuf::from(path);
+        return match transfer::cleanup_removed_feature_tasks(&d.store).await {
+            Ok(()) => json!({ "status": "exported_cleaned", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": "resumed cleanup" }),
+            Err(error) => json!({ "status": "warning", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": error.to_string() }),
+        };
+    }
     let result = async {
         let manifest = transfer::export_snapshot(&d.store, &snapshot).await?;
         transfer::write_manifest(&manifest, &manifest_path)?;
@@ -4061,6 +4068,30 @@ mod tests {
         assert_eq!(tasks, 1);
         // The same real store remains usable after the warning.
         assert!(cairn_store::repo::list_projects(&repo.daemon.store).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn init_legacy_task_cleanup_failure_retries_existing_verified_bundle() {
+        let repo = Repo::new().await;
+        let artifacts = tempfile::tempdir().unwrap();
+        let snapshot = artifacts.path().join("legacy.sqlite");
+        let manifest = artifacts.path().join("legacy.manifest.json");
+        let bundle = artifacts.path().join("removed_feature.json");
+        let exported = cairn_store::transfer::export_snapshot(&repo.daemon.store, &snapshot).await.unwrap();
+        cairn_store::transfer::write_manifest(&exported, &manifest).unwrap();
+        cairn_store::transfer::export_removed_feature_tasks(&repo.daemon.store, &bundle).await.unwrap();
+        let original = std::fs::read(&bundle).unwrap();
+        std::fs::write(&bundle, b"changed after export").unwrap();
+
+        let warning = migrate_removed_feature_tasks_at(&repo.daemon, artifacts.path()).await;
+        assert_eq!(warning["status"], "warning");
+        assert!(cairn_store::repo::list_projects(&repo.daemon.store).await.is_ok());
+        assert_eq!(std::fs::read(&bundle).unwrap(), b"changed after export");
+
+        std::fs::write(&bundle, original).unwrap();
+        let retried = migrate_removed_feature_tasks_at(&repo.daemon, artifacts.path()).await;
+        assert_eq!(retried["status"], "exported_cleaned");
+        assert_eq!(retried["detail"], "resumed cleanup");
     }
 
     async fn err(r: &Repo, request: Request) -> serde_json::Value {
