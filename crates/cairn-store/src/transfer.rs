@@ -11,6 +11,27 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 
 pub const MANIFEST_VERSION: u32 = 1;
+/// Schema for the one-way, offline export of the removed Task feature.
+pub const REMOVED_FEATURE_BUNDLE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemovedFeatureBundle {
+    pub version: u32,
+    pub feature: String,
+    pub exported_at: String,
+    pub records: Vec<RemovedFeatureRecord>,
+    /// All disposition keys are present so a conservation report is explicit
+    /// before any later import chooses accepted or rejected records.
+    pub dispositions: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemovedFeatureRecord {
+    pub source_table: String,
+    pub source_id: String,
+    pub disposition: String,
+    pub payload: serde_json::Value,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationManifest {
@@ -246,6 +267,102 @@ async fn manifest_summaries(path: &Path) -> Result<(BTreeMap<String, u64>, BTree
     )
     .await?;
     Ok((tombstones, local))
+}
+
+async fn removed_feature_rows(
+    store: &Store,
+    table: &str,
+    predicate: &str,
+    source_id: &str,
+) -> Result<Vec<RemovedFeatureRecord>> {
+    let columns: Vec<String> = sqlx::query(&format!("PRAGMA table_info({})", ql(table)))
+        .fetch_all(store.pool())
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("name"))
+        .collect::<std::result::Result<_, _>>()?;
+    let json_args = columns
+        .iter()
+        .flat_map(|column| [ql(column), qi(column)])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {source_id} AS source_id, json_object({json_args}) AS payload FROM {} WHERE {predicate}",
+        qi(table)
+    );
+    sqlx::query(&sql)
+        .fetch_all(store.pool())
+        .await?
+        .into_iter()
+        .map(|row| {
+            let payload: String = row.try_get("payload")?;
+            Ok(RemovedFeatureRecord {
+                source_table: table.to_owned(),
+                source_id: row.try_get("source_id")?,
+                disposition: "retained".to_owned(),
+                payload: serde_json::from_str(&payload)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+            })
+        })
+        .collect()
+}
+
+/// Write a versioned, offline-only bundle before any operator considers
+/// deleting legacy Task data. This never changes source rows; a failed export
+/// therefore leaves capture and its local spool available.
+pub async fn export_removed_feature_tasks(store: &Store, path: &Path) -> Result<RemovedFeatureBundle> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(refused(
+            "removed_feature_bundle_exists",
+            format!("refusing to overwrite {}", path.display()),
+        ));
+    }
+    let selections = [
+        ("tasks", "1 = 1", "id"),
+        ("sessions", "task_id IS NOT NULL", "id"),
+        ("memories", "scope = 'task'", "id"),
+        ("memory_evidence", "memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "memory_id || ':' || observation_id"),
+        ("memory_evidence_facts", "memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "memory_id || ':' || evidence_id || ':' || role"),
+        ("evidence_facts", "id IN (SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task'))", "id"),
+        ("memory_relations", "from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')", "from_memory_id || ':' || to_memory_id || ':' || kind"),
+        ("task_criteria", "1 = 1", "id"),
+        ("task_blockers", "1 = 1", "id"),
+        ("task_changes", "1 = 1", "id"),
+        ("criterion_evidence", "criterion_id IN (SELECT id FROM task_criteria)", "criterion_id || ':' || evidence_id"),
+        ("verification_runs", "criterion_id IN (SELECT id FROM task_criteria)", "id"),
+        ("continuity_checkpoints", "assumed_task_id IS NOT NULL", "id"),
+        ("outbox", "entity_type = 'task'", "id"),
+    ];
+    let mut records = Vec::new();
+    for (table, predicate, source_id) in selections {
+        records.extend(removed_feature_rows(store, table, predicate, source_id).await?);
+    }
+    let dispositions = BTreeMap::from([
+        ("accepted".to_owned(), 0),
+        ("rejected".to_owned(), 0),
+        ("retained".to_owned(), records.len() as u64),
+    ]);
+    // Retaining the explicit zero avoids an ambiguous report while the bundle
+    // remains offline, before a server import can decide accepted/rejected.
+    let bundle = RemovedFeatureBundle {
+        version: REMOVED_FEATURE_BUNDLE_VERSION,
+        feature: "tasks".to_owned(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        records,
+        dispositions,
+    };
+    let bytes = serde_json::to_vec_pretty(&bundle).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut output = options.open(path)?;
+    output.write_all(&bytes)?;
+    output.sync_all()?;
+    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_retained' WHERE feature = 'tasks'")
+        .execute(store.pool())
+        .await?;
+    Ok(bundle)
 }
 
 pub async fn export_snapshot(store: &Store, snapshot: &Path) -> Result<MigrationManifest> {
@@ -554,7 +671,7 @@ pub async fn import_snapshot(
         .bind(private.path().to_string_lossy().as_ref())
         .execute(&mut *p)
         .await
-        .map_err(|e| StoreError::from(e))?;
+        .map_err(StoreError::from)?;
     let result = async {
         if m.lanes != inventory(private.path()).await? {
             return Err(refused(
@@ -610,5 +727,58 @@ pub async fn import_snapshot(
         (Err(e), _) => Err(e),
         (Ok(_), Err(e)) => Err(e.into()),
         (Ok(v), Ok(_)) => Ok(v),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn removed_feature_bundle_conserves_task_records_and_dependencies() {
+        let store = Store::open_memory().await.unwrap();
+        let pool = store.pool();
+        sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, worktree_path, agent_session_key, status, started_at, last_event_at, daemon_run_id) VALUES ('s', 'p', 't', 'u', 'a', 'main', '/p', 'key', 'active', 'now', 'now', 'run')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('m', 'p', 'fact', 'task', 't', 'task memory', 's', 'now', 'now')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memory_evidence (memory_id, observation_id, content_digest) VALUES ('m', 'o', 'digest')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('e', 'p', 'observation', 'cairn', 'subject', 'main', 'now', 's')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('m', 'e', 'supports', 'now', 's')")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO memory_relations (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis) VALUES ('m', 'm', 'reinforces', 'p', 's', 'now', 'explicit_agent')")
+            .execute(pool).await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.removed_feature.json");
+        let bundle = export_removed_feature_tasks(&store, &path).await.unwrap();
+
+        assert_eq!(bundle.version, REMOVED_FEATURE_BUNDLE_VERSION);
+        assert_eq!(bundle.feature, "tasks");
+        assert_eq!(bundle.dispositions["accepted"], 0);
+        assert_eq!(bundle.dispositions["rejected"], 0);
+        assert_eq!(bundle.dispositions["retained"], bundle.records.len() as u64);
+        for table in [
+            "tasks",
+            "memories",
+            "memory_evidence",
+            "evidence_facts",
+            "memory_evidence_facts",
+            "memory_relations",
+        ] {
+            assert!(bundle.records.iter().any(|r| r.source_table == table), "{table}");
+        }
+        assert!(bundle.records.iter().all(|r| r.disposition == "retained"));
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks").fetch_one(pool).await.unwrap(), 1);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE scope = 'task'").fetch_one(pool).await.unwrap(), 1);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence").fetch_one(pool).await.unwrap(), 1);
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations").fetch_one(pool).await.unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), serde_json::to_string_pretty(&bundle).unwrap());
     }
 }
