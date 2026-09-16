@@ -1988,29 +1988,6 @@ mod proposal_tests {
     }
 
     #[test]
-    #[cfg(any())]
-    fn a_scope_exception_is_never_a_conflict() {
-        // Scenario B: project PostgreSQL, task SQLite fixture.
-        let project = keyed(
-            1,
-            "infra.db",
-            "postgresql",
-            "The production database is PostgreSQL.",
-        );
-        let mut task = keyed(
-            2,
-            "infra.db",
-            "sqlite",
-            "This integration fixture uses SQLite.",
-        );
-        task.scope = MemoryScope::Task;
-        task.scope_key = "T1".into();
-        let (outcome, relations) = classify_proposal(&task, &[project], MAX);
-        assert_eq!(outcome, ProposalOutcome::Created);
-        assert!(relations.is_empty());
-    }
-
-    #[test]
     fn two_branches_never_interact() {
         let mut main = keyed(1, "api.style", "rest", "The API is REST.");
         main.scope = MemoryScope::Branch;

@@ -32,8 +32,6 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// daemon needs no probe endpoint and no version table (D81).
 pub const SCHEMA_2_CAPABILITIES: &[&str] = &[
     "memory_relations",
-    "task_criteria",
-    "task_blockers",
     "memory_subject_identity",
     "memory_verification",
 ];
@@ -48,8 +46,6 @@ pub const SCHEMA_2_CAPABILITIES: &[&str] = &[
 /// established: no probe endpoint, no version table, just the field itself.
 pub const SCHEMA_3_CAPABILITIES: &[&str] = &[
     "memory_relations",
-    "task_criteria",
-    "task_blockers",
     "memory_subject_identity",
     "memory_verification",
     "personal_knowledge",
@@ -72,8 +68,6 @@ pub const SCHEMA_3_CAPABILITIES: &[&str] = &[
 /// attempt rather than being told once that the server cannot hold it.
 pub const SCHEMA_4_CAPABILITIES: &[&str] = &[
     "memory_relations",
-    "task_criteria",
-    "task_blockers",
     "memory_subject_identity",
     "memory_verification",
     "personal_knowledge",

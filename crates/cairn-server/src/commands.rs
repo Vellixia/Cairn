@@ -160,7 +160,7 @@ fn memory_scope(body: &Value) -> ApiResult<String> {
         .unwrap_or("project")
         .to_string();
     match raw.as_str() {
-        "project" | "branch" | "task" | "session" => Ok(raw),
+        "project" | "branch" | "session" => Ok(raw),
         other => Err(ApiError::invalid(format!(
             "`{other}` is not a memory scope"
         ))),

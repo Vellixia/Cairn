@@ -1,7 +1,7 @@
 //! Memory retrieval: exact filters, FTS5/BM25 relevance, scope-first ranking
 //! (FR-022 – FR-026, D3).
 //!
-//! Scope dominates. A mediocre match about *this task* beats an excellent match
+//! Scope dominates. A mediocre match about this session beats an excellent match
 //! about an unrelated one — that is what makes Cairn's recall correct rather
 //! than merely similar.
 
@@ -248,7 +248,7 @@ pub async fn search(
 pub async fn one(store: &Store, project_id: Uuid, memory_id: Uuid) -> Result<Option<MemoryResult>> {
     let row = sqlx::query(
         "SELECT m.*, \
-                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 \
+                CASE m.scope WHEN 'session' THEN 0 WHEN 'branch' THEN 1 \
                              WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket, \
                 0.0 AS relevance \
            FROM memories m WHERE m.id = ?1 AND m.deleted_at IS NULL",

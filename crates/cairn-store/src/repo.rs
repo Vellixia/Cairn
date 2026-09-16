@@ -778,9 +778,8 @@ pub async fn import_memory(store: &Store, m: ImportedMemory<'_>) -> Result<bool>
     // read — so two machines could never converge on a project-scoped subject
     // at all, which is most of them.
     //
-    // Only `project` needs the mapping. A branch key is a branch name, a task
-    // key is a task id that travels with the task, and a session key belongs to
-    // the machine that opened the session.
+    // Only `project` needs the mapping. Branch and session keys stay local to
+    // their recorded identities.
     let scope_key = match m.scope {
         MemoryScope::Project => m.project_id.to_string(),
         _ => m.scope_key.to_string(),
@@ -2465,9 +2464,7 @@ pub async fn recent_error_summaries(
 
 /// The text of `failure`-type memories in the applicable scopes.
 ///
-/// The other signal source. Project- and branch-scoped only: a task-scoped
-/// failure belongs to work that may have nothing to do with what is happening
-/// now, and widening the read would widen what a pattern matches on.
+/// The other signal source. Project- and branch-scoped only.
 pub async fn failure_memory_text(
     store: &Store,
     project_id: Uuid,

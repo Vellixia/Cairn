@@ -132,14 +132,6 @@ pub(crate) mod web_operations {
         "ProjectOverview"
     );
     operation!(
-        TASKS,
-        "GET",
-        "/api/projects/{id}/tasks",
-        "project_tasks",
-        "TaskQuery",
-        "TasksResponse"
-    );
-    operation!(
         SESSIONS,
         "GET",
         "/api/projects/{id}/sessions",
@@ -367,7 +359,6 @@ pub(crate) mod web_operations {
         PROJECTS,
         CREATE_PROJECT,
         PROJECT,
-        TASKS,
         SESSIONS,
         HANDOFF,
         MEMORIES,
@@ -433,10 +424,6 @@ pub(crate) struct RevokedResponse {
 #[derive(serde::Serialize)]
 pub(crate) struct ProjectsResponse {
     projects: Vec<Value>,
-}
-#[derive(serde::Serialize)]
-pub(crate) struct TasksResponse {
-    tasks: Vec<Value>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct SessionsResponse {
@@ -668,7 +655,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/admin/cutover", post(admin_cutover))
         // Read API for the web UI
         .web_operation(web_operations::PROJECT, project_overview)
-        .web_operation(web_operations::TASKS, project_tasks)
         .web_operation(web_operations::SESSIONS, project_sessions)
         .web_operation(web_operations::SYNC_STATUS, project_sync_status)
         // Health and the capture funnel. One write path and one read path per
@@ -3023,9 +3009,6 @@ async fn project_overview(
 
     let counts = sqlx::query(
         "SELECT
-            (SELECT COUNT(*) FROM tasks WHERE project_id = $1 AND deleted_at IS NULL) AS tasks,
-            (SELECT COUNT(*) FROM tasks WHERE project_id = $1 AND status != 'done'
-                AND deleted_at IS NULL) AS open_tasks,
             (SELECT COUNT(*) FROM sessions WHERE project_id = $1 AND deleted_at IS NULL) AS sessions,
             (SELECT COUNT(*) FROM memories WHERE project_id = $1 AND deleted_at IS NULL) AS memories",
     )
@@ -3059,8 +3042,6 @@ async fn project_overview(
             "repository_remote": project.get::<Option<String>, _>("repository_remote"),
         },
         "counts": {
-            "tasks": counts.get::<i64, _>("tasks"),
-            "open_tasks": counts.get::<i64, _>("open_tasks"),
             "sessions": counts.get::<i64, _>("sessions"),
             "memories": counts.get::<i64, _>("memories"),
         },
@@ -3073,62 +3054,11 @@ async fn project_overview(
     })))
 }
 
-#[derive(Deserialize)]
-struct TaskQuery {
-    #[serde(default)]
-    status: Option<String>,
-}
-
-async fn project_tasks(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Path(id): Path<Uuid>,
-    Query(q): Query<TaskQuery>,
-) -> ApiResult<Json<TasksResponse>> {
-    auth::require_member(&state.pool, id, user.id()).await?;
-    let rows =
-        match &q.status {
-            Some(status) => sqlx::query(
-                "SELECT * FROM tasks WHERE project_id = $1 AND status = $2 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-            )
-            .bind(id)
-            .bind(status)
-            .fetch_all(&state.pool)
-            .await?,
-            None => {
-                sqlx::query(
-                    "SELECT * FROM tasks WHERE project_id = $1 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-                )
-                .bind(id)
-                .fetch_all(&state.pool)
-                .await?
-            }
-        };
-
-    let tasks: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.get::<Uuid, _>("id"),
-                "title": r.get::<String, _>("title"),
-                "goal": r.get::<String, _>("goal"),
-                "acceptance_criteria": r.get::<Value, _>("acceptance_criteria"),
-                "status": r.get::<String, _>("status"),
-                "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
-            })
-        })
-        .collect();
-    Ok(Json(TasksResponse { tasks }))
-}
-
 fn sessions_json(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
     rows.iter()
         .map(|r| {
             json!({
                 "id": r.get::<Uuid, _>("id"),
-                "task_id": r.get::<Option<Uuid>, _>("task_id"),
                 "agent": r.get::<String, _>("agent"),
                 "branch": r.get::<String, _>("branch"),
                 "commit_sha": r.get::<Option<String>, _>("commit_sha"),
@@ -3164,7 +3094,6 @@ async fn project_sessions(
         .map(|r| {
             let mut v = json!({
                 "id": r.get::<Uuid, _>("id"),
-                "task_id": r.get::<Option<Uuid>, _>("task_id"),
                 "agent": r.get::<String, _>("agent"),
                 "branch": r.get::<String, _>("branch"),
                 "status": r.get::<String, _>("status"),
@@ -3293,7 +3222,7 @@ async fn project_memories(
 
     let rows = sqlx::query(
         "SELECT m.*,
-                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1
+                CASE m.scope WHEN 'session' THEN 0 WHEN 'branch' THEN 1
                              WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket,
                 CASE WHEN $2::text IS NULL OR $2 = '' THEN 0
                      ELSE ts_rank(to_tsvector('english', m.content),

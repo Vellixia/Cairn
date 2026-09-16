@@ -135,7 +135,6 @@ const REFUSED_FIELD_NAMES: &[&str] = &[
     "rationale",
     "basis_evidence_id",
     "path_fingerprints",
-    "task_snapshot_at_bind",
     "detail",
     "prior_value",
     "new_value",

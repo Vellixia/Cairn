@@ -704,7 +704,7 @@ fn warning_kind_counts(warnings: &[ContextWarning]) -> String {
 /// checkpoint → conflict → drift (`contracts/continuity-context.md`).
 fn warning_precedence(kind: &str) -> usize {
     match kind {
-        "task_divergence" | "checkpoint" => 0,
+        "checkpoint" => 0,
         "conflict" => 1,
         "drift" => 2,
         _ => 3,
@@ -714,7 +714,7 @@ fn warning_precedence(kind: &str) -> usize {
 fn warning_reason(kind: &str) -> SelectionReason {
     match kind {
         "conflict" => SelectionReason::ConflictWarning,
-        "task_divergence" | "checkpoint" => SelectionReason::CheckpointAssumption,
+        "checkpoint" => SelectionReason::CheckpointAssumption,
         _ => SelectionReason::DriftWarning,
     }
 }

@@ -33,7 +33,7 @@ const GLOBAL_PER_BRIEFING: i64 = 12;
 /// in on it. The old fallback assembled Level 0 from that store and served it,
 /// so a second account, or a signed-out caller, was handed whatever the first
 /// account's session had pulled down: project memory, the previous handoff and
-/// its decisions and failures, the bound task's criteria and blockers, pins,
+/// its decisions and failures, pins,
 /// patterns, personal notes and team guidance.
 ///
 /// A per-table owner filter would not fix it, because there is nothing to
@@ -90,7 +90,7 @@ pub fn unavailable(
 /// exceeds the budget it states (FR-029, SC-709).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durable {
-    /// This build reads task, branch and project memory, personal notes and
+    /// This build reads session, branch and project memory, personal notes and
     /// team guidance from the local store, as it always has.
     Local,
     /// The server already selected them and already spent for them. This build
@@ -553,9 +553,7 @@ async fn level0_warnings(
 
     // Drifted memories — the claim moved out from under what was remembered.
     //
-    // The project comes from the resolved project, never from the bound task: a
-    // session with no task would otherwise look drift-free by asking about the
-    // nil project.
+    // The project comes from the resolved project.
     if let Ok(drifted) = cairn_store::evidence::drifted_memories(&daemon.store, project_id, 4).await
     {
         for (subject, detail) in drifted {
@@ -857,14 +855,9 @@ mod tests {
         );
     }
 
-    /// Drift is warned about with no task bound (FR-373).
-    ///
-    /// The project used to come from `task.map(|t| t.project_id)`, so a session
-    /// with no task asked about the nil project and every drifted memory in the
-    /// real one stayed invisible. Binding a task is optional; being told what
-    /// moved under you is not.
+    /// Drift is warned about for every session (FR-373).
     #[tokio::test]
-    async fn drift_is_warned_about_without_a_bound_task() {
+    async fn drift_is_warned_about_for_a_session() {
         let d = fx::daemon().await;
         let p = fx::project(&d, "drifting", None).await;
         let s = fx::session(&d, &p, "author").await;
@@ -889,7 +882,7 @@ mod tests {
         let warnings = level0_warnings(&d, p.id, "main").await;
         assert!(
             warnings.iter().any(|w| w.kind == "drift"),
-            "no drift warning without a bound task: {warnings:?}"
+            "no drift warning for session: {warnings:?}"
         );
     }
 }

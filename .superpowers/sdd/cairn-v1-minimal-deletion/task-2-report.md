@@ -83,3 +83,23 @@ continuity, handlers, handoffs, sync, and verification still call the deleted
 store APIs. Server task sync/retrieval/API references and task integration
 tests also remain. These are follow-on deletion targets, not compatibility
 shims.
+
+## Task 2 final runtime removal
+
+- Removed server task list route, overview counters, session `task_id` JSON and
+  SQL binding, task sync ingest/tombstone/read-back/criteria/blocker handlers,
+  task capability names, and task retrieval candidates.
+- Retrieval now gathers `session_memory`, then `branch_memory`, then
+  `project_memory`; daemon delivery mirrors those three sections.
+- Physically removed daemon's commented task handlers/detail helper, stale core
+  task-only tests, and standalone task sync/criteria integration tests.
+- Remaining `task_criteria` and `task_id` source matches are historical SQLite
+  migration transformer code in `cairn-store/src/migrate.rs`; it exists only to
+  advance legacy databases into immutable removal migration 0013.
+
+### Validation
+
+- `PATH="$HOME/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH" cargo check --workspace`
+  passed (existing `cairn-server` web-operation dead-code warnings).
+- `cargo test --workspace --all-targets --no-run` passed before focused tests.
+- `git diff --check` passed.

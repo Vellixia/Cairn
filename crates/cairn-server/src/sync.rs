@@ -50,13 +50,10 @@ const FORBIDDEN_OBSERVATION_FIELDS: &[&str] = &[
     "rationale",
     "basis_evidence_id",
     "path_fingerprints",
-    "task_snapshot_at_bind",
     "detail",
     "prior_value",
     "new_value",
     "content_norm_digest",
-    // A task's local concurrency token. Meaningless on another machine, and
-    // unsound if it travelled (D80).
     "local_revision",
 ];
 
@@ -73,8 +70,6 @@ const FORBIDDEN_ENTITY_TYPES: &[&str] = &[
     "continuity_checkpoint",
     "reusable_pattern",
     "pattern_application",
-    "task_change",
-    "criterion_evidence",
 ];
 
 /// Session fields that are local-only (contracts/server-api.md).
@@ -228,13 +223,10 @@ async fn apply_item(
             }
         }
         ("project", "upsert") => upsert_project(&mut tx, project_id, item).await?,
-        ("task", "upsert") => upsert_task(&mut tx, project_id, item).await?,
         ("session", "upsert") => upsert_session(&mut tx, project_id, user_id, item).await?,
         ("memory", "upsert") => upsert_memory(&mut tx, schema_version, project_id, item).await?,
         ("handoff", "upsert") => upsert_handoff(&mut tx, project_id, item).await?,
         ("memory_relation", "upsert") => upsert_relation(&mut tx, project_id, item).await?,
-        ("task_criterion", "upsert") => upsert_criterion(&mut tx, project_id, item).await?,
-        ("task_blocker", "upsert") => upsert_blocker(&mut tx, project_id, item).await?,
         (entity, "delete") => tombstone(&mut tx, entity, item.entity_id, project_id).await?,
         (entity, op) => {
             return Err(ApiError::invalid(format!("unsupported {entity}/{op}")));
@@ -266,7 +258,7 @@ async fn apply_item(
 /// the word alone was never the thing worth refusing.
 const FORBIDDEN_OBSERVATION_FIELDS_TOP_LEVEL: &[&str] = &["outcome"];
 
-const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation", "task_criterion", "task_blocker"];
+const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation"];
 
 /// The four entity types migration **3** adds tables for (FR-498, FR-522).
 ///
@@ -617,31 +609,6 @@ async fn upsert_project(
     Ok(())
 }
 
-async fn upsert_task(
-    tx: &mut Transaction<'_, Postgres>,
-    project_id: Uuid,
-    item: &SyncItem,
-) -> ApiResult<()> {
-    let rows = sqlx::query(
-        "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
-         ON CONFLICT (id) DO UPDATE SET
-             title = EXCLUDED.title, goal = EXCLUDED.goal,
-             acceptance_criteria = EXCLUDED.acceptance_criteria,
-             status = EXCLUDED.status, updated_at = now()
-         WHERE tasks.project_id = $2",
-    )
-    .bind(item.entity_id)
-    .bind(project_id)
-    .bind(text(&item.payload, "title"))
-    .bind(text(&item.payload, "goal"))
-    .bind(array(&item.payload, "acceptance_criteria"))
-    .bind(text(&item.payload, "status"))
-    .execute(&mut **tx)
-    .await?;
-    scoped(rows.rows_affected(), "task")
-}
-
 async fn upsert_session(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
@@ -650,18 +617,17 @@ async fn upsert_session(
 ) -> ApiResult<()> {
     let rows = sqlx::query(
         "INSERT INTO sessions
-            (id, project_id, task_id, user_id, agent, branch, commit_sha,
+            (id, project_id, user_id, agent, branch, commit_sha,
              previous_session_id, status, started_at, ended_at, end_reason)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, now()), $11, $12)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()), $10, $11)
          ON CONFLICT (id) DO UPDATE SET
-             task_id = EXCLUDED.task_id, status = EXCLUDED.status,
+             status = EXCLUDED.status,
              ended_at = EXCLUDED.ended_at, end_reason = EXCLUDED.end_reason,
              commit_sha = EXCLUDED.commit_sha
          WHERE sessions.project_id = $2",
     )
     .bind(item.entity_id)
     .bind(project_id)
-    .bind(opt_uuid(&item.payload, "task_id"))
     .bind(user_id)
     .bind(text(&item.payload, "agent"))
     .bind(text(&item.payload, "branch"))
@@ -885,7 +851,7 @@ async fn tombstone(
     //
     // Without it these statements read `WHERE id = $1` and nothing else, and
     // `id` is supplied by the client. Any member of any project could blank the
-    // content of, and delete, any memory, handoff, session, task or project on
+    // content of, and delete, any memory, handoff, session or project on
     // this server given only its UUID — and `sync_batch` had already verified
     // membership of a *different* project, so the request looked entirely
     // legitimate on the way in. This was the most destructive of the
@@ -904,7 +870,6 @@ async fn tombstone(
             "UPDATE sessions SET deleted_at = now(), end_reason = NULL
              WHERE id = $1 AND project_id = $2"
         }
-        "task" => "UPDATE tasks SET deleted_at = now() WHERE id = $1 AND project_id = $2",
         // A project's own row has no `project_id` column, so the scope is the
         // identity: the only project this request may tombstone is the one it
         // authenticated against.
@@ -1049,24 +1014,11 @@ pub async fn sync_changes(
     // relation it cannot place and retries it, rather than the server handing
     // out a consistent-looking page that is not.
     let relations = read_after(&state.pool, q.project_id, since, RELATIONS_SQL).await?;
-    let tasks = read_after(&state.pool, q.project_id, since, TASKS_SQL).await?;
-    let criteria = read_after(&state.pool, q.project_id, since, CRITERIA_SQL).await?;
-    let blockers = read_after(&state.pool, q.project_id, since, BLOCKERS_SQL).await?;
-
-    let cursor =
-        page_cursor(&[&rows, &relations, &tasks, &criteria, &blockers], since).to_rfc3339();
+    let cursor = page_cursor(&[&rows, &relations], since).to_rfc3339();
 
     Ok(Json(json!({
         "memories": memories,
         "relations": relations.iter().map(relation_json).collect::<Vec<_>>(),
-        // Tasks are handed back as well as accepted (`contracts/privacy-sync.md`
-        // §What crosses). Without them a criterion arrived naming a `task_id`
-        // that could never arrive, so a task created on one machine existed
-        // nowhere else and US11's two machines could not converge on a state
-        // digest they had no task to compute one from.
-        "tasks": tasks.iter().map(task_json).collect::<Vec<_>>(),
-        "criteria": criteria.iter().map(criterion_json).collect::<Vec<_>>(),
-        "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "cursor": cursor,
     })))
 }
@@ -1078,15 +1030,6 @@ pub(crate) const PAGE: i64 = 500;
 
 const RELATIONS_SQL: &str = "SELECT * FROM memory_relations
      WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
-     ORDER BY updated_at ASC LIMIT $3";
-const TASKS_SQL: &str = "SELECT * FROM tasks
-     WHERE project_id = $1 AND updated_at > $2
-     ORDER BY updated_at ASC LIMIT $3";
-const CRITERIA_SQL: &str = "SELECT * FROM task_criteria
-     WHERE project_id = $1 AND updated_at > $2
-     ORDER BY updated_at ASC LIMIT $3";
-const BLOCKERS_SQL: &str = "SELECT * FROM task_blockers
-     WHERE project_id = $1 AND updated_at > $2
      ORDER BY updated_at ASC LIMIT $3";
 
 /// PostgreSQL's `undefined_table`.
@@ -1165,66 +1108,6 @@ fn relation_json(r: &sqlx::postgres::PgRow) -> Value {
     })
 }
 
-/// A task as a peer receives it.
-///
-/// `local_revision` is deliberately absent: it is a private concurrency token
-/// and is neither transmitted nor stored here (D80). The state digest is absent
-/// for the same reason it is nowhere on the wire — both sides derive it from the
-/// criteria and blockers that did cross, which is what makes two machines
-/// agreeing on it a guarantee rather than a copied value.
-fn task_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({
-        "id": r.get::<Uuid, _>("id"),
-        "title": r.get::<String, _>("title"),
-        "goal": r.get::<String, _>("goal"),
-        "status": r.get::<String, _>("status"),
-        "acceptance_criteria": r
-            .try_get::<Vec<String>, _>("acceptance_criteria")
-            .unwrap_or_default(),
-        "deleted": r
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
-            .ok()
-            .flatten()
-            .is_some(),
-    })
-}
-
-fn criterion_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({
-        "id": r.get::<Uuid, _>("id"),
-        "task_id": r.get::<Uuid, _>("task_id"),
-        "ordinal": r.get::<i32, _>("ordinal"),
-        "label": r.get::<String, _>("label"),
-        "text": r.get::<String, _>("text"),
-        "state": r.get::<String, _>("state"),
-        "verification": r.get::<String, _>("verification"),
-        "deleted": r
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
-            .ok()
-            .flatten()
-            .is_some(),
-    })
-}
-
-fn blocker_json(r: &sqlx::postgres::PgRow) -> Value {
-    json!({
-        "id": r.get::<Uuid, _>("id"),
-        "task_id": r.get::<Uuid, _>("task_id"),
-        "description": r.get::<String, _>("description"),
-        "state": r.get::<String, _>("state"),
-        "opened_by_session": r.get::<Uuid, _>("opened_by_session"),
-        "cleared_by_session": r
-            .try_get::<Option<Uuid>, _>("cleared_by_session")
-            .ok()
-            .flatten(),
-        "deleted": r
-            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
-            .ok()
-            .flatten()
-            .is_some(),
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Feature 003 entities (`contracts/privacy-sync.md`)
 // ---------------------------------------------------------------------------
@@ -1271,101 +1154,6 @@ pub(crate) async fn upsert_relation(
     .execute(&mut **tx)
     .await?;
     Ok(())
-}
-
-/// One acceptance criterion, by stable id.
-///
-/// Upserted per criterion rather than per task, which is the whole mechanism
-/// behind "two sessions edit different criteria and both survive": different
-/// criteria are different rows and cannot collide (FR-413, SC-317).
-async fn upsert_criterion(
-    tx: &mut Transaction<'_, Postgres>,
-    project_id: Uuid,
-    item: &SyncItem,
-) -> ApiResult<()> {
-    let task_id = opt_uuid(&item.payload, "task_id")
-        .ok_or_else(|| ApiError::invalid("a criterion must name its task"))?;
-
-    // The id guard below catches an attempt to overwrite another project's
-    // criterion. This catches the other direction: attaching a new criterion to
-    // another project's task, where there is no existing row to conflict with.
-    all_in_project(tx, "tasks", &[task_id], project_id, "criterion").await?;
-
-    let rows = sqlx::query(
-        "INSERT INTO task_criteria
-            (id, task_id, project_id, ordinal, label, text, state, verification,
-             updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
-         ON CONFLICT (id) DO UPDATE SET
-             ordinal = EXCLUDED.ordinal, label = EXCLUDED.label, text = EXCLUDED.text,
-             state = EXCLUDED.state, verification = EXCLUDED.verification,
-             deleted_at = EXCLUDED.deleted_at, updated_at = now()
-         WHERE task_criteria.project_id = $3",
-    )
-    .bind(item.entity_id)
-    .bind(task_id)
-    .bind(project_id)
-    .bind(
-        item.payload
-            .get("ordinal")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1) as i32,
-    )
-    .bind(text(&item.payload, "label"))
-    .bind(text(&item.payload, "text"))
-    .bind(text(&item.payload, "state"))
-    .bind(text(&item.payload, "verification"))
-    .bind(deleted_at(&item.payload))
-    .execute(&mut **tx)
-    .await?;
-    scoped(rows.rows_affected(), "criterion")
-}
-
-/// One blocker. Append-only with a single transition, both ends attributed.
-async fn upsert_blocker(
-    tx: &mut Transaction<'_, Postgres>,
-    project_id: Uuid,
-    item: &SyncItem,
-) -> ApiResult<()> {
-    let task_id = opt_uuid(&item.payload, "task_id")
-        .ok_or_else(|| ApiError::invalid("a blocker must name its task"))?;
-
-    all_in_project(tx, "tasks", &[task_id], project_id, "blocker").await?;
-
-    let rows = sqlx::query(
-        "INSERT INTO task_blockers
-            (id, task_id, project_id, description, state, opened_by_session,
-             cleared_by_session, updated_at, deleted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
-         ON CONFLICT (id) DO UPDATE SET
-             state = EXCLUDED.state,
-             cleared_by_session = EXCLUDED.cleared_by_session,
-             deleted_at = EXCLUDED.deleted_at, updated_at = now()
-         WHERE task_blockers.project_id = $3",
-    )
-    .bind(item.entity_id)
-    .bind(task_id)
-    .bind(project_id)
-    .bind(text(&item.payload, "description"))
-    .bind(text(&item.payload, "state"))
-    .bind(
-        opt_uuid(&item.payload, "opened_by_session")
-            .ok_or_else(|| ApiError::invalid("a blocker must name who opened it"))?,
-    )
-    .bind(opt_uuid(&item.payload, "cleared_by_session"))
-    .bind(deleted_at(&item.payload))
-    .execute(&mut **tx)
-    .await?;
-    scoped(rows.rows_affected(), "blocker")
-}
-
-/// A tombstone timestamp for a payload that reports itself deleted.
-fn deleted_at(payload: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
-    payload
-        .get("deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-        .then(chrono::Utc::now)
 }
 
 #[cfg(test)]

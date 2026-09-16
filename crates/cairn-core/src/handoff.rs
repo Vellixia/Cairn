@@ -595,38 +595,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any())]
-    fn unmet_acceptance_criteria_become_remaining_work() {
-        let s = session();
-        let task = Task {
-            id: new_id(),
-            project_id: s.project_id,
-            title: "Rate limiting".into(),
-            goal: "Requests over the limit get 429".into(),
-            acceptance_criteria: vec!["429 above threshold".into(), "Limit configurable".into()],
-            status: TaskStatus::InProgress,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-        let observations: Vec<Observation> = vec![];
-        let h = synthesize(
-            &HandoffInputs {
-                session: &s,
-                task: Some(&task),
-                observations: &observations,
-                decision_memories: &[],
-                repository_state: RepositoryState::default(),
-                git_changed_files: &[],
-                agent_note: None,
-            },
-            HandoffTrigger::SessionEnd,
-        );
-        assert_eq!(h.goal, "Requests over the limit get 429");
-        assert_eq!(h.remaining_work.len(), 2);
-    }
-
-    #[test]
     fn evidence_is_identifiers_only() {
         let s = session();
         let o = obs(ObservationType::FileRead, "read src/lib.rs");
@@ -644,88 +612,6 @@ mod tests {
             HandoffTrigger::Recovered,
         );
         assert_eq!(h.evidence, vec![id]);
-    }
-
-    /// A session that deliberately proves an approach wrong leaves a failed
-    /// tool behind and marks the task done. Ordering the next session to fix it
-    /// sends it back into the dead end the last one ruled out.
-    #[test]
-    #[cfg(any())]
-    fn a_done_task_does_not_order_the_next_session_to_fix_a_recorded_failure() {
-        let s = session();
-        let task = Task {
-            id: new_id(),
-            project_id: s.project_id,
-            title: "Typed values".into(),
-            goal: "parse_config coerces ints and bools".into(),
-            acceptance_criteria: vec!["ints coerce".into()],
-            status: TaskStatus::Done,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-        let observations = vec![obs(
-            ObservationType::Error,
-            "Bash failed: python3 -c \"import configparser\": tool execution failed",
-        )];
-        let h = synthesize(
-            &HandoffInputs {
-                session: &s,
-                task: Some(&task),
-                observations: &observations,
-                decision_memories: &[],
-                repository_state: RepositoryState::default(),
-                git_changed_files: &[],
-                agent_note: None,
-            },
-            HandoffTrigger::SessionEnd,
-        );
-        assert!(
-            !h.next_step.contains("Fix the open failure"),
-            "next_step was {:?}",
-            h.next_step
-        );
-        assert!(
-            !h.remaining_work
-                .iter()
-                .any(|r| r.starts_with("Open failure")),
-            "remaining_work was {:?}",
-            h.remaining_work
-        );
-        // The failure itself is still on record, just not as outstanding work.
-        assert_eq!(h.failures.len(), 1);
-    }
-
-    /// An unfinished task still owes the fix.
-    #[test]
-    #[cfg(any())]
-    fn an_unfinished_task_still_reports_the_open_failure() {
-        let s = session();
-        let task = Task {
-            id: new_id(),
-            project_id: s.project_id,
-            title: "Typed values".into(),
-            goal: "parse_config coerces ints and bools".into(),
-            acceptance_criteria: vec![],
-            status: TaskStatus::InProgress,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-        let observations = vec![obs(ObservationType::Error, "Bash failed: cargo test")];
-        let h = synthesize(
-            &HandoffInputs {
-                session: &s,
-                task: Some(&task),
-                observations: &observations,
-                decision_memories: &[],
-                repository_state: RepositoryState::default(),
-                git_changed_files: &[],
-                agent_note: None,
-            },
-            HandoffTrigger::SessionEnd,
-        );
-        assert!(h.next_step.starts_with("Fix the open failure"));
     }
 
     /// Observations carry absolute paths, Git reports the same file relative to

@@ -121,15 +121,6 @@ fn every_web_wrapper_has_exact_registry_contract_and_structural_router_binding()
             "project",
         ),
         (
-            "TASKS",
-            "GET",
-            "/api/projects/{id}/tasks",
-            "project_tasks",
-            "TaskQuery",
-            "TasksResponse",
-            "tasks",
-        ),
-        (
             "SESSIONS",
             "GET",
             "/api/projects/{id}/sessions",

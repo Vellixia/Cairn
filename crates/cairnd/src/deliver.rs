@@ -4,7 +4,7 @@
 //!
 //! # One budget, two assemblers
 //!
-//! The server selects the durable sections — `task_memory`, `branch_memory`,
+//! The server selects the durable sections — `session_memory`, `branch_memory`,
 //! `project_memory`, `patterns`, `personal_notes`, `team_guidance` — against
 //! one delivery point's whole budget, and reports what it spent
 //! (`budget.tokens`, `budget.spent`) plus what it withheld for whoever owes
@@ -43,7 +43,7 @@
 //! **Level 0 is not always current, and saying so was the FR-790a defect.**
 //! For a project whose briefing is server-side, a call with no fresh response
 //! and no cache entry *for this account* serves nothing derived from the local
-//! store — not Level 0, not the previous handoff, not the bound task's state.
+//! store — not Level 0 or previous handoff.
 //! On a cache miss the server has not established what this caller may see, so
 //! there is nothing to check them against, and the local store is one machine's
 //! store shared by every account that signs in on it. An **unlinked** project
@@ -616,8 +616,8 @@ fn merge_durable_sections(payload: &mut Value, sections: &Value) {
     };
     if let Some(memory) = briefing.get_mut("memory").and_then(|m| m.as_object_mut()) {
         memory.insert(
-            "task".into(),
-            json!(section_contents(sections, "task_memory")),
+            "session".into(),
+            json!(section_contents(sections, "session_memory")),
         );
         memory.insert(
             "branch".into(),
@@ -714,7 +714,7 @@ mod tests {
             "sections": {
                 "personal_notes": [{ "content": "p1" }],
                 "team_guidance": [{ "content": "g1" }],
-                "task_memory": [{ "content": "t1" }],
+                "session_memory": [{ "content": "s1" }],
             },
         })
     }
@@ -910,7 +910,7 @@ mod tests {
     fn bare_payload() -> Value {
         json!({
             "briefing": {
-                "memory": { "task": [], "branch": [], "project": [] },
+                "memory": { "session": [], "branch": [], "project": [] },
             },
             "estimated_tokens": 0,
         })
@@ -920,7 +920,7 @@ mod tests {
     fn durable_sections_are_merged_into_the_matching_fields() {
         let mut payload = bare_payload();
         let sections = json!({
-            "task_memory": [{ "content": "t1" }],
+            "session_memory": [{ "content": "s1" }],
             "branch_memory": [{ "content": "b1" }],
             "project_memory": [{ "content": "p1" }],
             "personal_notes": [{ "content": "n1" }],
@@ -928,7 +928,7 @@ mod tests {
         });
         merge_durable_sections(&mut payload, &sections);
 
-        assert_eq!(payload["briefing"]["memory"]["task"], json!(["t1"]));
+        assert_eq!(payload["briefing"]["memory"]["session"], json!(["s1"]));
         assert_eq!(payload["briefing"]["memory"]["branch"], json!(["b1"]));
         assert_eq!(payload["briefing"]["memory"]["project"], json!(["p1"]));
         assert_eq!(payload["briefing"]["personal_notes"], json!(["n1"]));

@@ -120,13 +120,6 @@ pub mod codes {
     pub const PATH_NOT_FINGERPRINTABLE: &str = "path_not_fingerprintable";
     pub const NO_BOUNDARY_RECORD: &str = "no_boundary_record";
 
-    // Task work state (`contracts/task-model.md`)
-    pub const REVISION_CONFLICT: &str = "revision_conflict";
-    pub const CRITERION_NOT_FOUND: &str = "criterion_not_found";
-    pub const BLOCKER_NOT_FOUND: &str = "blocker_not_found";
-    pub const BLOCKER_ALREADY_CLEARED: &str = "blocker_already_cleared";
-    pub const CRITERION_WAIVED: &str = "criterion_waived";
-
     // The ten promotion refusals, in the gate's fixed order so the reported
     // reason is stable (`contracts/patterns.md` §The promotion gate).
     pub const SOURCE_NOT_ACTIVE: &str = "source_not_active";
@@ -217,11 +210,6 @@ pub mod codes {
         CHECKPOINT_UNRESOLVABLE,
         PATH_NOT_FINGERPRINTABLE,
         NO_BOUNDARY_RECORD,
-        REVISION_CONFLICT,
-        CRITERION_NOT_FOUND,
-        BLOCKER_NOT_FOUND,
-        BLOCKER_ALREADY_CLEARED,
-        CRITERION_WAIVED,
         SOURCE_NOT_ACTIVE,
         SOURCE_UNVERIFIED,
         NO_EVIDENCE,
@@ -1903,7 +1891,7 @@ pub struct BriefingPattern {
 /// `explain` was requested (FR-464).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextWarning {
-    /// `task_divergence` | `checkpoint` | `task` | `conflict` | `drift`.
+    /// `checkpoint` | `conflict` | `drift`.
     pub kind: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1965,7 +1953,7 @@ pub struct BriefingHandoff {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BriefingMemory {
-    pub task: Vec<String>,
+    pub session: Vec<String>,
     pub branch: Vec<String>,
     pub project: Vec<String>,
 }

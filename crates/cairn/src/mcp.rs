@@ -840,7 +840,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_exactly_five_tools_without_task_binding() {
+    fn exposes_exactly_five_tools() {
         let tools = tool_definitions();
         assert_eq!(tools.len(), 5, "MCP exposes exactly five tools");
         let names: Vec<&str> = tools
@@ -848,16 +848,6 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(names, TOOL_NAMES);
-        assert!(!names.contains(&"cairn_task"));
-
-        for name in ["cairn_session", "cairn_handoff"] {
-            let tool = tools
-                .iter()
-                .find(|tool| tool["name"] == name)
-                .expect("surviving tool");
-            assert!(tool["inputSchema"]["properties"].get("task_id").is_none());
-        }
-
         for name in ["cairn_search", "cairn_remember"] {
             let tool = tools
                 .iter()
@@ -866,7 +856,7 @@ mod tests {
             let scopes = tool["inputSchema"]["properties"]["scope"]["enum"]
                 .as_array()
                 .expect("scope enum");
-            assert!(!scopes.iter().any(|scope| scope == "task"));
+            assert_eq!(scopes.len(), 3);
         }
     }
 
