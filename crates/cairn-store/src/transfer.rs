@@ -326,7 +326,18 @@ const REMOVED_FEATURE_TASK_SELECTIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "evidence_facts",
-        "id IN (SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task'))",
+        "id IN (
+            SELECT evidence_id FROM memory_evidence_facts
+             WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')
+            UNION
+            SELECT evidence_id FROM criterion_evidence
+             WHERE criterion_id IN (SELECT id FROM task_criteria)
+            UNION
+            SELECT evidence_id FROM verification_runs
+             WHERE (criterion_id IN (SELECT id FROM task_criteria)
+                 OR memory_id IN (SELECT id FROM memories WHERE scope = 'task'))
+               AND evidence_id IS NOT NULL
+        )",
         "id",
     ),
     (
@@ -505,14 +516,14 @@ pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
     }
     let mut tx = store.pool().begin().await?;
     for statement in [
-        "CREATE TEMP TABLE task_only_evidence_facts AS SELECT DISTINCT evidence_id FROM memory_evidence_facts task_link WHERE task_link.memory_id IN (SELECT id FROM memories WHERE scope = 'task') AND NOT EXISTS (SELECT 1 FROM memory_evidence_facts surviving_link JOIN memories surviving_memory ON surviving_memory.id = surviving_link.memory_id WHERE surviving_link.evidence_id = task_link.evidence_id AND surviving_memory.scope <> 'task')",
+        "CREATE TEMP TABLE task_only_evidence_facts AS SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task') UNION SELECT evidence_id FROM criterion_evidence WHERE criterion_id IN (SELECT id FROM task_criteria) UNION SELECT evidence_id FROM verification_runs WHERE (criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')) AND evidence_id IS NOT NULL",
         "DELETE FROM verification_runs WHERE criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
         "DELETE FROM criterion_evidence",
         "DELETE FROM memory_evidence WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
         "DELETE FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
-        "DELETE FROM evidence_facts WHERE id IN (SELECT evidence_id FROM task_only_evidence_facts) AND NOT EXISTS (SELECT 1 FROM memory_evidence_facts WHERE memory_evidence_facts.evidence_id = evidence_facts.id)",
-        "DROP TABLE task_only_evidence_facts",
         "DELETE FROM memory_relations WHERE from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
+        "DELETE FROM evidence_facts WHERE id IN (SELECT evidence_id FROM task_only_evidence_facts) AND NOT EXISTS (SELECT 1 FROM memory_evidence_facts WHERE evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM verification_runs WHERE evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM memory_relations WHERE basis_evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM pattern_applications WHERE evidence_id = evidence_facts.id)",
+        "DROP TABLE task_only_evidence_facts",
         "DELETE FROM outbox WHERE entity_type IN ('task', 'task_criterion', 'task_blocker')",
         "DELETE FROM memories WHERE scope = 'task'",
         "DROP TABLE IF EXISTS criterion_evidence",
@@ -1025,6 +1036,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn artifact_bearing_v13_manifest_preserves_identity_then_exports_and_cleans() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-e6-v13.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        migrate::run_to(&pool, 12).await.unwrap();
+        sqlx::query("CREATE TABLE removed_feature_manifest (feature TEXT PRIMARY KEY, bundle_version INTEGER NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('retained_pending_export', 'exported_pending_cleanup', 'exported_cleaned')), created_at TEXT NOT NULL, artifact_path TEXT, artifact_sha256 TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO removed_feature_manifest (feature, bundle_version, disposition, created_at, artifact_path, artifact_sha256) VALUES ('tasks', 1, 'retained_pending_export', 'now', '/retained/bundle.json', 'retained-hash')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'remove_task_runtime', 'now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        let retained: (String, String, String) = sqlx::query_as("SELECT disposition, artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            retained,
+            (
+                "retained_pending_export".to_owned(),
+                "/retained/bundle.json".to_owned(),
+                "retained-hash".to_owned(),
+            ),
+        );
+
+        let bundle_path = dir.path().join("tasks.removed_feature.json");
+        export_removed_feature_tasks(&store, &bundle_path)
+            .await
+            .unwrap();
+        cleanup_removed_feature_tasks(&store).await.unwrap();
+    }
+
     async fn task_bundle_fixture() -> (Store, tempfile::TempDir, std::path::PathBuf) {
         let store = Store::open_memory().await.unwrap();
         sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
@@ -1074,6 +1129,55 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_conserves_criterion_and_task_verification_evidence() {
+        let store = Store::open_memory().await.unwrap();
+        let pool = store.pool();
+        for sql in [
+            "INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')",
+            "INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')",
+            "INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, worktree_path, agent_session_key, status, started_at, last_event_at, daemon_run_id) VALUES ('s', 'p', 't', 'u', 'a', 'main', '/p', 'key', 'active', 'now', 'now', 'run')",
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('task-memory', 'p', 'fact', 'task', 't', 'task memory', 's', 'now', 'now')",
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('live-memory', 'p', 'fact', 'project', 'p', 'live memory', 's', 'now', 'now')",
+            "INSERT INTO task_criteria (id, task_id, ordinal, label, text, state, verification, revision, created_at, updated_at) VALUES ('c', 't', 1, 'AC-1', 'criterion', 'pending', 'unverified', 1, 'now', 'now')",
+            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('criterion-only', 'p', 'observation', 'cairn', 'criterion', 'main', 'now', 's')",
+            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('verification-only', 'p', 'observation', 'cairn', 'verification', 'main', 'now', 's')",
+            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('shared', 'p', 'observation', 'cairn', 'shared', 'main', 'now', 's')",
+            "INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'criterion-only', 'now', 's')",
+            "INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'shared', 'now', 's')",
+            "INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('live-memory', 'shared', 'supports', 'now', 's')",
+            "INSERT INTO verification_runs (id, memory_id, project_id, verifier, evidence_id, result, repo_branch, checked_at, triggered_by) VALUES ('verification-only-run', 'task-memory', 'p', 'test_outcome', 'verification-only', 'verified', 'main', 'now', 'attach')",
+            "INSERT INTO verification_runs (id, criterion_id, project_id, verifier, evidence_id, result, repo_branch, checked_at, triggered_by) VALUES ('shared-run', 'c', 'p', 'test_outcome', 'shared', 'verified', 'main', 'now', 'attach')",
+        ] {
+            sqlx::query(sql).execute(pool).await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.removed_feature.json");
+        export_removed_feature_tasks(&store, &path).await.unwrap();
+        cleanup_removed_feature_tasks(&store).await.unwrap();
+
+        for id in ["criterion-only", "verification-only"] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap(),
+                0,
+                "{id} has no live reference",
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'shared'")
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1,
+            "surviving memory keeps shared evidence",
+        );
     }
 
     #[tokio::test]
