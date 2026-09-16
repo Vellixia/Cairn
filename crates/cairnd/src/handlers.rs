@@ -3124,34 +3124,6 @@ async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut ser
 /// got a throwaway session — worsening the ambiguity for everyone else and
 /// stamping the memory with an origin that never did the work. Ambiguity is the
 /// caller's to resolve, exactly as it is for `cairn context`.
-/// Who a task-model change is attributed to, **without creating a session**.
-///
-/// `ensure_session_for_memory` starts a `cairn-cli` session when there is none,
-/// which is right for a memory — a memory must belong to a session's provenance.
-/// It is wrong here: `cairn task new` has never needed a session, and inventing
-/// one leaves a second active session in the worktree that makes the next
-/// agent's `cairn_context` ambiguous.
-///
-/// The nil UUID means "no session", and is what `cairn task history` renders as
-/// an unattributed change. That is honest: a CLI invocation outside any session
-/// genuinely has no author to name, and naming a throwaway one would be worse
-/// than naming none.
-#[cfg(any())]
-async fn authoring_session(
-    d: &Daemon,
-    r: &Resolved,
-    session_id: Option<Uuid>,
-    key: Option<&str>,
-) -> Result<Uuid, WireError> {
-    match resolve_session(d, r, session_id, key).await {
-        Ok(s) => Ok(s.id),
-        Err(e) if e.code == codes::NO_ACTIVE_SESSION || e.code == codes::AMBIGUOUS_SESSION => {
-            Ok(Uuid::nil())
-        }
-        Err(e) => Err(e),
-    }
-}
-
 pub(crate) async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
@@ -3928,27 +3900,6 @@ async fn delete(
     Ok(json!({ "deleted": id, "target": target, "with_memories": with_memories }))
 }
 
-// Removed Task work state rendering (`contracts/task-model.md`).
-
-/// One criterion, as every surface reports it.
-///
-/// Note what has no key here: a percentage. Progress is counts, derived on
-/// read, and there is nowhere for an agent to write a number of its own
-/// (FR-486).
-#[cfg(any())]
-fn criterion_json(c: &cairn_store::criteria::Criterion) -> serde_json::Value {
-    json!({
-        "id": c.id,
-        "ordinal": c.ordinal,
-        "label": c.label,
-        "text": c.text,
-        "state": c.state,
-        "verification": c.verification,
-        "revision": c.revision,
-        "deleted": c.deleted,
-    })
-}
-
 /*fn blocker_json(b: &cairn_store::criteria::Blocker) -> serde_json::Value {
     json!({
         "id": b.id,
@@ -4212,7 +4163,7 @@ async fn migrate_import(d: &Daemon, cwd: &str, manifest_path: &str) -> Reply {
     Ok(json!({ "ok": true, "import": report }))
 }
 
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::testsupport::{self as fx, Repo};
@@ -4713,7 +4664,6 @@ mod tests {
             cwd: r.cwd.clone(),
             agent: "claude-code".into(),
             agent_session_key: Some(key.to_string()),
-            task_id: None,
         };
         let first = ok(&r, start("k1")).await;
         let second = ok(&r, start("k1")).await;
@@ -4734,7 +4684,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "some-mcp-client".into(),
                 agent_session_key: None,
-                task_id: None,
             },
         )
         .await;
@@ -4757,7 +4706,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "claude-code".into(),
                 agent_session_key: Some("branched".into()),
-                task_id: None,
             },
         )
         .await;
@@ -4774,7 +4722,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "claude-code".into(),
                 agent_session_key: Some("ends".into()),
-                task_id: None,
             },
         )
         .await;
@@ -4801,106 +4748,6 @@ mod tests {
         );
     }
 
-    /// Selecting a task at session start binds it, including when the session
-    /// already existed (FR-038).
-    #[tokio::test]
-    async fn starting_with_a_task_binds_it_to_an_existing_session() {
-        let r = Repo::new().await;
-        let task = ok(
-            &r,
-            Request::TaskCreate {
-                cwd: r.cwd.clone(),
-                title: "Add rate limiting".into(),
-                goal: "Requests over the limit get 429".into(),
-                acceptance_criteria: vec!["429 above the threshold".into()],
-            },
-        )
-        .await;
-        let task_id: Uuid = task["task"]["id"]
-            .as_str()
-            .expect("task id")
-            .parse()
-            .expect("uuid");
-
-        // Session first, with no task.
-        let first = ok(
-            &r,
-            Request::SessionStart {
-                cwd: r.cwd.clone(),
-                agent: "claude-code".into(),
-                agent_session_key: Some("late-bind".into()),
-                task_id: None,
-            },
-        )
-        .await;
-        assert!(first["session"]["task_id"].is_null());
-
-        // Then the same key again, this time naming the task.
-        let second = ok(
-            &r,
-            Request::SessionStart {
-                cwd: r.cwd.clone(),
-                agent: "claude-code".into(),
-                agent_session_key: Some("late-bind".into()),
-                task_id: Some(task_id),
-            },
-        )
-        .await;
-        assert_eq!(second["session"]["id"], first["session"]["id"]);
-        assert_eq!(second["session"]["task_id"], task_id.to_string());
-    }
-
-    /// A task that does not exist is refused rather than silently ignored.
-    ///
-    /// Pinned to what the daemon *actually* returns, which is not what it
-    /// should: `start_session` is called with the `task_id` before anything
-    /// checks that the task exists, so the foreign key rejects it and the
-    /// failure surfaces as `storage_unavailable`. The existence check in
-    /// `session_start` only runs on the arm that binds a task to an
-    /// already-existing session, so it never sees this case.
-    ///
-    /// The user-visible effect is that `cairn session start --task <unknown>`
-    /// reports a storage problem rather than a missing task. Asserted rather
-    /// than glossed over, so that fixing the order trips this test and the
-    /// expectation is updated with it.
-    #[tokio::test]
-    async fn starting_with_an_unknown_task_is_refused() {
-        let r = Repo::new().await;
-        let e = err(
-            &r,
-            Request::SessionStart {
-                cwd: r.cwd.clone(),
-                agent: "claude-code".into(),
-                agent_session_key: Some("bad-task".into()),
-                task_id: Some(Uuid::now_v7()),
-            },
-        )
-        .await;
-        assert_eq!(
-            e["code"],
-            codes::STORAGE_UNAVAILABLE,
-            "unknown-task diagnosis changed; it should now be not_found — update this: {e}"
-        );
-
-        // Whatever the code, nothing is left behind.
-        assert_eq!(
-            repo::list_projects(&r.daemon.store)
-                .await
-                .expect("projects")
-                .len(),
-            1,
-            "the project is created by resolve; the session must not be"
-        );
-        let sessions = ok(&r, Request::SessionList { cwd: r.cwd.clone() }).await;
-        assert!(
-            sessions["sessions"]
-                .as_array()
-                .expect("sessions")
-                .is_empty(),
-            "a refused session start must store no session: {sessions}"
-        );
-    }
-
     /// Memory carries explicit scope and provenance; it is never global
     /// (Principle IV, FR-019).
     #[tokio::test]
@@ -4912,7 +4759,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "claude-code".into(),
                 agent_session_key: Some("remembers".into()),
-                task_id: None,
             },
         )
         .await;
@@ -5031,7 +4877,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "claude-code".into(),
                 agent_session_key: Some("private".into()),
-                task_id: None,
             },
         )
         .await;
@@ -5092,7 +4937,6 @@ mod tests {
                 cwd: r.cwd.clone(),
                 agent: "claude-code".into(),
                 agent_session_key: Some("here".into()),
-                task_id: None,
             },
         )
         .await;

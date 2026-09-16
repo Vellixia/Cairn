@@ -4,7 +4,7 @@
 //! records produced by others. Delivery is idempotent, offline is normal, and
 //! an unlinked project never produces a request.
 
-use crate::state::{storage_err, Daemon, Resolved};
+use crate::state::{Daemon, Resolved, storage_err};
 use cairn_core::domain::*;
 use cairn_core::wire::*;
 use cairn_store::{cursor, outbox, repo};
@@ -2761,7 +2761,7 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
         (None, false) => {
             return Err(WireError::invalid(
                 "bare `link` is answered from local state; this is a bug",
-            ))
+            ));
         }
     };
 
@@ -4341,10 +4341,6 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
         }
     }
 
-    // Tasks before their criteria, for the same reason memories come before
-    // Records earlier pulls could not place. Replayed after the fresh page, so
-    // a parent that arrived in *this* page releases what was waiting on it
-    // without waiting for another pull (#44).
     count += replay_deferred(d, project_id).await;
 
     if let Some(next_cursor) = body.get("cursor").and_then(|c| c.as_str()) {
@@ -4563,10 +4559,8 @@ const DEFERRED_REPLAY_BATCH: i64 = 500;
 /// Retry the records earlier pulls could not place.
 ///
 /// Run after the fresh page has been imported, so a relation held since an
-/// earlier pull is placed as soon as the memory it names lands. Nothing here
-/// depends on another held record — relations wait on memories and criteria and
-/// blockers wait on tasks, and neither is itself deferred — so one pass is
-/// enough and there is no ordering to get right.
+/// earlier pull is placed as soon as the memory it names lands. Relations wait
+/// on memories, so one pass is enough and there is no ordering to get right.
 async fn replay_deferred(d: &Daemon, project_id: Uuid) -> usize {
     let held = match repo::deferred_records(&d.store, project_id, DEFERRED_REPLAY_BATCH).await {
         Ok(h) => h,
@@ -4753,141 +4747,6 @@ fn relation_key(value: &serde_json::Value) -> String {
         field("to_memory_id"),
         field("kind")
     )
-}
-
-/// Import one criterion that arrived from a peer.
-#[cfg(any())]
-async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> Placement {
-    let uuid = |k: &str| {
-        value
-            .get(k)
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
-    };
-    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
-        return Placement::Unusable;
-    };
-    // A criterion for a task that has not arrived is held, not invented — and
-    // held durably, for the reason the relation case is (#44): the cursor does
-    // not offer it again.
-    if repo::task(&d.store, task_id).await.is_err() {
-        tracing::debug!(
-            criterion_id = %id, %task_id,
-            "holding a criterion whose task has not arrived yet"
-        );
-        return Placement::AwaitingParent(task_id);
-    }
-    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-    let (Ok(state), Ok(verification)) = (str_of("state").parse(), str_of("verification").parse())
-    else {
-        return Placement::Unusable;
-    };
-
-    let stored = cairn_store::criteria::import_criterion(
-        &d.store,
-        id,
-        task_id,
-        value.get("ordinal").and_then(|v| v.as_i64()).unwrap_or(1),
-        str_of("label"),
-        str_of("text"),
-        state,
-        verification,
-        value
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    )
-    .await
-    .is_ok();
-    if stored {
-        Placement::Placed
-    } else {
-        Placement::Unusable
-    }
-}
-
-/// Import one blocker that arrived from a peer.
-#[cfg(any())]
-async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> Placement {
-    let uuid = |k: &str| {
-        value
-            .get(k)
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
-    };
-    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
-        return Placement::Unusable;
-    };
-    // Held rather than dropped, for the same reason a criterion is (#44).
-    if repo::task(&d.store, task_id).await.is_err() {
-        tracing::debug!(
-            blocker_id = %id, %task_id,
-            "holding a blocker whose task has not arrived yet"
-        );
-        return Placement::AwaitingParent(task_id);
-    }
-    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-    let Ok(state) = str_of("state").parse() else {
-        return Placement::Unusable;
-    };
-
-    let stored = cairn_store::criteria::import_blocker(
-        &d.store,
-        id,
-        task_id,
-        str_of("description"),
-        state,
-        uuid("opened_by_session").unwrap_or_else(Uuid::nil),
-        uuid("cleared_by_session"),
-        value
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    )
-    .await
-    .is_ok();
-    if stored {
-        Placement::Placed
-    } else {
-        Placement::Unusable
-    }
-}
-
-/// Insert a peer's task locally.
-///
-/// The title, goal and status are the peer's; everything derived stays this
-/// machine's. `local_revision` is never transmitted and never overwritten — it
-/// is a private concurrency token (D80) — and the `acceptance_criteria`
-/// projection is rebuilt from the criteria rows that arrive separately rather
-/// than copied, so it cannot disagree with them.
-#[cfg(any())]
-async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> bool {
-    let Some(id) = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-    else {
-        return false;
-    };
-    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
-    let status = match str_of("status") {
-        "" => "todo",
-        other => other,
-    };
-    cairn_store::criteria::import_task(
-        &d.store,
-        id,
-        project_id,
-        str_of("title"),
-        str_of("goal"),
-        status,
-        value
-            .get("deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    )
-    .await
-    .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -5618,77 +5477,6 @@ mod tests {
         assert_eq!(stored, 1, "the relation never reached the store");
     }
 
-    /// A criterion whose task has not arrived is held, then placed (#44).
-    #[cfg(any())]
-    #[tokio::test]
-    async fn a_criterion_whose_task_has_not_arrived_is_held_until_it_does() {
-        let d = fx::daemon().await;
-        let p = fx::project(&d, "held-criterion", None).await;
-
-        let task_id = Uuid::now_v7();
-        let criterion_id = Uuid::now_v7();
-        let wire = serde_json::json!({
-            "id": criterion_id.to_string(),
-            "task_id": task_id.to_string(),
-            "ordinal": 1,
-            "label": "C1",
-            "text": "The daemon starts in the worktree it was asked about.",
-            "state": "pending",
-            "verification": "unverified",
-        });
-
-        assert_eq!(
-            import_criterion(&d, &wire).await,
-            Placement::AwaitingParent(task_id),
-            "the criterion was not recognised as waiting on its task"
-        );
-        hold_for_a_later_pull(
-            &d,
-            p.id,
-            "criterion",
-            &criterion_id.to_string(),
-            &wire,
-            task_id,
-        )
-        .await;
-        assert_eq!(replay_deferred(&d, p.id).await, 0);
-
-        // The task arrives on a later page.
-        assert!(
-            import_task(
-                &d,
-                p.id,
-                &serde_json::json!({
-                    "id": task_id.to_string(),
-                    "title": "Fix the daemon's working directory",
-                    "goal": "Start where asked.",
-                    "status": "todo",
-                }),
-            )
-            .await,
-            "the task fixture did not import"
-        );
-
-        assert_eq!(
-            replay_deferred(&d, p.id).await,
-            1,
-            "the held criterion was not placed once its task arrived"
-        );
-        assert_eq!(
-            repo::deferred_count(&d.store, p.id).await.expect("count"),
-            0
-        );
-        let stored = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM task_criteria WHERE id = ?1 AND task_id = ?2",
-        )
-        .bind(criterion_id.to_string())
-        .bind(task_id.to_string())
-        .fetch_one(d.store.pool())
-        .await
-        .expect("query");
-        assert_eq!(stored, 1, "the criterion never reached the store");
-    }
-
     /// A record that can never be placed is released, not retried forever.
     ///
     /// Holding is for a parent that has not arrived *yet*. A payload nothing can
@@ -5715,24 +5503,6 @@ mod tests {
             repo::deferred_count(&d.store, p.id).await.expect("count"),
             0,
             "an unplaceable record is still being held"
-        );
-    }
-
-    /// A record the server sends again replaces its held copy.
-    #[tokio::test]
-    async fn re_sending_a_held_record_does_not_pile_up_rows() {
-        let d = fx::daemon().await;
-        let p = fx::project(&d, "resent", None).await;
-        let task_id = Uuid::now_v7();
-        let wire = serde_json::json!({ "id": "c", "task_id": task_id.to_string() });
-
-        for _ in 0..3 {
-            hold_for_a_later_pull(&d, p.id, "criterion", "c", &wire, task_id).await;
-        }
-        assert_eq!(
-            repo::deferred_count(&d.store, p.id).await.expect("count"),
-            1,
-            "a re-sent record was held more than once"
         );
     }
 

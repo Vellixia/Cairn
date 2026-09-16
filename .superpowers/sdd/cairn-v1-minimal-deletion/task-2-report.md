@@ -53,6 +53,22 @@ field because it is coupled to the deleted wire request field.
 - Run Clippy after server Task routes/contracts are removed; current server
   web-operation dead-code warnings predate this slice.
 
+## Task 2B final cleanup
+
+- Physically deleted remaining daemon Task-only helpers, criterion verification,
+  task pull import, and disabled task test cases; no `#[cfg(any())]` guards
+  remain under `crates/cairnd` or `tests`.
+- Reenabled surviving `handlers` tests under `#[cfg(test)]`; removed obsolete
+  `SessionStart.task_id` fixture fields and Task-only session tests.
+- Removed Task scope ordering from daemon verification and stale sync comments.
+
+### Validation
+
+- `PATH="$HOME/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH" cargo check --workspace` passes (two pre-existing `cairn-server` web-operation dead-code warnings).
+- `PATH="$HOME/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH" cargo test --workspace --all-targets --no-run` passes.
+- `cargo clippy -p cairnd -- -D warnings` is blocked before `cairnd` by unchanged `cairn-store/src/transfer.rs:557` (`clippy::redundant_closure`).
+- `git diff --check` passes.
+
 ## Evidence
 
 `PATH="$HOME/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:$PATH" cargo test -p cairn-core domain::tests::scope_precedence_is_session_branch_project`

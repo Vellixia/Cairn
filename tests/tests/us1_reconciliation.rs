@@ -227,45 +227,6 @@ fn three_sessions_yield_one_canonical_answer_with_three_origins() {
     });
 }
 
-/// Scenario B — a project answer and a task-scoped exception are not a
-/// conflict, and each applies where it should.
-#[test]
-#[cfg(any())]
-fn a_task_scoped_exception_is_not_a_conflict() {
-    let (rt, f) = Fixture::blocking();
-    rt.block_on(async {
-        f.propose(
-            Uuid::now_v7(),
-            Some("infrastructure.production_database"),
-            Some("postgresql"),
-            "The production database is PostgreSQL.",
-        )
-        .await;
-
-        let task = f
-            .propose_scoped(
-                Uuid::now_v7(),
-                cairn_core::MemoryScope::Task,
-                Some("T1"),
-                Some("infrastructure.production_database"),
-                Some("sqlite"),
-                "This integration fixture uses SQLite.",
-            )
-            .await;
-
-        assert_eq!(task.reconciliation, ProposalOutcome::Created);
-        assert_eq!(
-            f.count("SELECT COUNT(*) FROM memory_relations WHERE kind = 'conflicts_with'")
-                .await,
-            0,
-            "a scope exception was recorded as a conflict"
-        );
-
-        let project = f.subject("infrastructure.production_database").await;
-        assert_eq!(project.view.reconciliation.as_str(), "settled");
-    });
-}
-
 /// FR-312 — an unrepresentable topic key never rejects the memory.
 #[test]
 fn an_unusable_topic_key_stores_the_memory_free_form() {

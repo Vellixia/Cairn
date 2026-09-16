@@ -10,9 +10,9 @@
 
 use cairn_core::domain::{OutboxEntityType, OutboxOperation};
 use cairn_core::wire::codes;
-use cairn_e2e::{attach_server, Sandbox, Server};
-use cairn_store::outbox::{self, SyncPolicy};
+use cairn_e2e::{Sandbox, Server, attach_server};
 use cairn_store::Store;
+use cairn_store::outbox::{self, SyncPolicy};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -164,53 +164,6 @@ fn no_futile_retry() {
     });
 }
 
-/// A capability-refused row is never `failed` and never reported `delivered`
-/// (FR-418, SC-326).
-///
-/// The first would tell the user work was lost that is in fact waiting; the
-/// second would tell them it arrived. Both are worse than saying nothing.
-#[test]
-#[cfg(any())]
-fn never_permanently_failed() {
-    runtime().block_on(async {
-        let f = fixture().await;
-        let row = f.queue(OutboxEntityType::TaskCriterion, "criterion").await;
-        outbox::mark_blocked(
-            &f.store,
-            row,
-            codes::SCHEMA_OLDER,
-            "schema=1;capabilities=",
-            "this deployment is at schema 1",
-        )
-        .await
-        .expect("block");
-
-        let (pending, failed) = outbox::counts(&f.store, f.project).await.expect("counts");
-        assert_eq!(failed, 0, "retained work must not be reported as failed");
-        assert_eq!(
-            pending, 0,
-            "retained work must not be reported as pending either — the queue is \
-             not stuck, and saying it is would send someone looking for a fault"
-        );
-        assert_eq!(
-            outbox::blocked_count(&f.store, f.project)
-                .await
-                .expect("blocked"),
-            1
-        );
-        assert!(
-            outbox::failures(&f.store, f.project)
-                .await
-                .expect("failures")
-                .is_empty(),
-            "a blocked row must not appear among permanent failures"
-        );
-
-        // And it is not delivered. `delivered_at` is what a delivery stamps.
-        assert_eq!(f.column(row, "delivered_at").await, "");
-    });
-}
-
 /// The upgrade returns the retained work with its **original** identity.
 ///
 /// A new idempotency key would make the delivery a second one rather than the
@@ -261,52 +214,6 @@ fn release_preserves_identity() {
                 .len(),
             1,
             "the released row must be delivered by the ordinary drain"
-        );
-    });
-}
-
-/// A capability the upgrade did **not** bring leaves its rows blocked.
-///
-/// Releasing everything on any capability change would put work back in front
-/// of a server that still cannot hold it, and the futile retry this state
-/// exists to prevent would happen anyway.
-#[test]
-#[cfg(any())]
-fn a_partial_upgrade_releases_only_what_it_covers() {
-    runtime().block_on(async {
-        let f = fixture().await;
-        let relation = f.queue(OutboxEntityType::MemoryRelation, "relation").await;
-        let blocker = f.queue(OutboxEntityType::TaskBlocker, "blocker").await;
-        for row in [relation, blocker] {
-            outbox::mark_blocked(
-                &f.store,
-                row,
-                codes::UNKNOWN_ENTITY_TYPE,
-                "schema=1;capabilities=",
-                "no table at schema 1",
-            )
-            .await
-            .expect("block");
-        }
-
-        let released =
-            // By namespace, which is what production does since Feature 004 —
-            // a project's namespace is `project:<id>`, so this is the same set
-            // of rows the daemon's own release reaches.
-            outbox::release_blocked_namespace(
-                &f.store,
-                &cairn_core::domain::SyncNamespace::Project(f.project).key(),
-                &[OutboxEntityType::MemoryRelation],
-            )
-                .await
-                .expect("release");
-        assert_eq!(released, 1);
-        assert_eq!(f.column(relation, "state").await, "pending");
-        assert_eq!(f.column(blocker, "state").await, "blocked");
-        assert_eq!(
-            f.column(blocker, "attempts").await,
-            "0",
-            "the still-unsupported row must not have been retried by the release"
         );
     });
 }
