@@ -937,6 +937,14 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
 /// already-open store remains usable for safe capture, and no legacy row is
 /// removed until backup, manifest, and removed-feature bundle all verify.
 async fn migrate_removed_feature_tasks(d: &Daemon) -> serde_json::Value {
+    migrate_removed_feature_tasks_at(
+        d,
+        &cairn_core::paths::home().join("removed_feature").join("tasks-v1"),
+    )
+    .await
+}
+
+async fn migrate_removed_feature_tasks_at(d: &Daemon, dir: &std::path::Path) -> serde_json::Value {
     use cairn_store::transfer;
 
     let pending = match transfer::removed_feature_tasks_pending(&d.store).await {
@@ -946,8 +954,7 @@ async fn migrate_removed_feature_tasks(d: &Daemon) -> serde_json::Value {
     if !pending {
         return json!({ "status": "not_pending" });
     }
-    let dir = cairn_core::paths::home().join("removed_feature").join("tasks-v1");
-    if let Err(error) = std::fs::create_dir_all(&dir) {
+    if let Err(error) = std::fs::create_dir_all(dir) {
         return json!({ "status": "warning", "detail": error.to_string() });
     }
     let snapshot = dir.join("legacy.sqlite");
@@ -4013,6 +4020,47 @@ mod tests {
         let json = serde_json::to_value(&envelope).expect("serializable envelope");
         assert_eq!(json["ok"], true, "expected success, got {json}");
         json["data"].clone()
+    }
+
+    #[tokio::test]
+    async fn init_legacy_task_export_is_conservative_and_idempotent() {
+        let repo = Repo::new().await;
+        let artifacts = tempfile::tempdir().unwrap();
+        let first = migrate_removed_feature_tasks_at(&repo.daemon, artifacts.path()).await;
+        assert_eq!(first["status"], "exported_cleaned");
+        assert!(artifacts.path().join("legacy.sqlite").is_file());
+        assert!(artifacts.path().join("legacy.manifest.json").is_file());
+        assert!(artifacts.path().join("removed_feature.json").is_file());
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+        )
+        .fetch_one(repo.daemon.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(tables, 0);
+        let second = migrate_removed_feature_tasks_at(&repo.daemon, artifacts.path()).await;
+        assert_eq!(second["status"], "not_pending");
+        let init = ok(&repo, Request::Init { cwd: repo.cwd.clone() }).await;
+        assert_eq!(init["legacy_migration"]["status"], "not_pending");
+    }
+
+    #[tokio::test]
+    async fn init_legacy_task_export_refuses_conflicting_artifacts_without_cleanup() {
+        let repo = Repo::new().await;
+        let artifacts = tempfile::tempdir().unwrap();
+        std::fs::write(artifacts.path().join("legacy.sqlite"), "user artifact").unwrap();
+        let result = migrate_removed_feature_tasks_at(&repo.daemon, artifacts.path()).await;
+        assert_eq!(result["status"], "warning");
+        assert_eq!(std::fs::read(artifacts.path().join("legacy.sqlite")).unwrap(), b"user artifact");
+        let tasks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+        )
+        .fetch_one(repo.daemon.store.pool())
+        .await
+        .unwrap();
+        assert_eq!(tasks, 1);
+        // The same real store remains usable after the warning.
+        assert!(cairn_store::repo::list_projects(&repo.daemon.store).await.is_ok());
     }
 
     async fn err(r: &Repo, request: Request) -> serde_json::Value {
