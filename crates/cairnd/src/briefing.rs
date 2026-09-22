@@ -438,6 +438,7 @@ async fn level1_patterns(
 /// Two sources, both already recorded: `error` observations from the current
 /// and previous session, and the text of `failure`-type memories in the
 /// applicable scopes. Nothing is inferred and nothing is asked of the agent.
+#[cfg(any())]
 pub(crate) async fn project_signals_for(
     daemon: &Daemon,
     project_id: Uuid,

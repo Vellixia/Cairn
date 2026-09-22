@@ -3,10 +3,8 @@
 use crate::state::{git_status, storage_err, Daemon, Resolved};
 use crate::{briefing, capture, handoffs};
 use cairn_core::domain::*;
-use cairn_core::validate::ProjectIdentity;
 use cairn_core::wire::*;
 use cairn_store::repo;
-use cairn_store::search::{self, SearchContext};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -244,41 +242,10 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             reason,
         } => {
             let r = d.resolve(&cwd).await?;
-            if server_owns_knowledge(d).await {
-                // A pin is derived state the server computes and enforces its
-                // own budget for, so under server authority it is a request
-                // (FR-712).
-                //
-                // `reason` is deliberately not sent. The server's `pin` command
-                // reads `pinned` and nothing else, so a `reason` in the payload
-                // would be accepted and dropped — and a field that travels and
-                // vanishes is worse than one that never left, because the caller
-                // believes it arrived. It stays a local annotation until the
-                // server has somewhere to put it.
-                let _ = &reason;
-                return queue_knowledge_command(
-                    d,
-                    Some(r.project.id),
-                    session_id,
-                    cairn_store::spool::CommandKind::Pin,
-                    &json!({ "target_id": memory_id, "pinned": pinned }),
-                )
-                .await;
-            }
-            let s = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
-            let config = d.config.read().await.clone();
-            repo::set_pinned(
-                &d.store,
-                memory_id,
-                pinned,
-                reason.as_deref(),
-                s.id,
-                config.pin_budget_project,
-                config.pin_budget_per_scope,
-            )
-            .await
-            .map_err(storage_err)?;
-            Ok(json!({ "memory_id": memory_id, "pinned": pinned }))
+            let _ = (agent_session_key, reason);
+            queue_knowledge_command(d, Some(r.project.id), session_id,
+                cairn_store::spool::CommandKind::Pin,
+                &json!({ "target_id": memory_id, "pinned": pinned })).await
         }
 
         Request::MemoryCreate {
@@ -293,7 +260,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             local_only,
             topic_key,
             value_key,
-            importance,
+            importance: _,
             domain,
         } => match domain {
             // FR-455, FR-527: no MCP action authors team knowledge directly.
@@ -305,9 +272,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                  `action: \"promote\", target: \"team\"` — no MCP action authors \
                  authoritative team policy directly",
             )),
-            Some(KnowledgeDomain::Personal) => {
-                personal_create(d, &cwd, kind, content, topic_key, value_key).await
-            }
+            Some(KnowledgeDomain::Personal) => personal_create(d, &cwd, kind, content, topic_key, value_key).await,
             None | Some(KnowledgeDomain::Project) => {
                 memory_create(
                     d,
@@ -324,7 +289,6 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                     SubjectProposal {
                         topic_key,
                         value_key,
-                        importance,
                     },
                 )
                 .await
@@ -343,7 +307,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             local_only,
             topic_key,
             value_key,
-            importance,
+            importance: _,
         } => {
             memory_create(
                 d,
@@ -360,7 +324,6 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 SubjectProposal {
                     topic_key,
                     value_key,
-                    importance,
                 },
             )
             .await
@@ -454,43 +417,12 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 "domain: \"team\" cannot be forgotten through cairn_remember; \
                  use `cairn team retire` (admin only)",
             )),
-            Some(KnowledgeDomain::Personal) => {
-                // A tombstone on a record the server owns is a request like any
-                // other mutation (FR-712). Forgetting locally and telling the
-                // server later is the shape FR-709 forbids: for as long as the
-                // command is queued the two sides disagree about whether the
-                // record exists, and the local side is not the authority.
-                if server_owns_knowledge(d).await {
-                    return queue_knowledge_command(
-                        d,
-                        None,
-                        None,
-                        cairn_store::spool::CommandKind::PersonalForget,
-                        &json!({ "target_id": memory_id }),
-                    )
-                    .await;
-                }
-                cairn_store::global::forget_personal(&d.store, memory_id, d.owner_identity().await)
-                    .await
-                    .map_err(storage_err)?;
-                Ok(json!({ "deleted": memory_id, "domain": "personal" }))
-            }
+            Some(KnowledgeDomain::Personal) => queue_knowledge_command(d, None, None,
+                cairn_store::spool::CommandKind::PersonalForget, &json!({ "target_id": memory_id })).await,
             None | Some(KnowledgeDomain::Project) => {
                 let r = d.resolve(&cwd).await?;
-                if server_owns_knowledge(d).await {
-                    return queue_knowledge_command(
-                        d,
-                        Some(r.project.id),
-                        None,
-                        cairn_store::spool::CommandKind::Forget,
-                        &json!({ "target_id": memory_id }),
-                    )
-                    .await;
-                }
-                repo::delete_memory(&d.store, memory_id, r.policy)
-                    .await
-                    .map_err(storage_err)?;
-                Ok(json!({ "deleted": memory_id }))
+                queue_knowledge_command(d, Some(r.project.id), None,
+                    cairn_store::spool::CommandKind::Forget, &json!({ "target_id": memory_id })).await
             }
         },
         Request::MemorySearch {
@@ -1185,7 +1117,6 @@ async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireEr
 pub struct SubjectProposal {
     pub topic_key: Option<String>,
     pub value_key: Option<String>,
-    pub importance: Option<Importance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,6 +1125,7 @@ pub struct SubjectProposal {
 
 /// Render one fact for output, with its value already redacted and bounded at
 /// the point it was stored.
+#[cfg(any())]
 fn evidence_json(f: &cairn_store::evidence::EvidenceFact) -> serde_json::Value {
     json!({
         "id": f.id,
@@ -1213,6 +1145,7 @@ fn evidence_json(f: &cairn_store::evidence::EvidenceFact) -> serde_json::Value {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any())]
 async fn evidence_add(
     d: &Daemon,
     cwd: &str,
@@ -1375,6 +1308,7 @@ async fn evidence_add(
 
 /// Verify on demand: the same verifiers and the same caps as the background
 /// pass, reported synchronously (FR-472).
+#[cfg(any())]
 async fn verify_now(
     d: &Daemon,
     cwd: &str,
@@ -1430,6 +1364,7 @@ async fn verify_now(
     Ok(body)
 }
 
+#[cfg(any())]
 async fn verify_one(
     d: &Daemon,
     project_id: Uuid,
@@ -1488,6 +1423,7 @@ async fn verify_one(
         .map_err(storage_err)
 }
 
+#[cfg(any())]
 async fn run_history(d: &Daemon, memory_id: Uuid) -> Result<Vec<serde_json::Value>, WireError> {
     Ok(cairn_store::evidence::runs_for_memory(&d.store, memory_id)
         .await
@@ -1508,6 +1444,7 @@ async fn run_history(d: &Daemon, memory_id: Uuid) -> Result<Vec<serde_json::Valu
 }
 
 /// Record that a session confirms an existing memory is still true (FR-321).
+#[cfg(any())]
 async fn memory_reinforce(
     d: &Daemon,
     cwd: &str,
@@ -1585,6 +1522,7 @@ async fn memory_reinforce(
 
 /// Record an explicit reconciliation decision (FR-335).
 #[allow(clippy::too_many_arguments)]
+#[cfg(any())]
 async fn memory_reconcile(
     d: &Daemon,
     cwd: &str,
@@ -1655,6 +1593,7 @@ async fn memory_reconcile(
 /// organisation and repository parts of its remote — deliberately duplicated
 /// here rather than imported, because the server's version reads Postgres
 /// rows this client never has.
+#[cfg(any())]
 fn current_project_identities(project: &Project) -> Vec<ProjectIdentity> {
     let mut out = Vec::new();
     let name = project.name.trim();
@@ -1669,6 +1608,7 @@ fn current_project_identities(project: &Project) -> Vec<ProjectIdentity> {
 
 /// The host, organisation and repository parts of a git remote. See
 /// [`current_project_identities`].
+#[cfg(any())]
 fn remote_identity_tokens(remote: &str) -> Vec<ProjectIdentity> {
     const STRUCTURAL: &[&str] = &["git", "ssh", "www", "http", "https", "com", "org", "net"];
     remote
@@ -1688,6 +1628,7 @@ fn remote_identity_tokens(remote: &str) -> Vec<ProjectIdentity> {
 /// This is the first of `validate_global_content`'s five entry points
 /// (`create_personal` runs it internally, T074) — there is no separate call
 /// here, only the identities to screen against and the write itself.
+#[cfg(any())]
 async fn personal_create(
     d: &Daemon,
     cwd: &str,
@@ -1791,6 +1732,7 @@ async fn personal_create(
 /// A store that cannot answer is treated as not authoritative. The local path is
 /// the one that works without a server, and guessing the other way would queue
 /// commands nothing will ever apply.
+#[cfg(any())]
 async fn server_owns_knowledge(d: &Daemon) -> bool {
     cairn_store::authority::mode(&d.store)
         .await
@@ -1873,6 +1815,7 @@ pub(crate) async fn queue_knowledge_command(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any())]
 async fn memory_create(
     d: &Daemon,
     cwd: &str,
@@ -1992,6 +1935,7 @@ async fn memory_create(
 /// memory is local and `--local-only` withholds nothing a colleague would
 /// otherwise have — the warning would be true of the whole store, which is a
 /// statement about the installation and not about this write.
+#[cfg(any())]
 async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut serde_json::Value) {
     if !local_only {
         return;
@@ -2021,6 +1965,7 @@ async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut ser
 /// got a throwaway session — worsening the ambiguity for everyone else and
 /// stamping the memory with an origin that never did the work. Ambiguity is the
 /// caller's to resolve, exactly as it is for `cairn context`.
+#[cfg(any())]
 pub(crate) async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
@@ -2071,6 +2016,7 @@ pub(crate) async fn ensure_session_for_memory(
     .map_err(storage_err)
 }
 
+#[cfg(any())]
 fn resolve_scope(
     r: &Resolved,
     session: &Session,
@@ -2115,6 +2061,7 @@ async fn server_replay(d: &Daemon, cwd: &str) -> Reply {
         .await
 }
 
+#[cfg(any())]
 async fn memory_search(
     d: &Daemon,
     cwd: &str,
@@ -2240,6 +2187,116 @@ async fn memory_search(
         }
     }
     Ok(payload)
+}
+
+async fn personal_create(
+    d: &Daemon, cwd: &str, kind: MemoryType, content: String,
+    topic_key: Option<String>, value_key: Option<String>,
+) -> Reply {
+    d.resolve(cwd).await?;
+    queue_knowledge_command(d, None, None, cairn_store::spool::CommandKind::PersonalCreate,
+        &json!({ "knowledge_type": kind.as_str(), "content": cairn_core::redact::redact(&content), "topic_key": topic_key, "value_key": value_key })).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn memory_create(
+    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
+    kind: MemoryType, scope: Option<MemoryScope>, scope_key: Option<String>, content: String,
+    _evidence: Vec<Uuid>, local_only: bool, supersedes: Option<Uuid>, subject: SubjectProposal,
+) -> Reply {
+    if local_only {
+        return Err(WireError::invalid("local-only memory is unavailable; server owns durable knowledge"));
+    }
+    let r = d.resolve(cwd).await?;
+    let scope = scope.unwrap_or(MemoryScope::Project);
+    let payload = json!({
+        "type": kind.as_str(), "scope": scope.as_str(),
+        "scope_key": scope_key.unwrap_or_else(|| r.project.id.to_string()),
+        "content": cairn_core::redact::redact(&content),
+        "topic_key": subject.topic_key, "value_key": subject.value_key,
+        "session_id": session_id,
+    });
+    queue_knowledge_command(d, Some(r.project.id), session_id,
+        if supersedes.is_some() { cairn_store::spool::CommandKind::Supersede } else { cairn_store::spool::CommandKind::Remember },
+        &payload).await
+}
+
+async fn memory_reinforce(
+    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
+    memory_id: Uuid, from_memory_id: Option<Uuid>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    from_memory_id.ok_or_else(|| WireError::invalid("reinforcement needs the memory that carries the confirming statement"))?;
+    queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::Reinforce,
+        &json!({ "target_id": memory_id, "session_id": session_id })).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn memory_reconcile(
+    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
+    from_memory_id: Uuid, to_memory_id: Uuid, relation: RelationKind, basis: RelationBasis,
+    basis_evidence_id: Option<Uuid>, rationale: Option<String>,
+) -> Reply {
+    if relation == RelationKind::ConflictsWith {
+        return Err(WireError::new(codes::NOT_CONFLICTED, "a conflict is detected, not declared; resolve it by superseding or narrowing"));
+    }
+    let r = d.resolve(cwd).await?;
+    queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::Relate,
+        &json!({ "from_memory_id": from_memory_id, "to_memory_id": to_memory_id,
+            "kind": relation.as_str(), "basis": basis.as_str(), "basis_evidence_id": basis_evidence_id,
+            "rationale": rationale.map(|text| cairn_core::redact::redact(&text)), "session_id": session_id })).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evidence_add(
+    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
+    _kind: EvidenceKind, _collector: Option<EvidenceCollector>, _subject: String, _observed_value: String,
+    _source_locator: String, _observation_id: Option<Uuid>, memory_id: Option<Uuid>, _role: Option<EvidenceRole>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let memory_id = memory_id.ok_or_else(|| WireError::invalid("evidence needs a memory target"))?;
+    queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::VerificationAttestation,
+        &json!({ "memory_ref": { "domain": "project", "knowledge_id": memory_id },
+            "verdict": "inconclusive", "verifier_kind": "runtime_state",
+            "attesting_agent": "mcp-client", "run_at": chrono::Utc::now().to_rfc3339() })).await
+}
+
+async fn verify_now(d: &Daemon, cwd: &str, memory_id: Option<Uuid>, all: bool, _explain: bool) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let memory_id = memory_id.ok_or_else(|| WireError::invalid(if all { "verify all is unavailable; verify a memory" } else { "verify needs --memory or --all" }))?;
+    queue_knowledge_command(d, Some(r.project.id), None, cairn_store::spool::CommandKind::VerificationRun,
+        &json!({ "memory_ref": { "domain": "project", "knowledge_id": memory_id },
+            "verdict": "inconclusive", "verifier_kind": "runtime_state", "run_at": chrono::Utc::now().to_rfc3339() })).await
+}
+
+async fn memory_search(
+    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, _session_id: Option<Uuid>, query: MemoryQuery,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let project_id = r.project.server_project_id.ok_or_else(|| WireError::new(codes::NOT_LINKED, "project is not linked to a server"))?;
+    let mut params = vec![("domain".into(), "project".into())];
+    for (key, value) in [("q", query.query), ("scope", query.scope.map(|v| v.as_str().to_string())),
+        ("scope_key", query.scope_key), ("type", query.kind.map(|v| v.as_str().to_string())),
+        ("state", query.state.map(|v| v.as_str().to_string())), ("limit", query.limit.map(|v| v.to_string()))] {
+        if let Some(value) = value { params.push((key.into(), value)); }
+    }
+    let client = crate::sync::client(d).await?;
+    let domains = query.domains.unwrap_or_else(|| vec![KnowledgeDomain::Project, KnowledgeDomain::Personal, KnowledgeDomain::Team]);
+    let project = if domains.contains(&KnowledgeDomain::Project) {
+        client.get_with_query(&format!("/api/projects/{project_id}/memories"), &params).await?
+    } else { json!({ "memories": [], "total": 0 }) };
+    let personal = if domains.contains(&KnowledgeDomain::Personal) {
+        client.get_with_query("/api/personal/knowledge", &params).await?
+    } else { json!([]) };
+    let team = if domains.contains(&KnowledgeDomain::Team) {
+        client.get_with_query("/api/team/knowledge", &params).await?
+    } else { json!([]) };
+    Ok(json!({
+        "results": project.get("memories").cloned().unwrap_or_else(|| json!([])),
+        "total": project.get("total").cloned().unwrap_or_else(|| json!(0)),
+        "personal": personal,
+        "team": team,
+    }))
 }
 
 async fn continuity_mode(d: &Daemon, session: Option<&Session>) -> Option<String> {

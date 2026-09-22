@@ -119,3 +119,16 @@ Validation with Rust 1.97.1: `cargo clippy -p cairnd --all-targets -- -D warning
 `cargo test -p cairnd` (84 passed), `cargo test -p cairn mcp::tests` (9 passed),
 and `git diff --check` all pass. Workspace check retains two pre-existing
 `cairn-server/src/api.rs` dead-code warnings outside this edge slice.
+
+## Task 3 phase D — MCP server-only memory seam
+
+- MCP memory search now calls project, personal, and team server HTTP reads;
+  unavailable server paths return `server_unavailable` rather than SQLite FTS.
+- MCP create, supersede, pin, reinforce, reconcile, forget, verification, and
+  personal mutations now enter the typed immutable command spool unconditionally.
+  The prior authority-mode local-write fallback is no longer reachable.
+- Graph, replay, and governance already use server HTTP boundaries and remain so.
+
+Validation with Rust 1.97.1: `cargo check -p cairnd --all-targets`,
+`cargo clippy -p cairnd --all-targets -- -D warnings`, `cargo test -p cairnd`
+(84 passed), `cargo test -p cairn mcp::tests` (9 passed), and `git diff --check`.

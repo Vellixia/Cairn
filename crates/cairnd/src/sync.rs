@@ -73,6 +73,13 @@ impl Client {
         .await
     }
 
+    pub(crate) async fn get_with_query(&self, path: &str, query: &[(String, String)]) -> Reply {
+        let mut url = reqwest::Url::parse(&format!("{}{path}", self.base))
+            .map_err(|error| WireError::new(codes::SERVER_UNAVAILABLE, error.to_string()))?;
+        url.query_pairs_mut().extend_pairs(query);
+        decode(self.http.get(url).bearer_auth(&self.token).send().await).await
+    }
+
     pub(crate) async fn post(&self, path: &str, body: &serde_json::Value) -> Reply {
         decode(
             self.http
