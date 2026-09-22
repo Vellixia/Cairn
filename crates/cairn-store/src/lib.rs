@@ -85,6 +85,7 @@ impl Store {
     /// so that exercising a fully exhausted retry takes seconds rather than the
     /// best part of a minute.
     pub(crate) async fn open_with_busy_timeout(path: &Path, busy: Duration) -> Result<Self> {
+        let fresh = !path.exists();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -123,7 +124,11 @@ impl Store {
                 other => StoreError::from(other),
             })?;
 
-        migrate::run(&pool).await?;
+        if fresh {
+            migrate::run_fresh(&pool).await?;
+        } else {
+            migrate::run(&pool).await?;
+        }
         Ok(Self { pool })
     }
 
@@ -137,7 +142,7 @@ impl Store {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        migrate::run(&pool).await?;
+        migrate::run_fresh(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -176,6 +181,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(v, migrate::latest_version());
+    }
+
+    #[tokio::test]
+    async fn fresh_store_has_no_local_knowledge_tables() {
+        let store = Store::open_memory().await.unwrap();
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        for removed in ["memories", "observations", "handoffs", "outbox", "personal_knowledge", "team_knowledge"] {
+            assert!(!tables.iter().any(|table| table == removed), "fresh edge table: {removed}");
+        }
+        for retained in ["projects", "sessions", "event_spool", "command_spool", "agent_integrations", "removed_feature_manifest"] {
+            assert!(tables.iter().any(|table| table == retained), "missing edge table: {retained}");
+        }
     }
 
     #[tokio::test]
