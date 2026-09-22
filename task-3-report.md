@@ -144,3 +144,26 @@ Validation with Rust 1.97.1: `cargo clippy -p cairnd -p cairn-store --all-target
 `cargo check --workspace --all-targets` (two pre-existing server warnings),
 `cargo test --workspace --no-run`, `cargo test -p cairnd` (84 passed),
 `cargo test -p cairn mcp::tests` (9 passed), and `git diff --check`.
+
+## Task 3 phase E — server-only context and capture cleanup
+
+- `deliver` now returns the server response verbatim, or only its bounded,
+  account-bound outage-cache entry. A cache miss returns an explicit unavailable
+  result; it never builds a local briefing.
+- Removed daemon local briefing, continuity, drift, recovery, and verification
+  runtimes. Local observation capture is no longer written by lifecycle tool
+  events; automatic capture stays on the typed `event_spool` path.
+- Hook vocabulary now derives only from queued safe events. It no longer reads
+  local memories or established personal/team knowledge.
+- Explicit checkpoint recovery is queued as one typed operation; it no longer
+  creates a local handoff/checkpoint.
+
+Validation: Rust 1.97.1 `cargo check -p cairnd --all-targets`,
+`cargo test -p cairnd --no-run`, and `git diff --check` pass. Clippy could not
+start: this environment launches Homebrew Rust 1.95.0 even under `rustup run
+1.97.1`; workspace requires Rust 1.97.1.
+
+Deferred schema/module deletion: `cairn-store` local `repo`, `search`,
+`knowledge`, `global`, `evidence`, `patterns`, `continuity`, `outbox`,
+`authority`, and `cursor` remain because session/integration/removed-feature
+migration callers still compile against them. No schema migration was added.

@@ -51,7 +51,6 @@
 //! to defer to, so its own store is the only authority there is.
 
 use crate::state::{Daemon, Resolved};
-use cairn_core::wire::ContextDepth;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -188,18 +187,7 @@ impl OutageCache {
 /// [`Trigger::Explicit`], and except when [`Delivered::trace_id`] is `None` —
 /// report the transmission outcome of.
 pub struct Delivered {
-    /// `None` when there is nothing to report an outcome against: an explicit
-    /// local-only fallback (no session, or the server never answered) and a
-    /// cache hit both carry no fresh `generated` trace (§3, §6.2 — only a
-    /// `generated` trace can become `transmitted`).
-    pub trace_id: Option<Uuid>,
-    /// The rendered briefing, in the same shape `crate::briefing::build`
-    /// already produces, with the durable sections merged in and
-    /// `trace_id`/`degradation_level`/`served_from_cache` added at the top
-    /// level for a caller that reads the raw value rather than the struct.
     pub payload: Value,
-    pub degradation_level: String,
-    pub served_from_cache: bool,
 }
 
 /// Retrieve, merge with the daemon's own Level 0 assembly, and fall back to
@@ -209,7 +197,7 @@ pub struct Delivered {
 /// constant of its own.
 pub async fn deliver(
     d: &Daemon,
-    resolved: &Resolved,
+    _resolved: &Resolved,
     session_id: Uuid,
     trigger: Trigger,
     open_trigger: Option<&str>,
@@ -261,97 +249,15 @@ pub async fn deliver(
     };
 
     let meta = ResponseMeta::extract(response.as_ref(), served_from_cache);
-    // The caller's figure, not the machine's default. `cairn context --budget`
-    // and a per-machine `context_budget_tokens` are both real, and the caller
-    // already resolved which applies; re-reading config here ignored a stated
-    // budget entirely and produced a briefing larger than the one asked for
-    // (FR-029, SC-709).
-    let local_budget = meta.local_budget(budget_tokens);
-
-    // **Nothing fresh and nothing cached for this account is not a local
-    // briefing** (FR-790a). The old fallback assembled Level 0 from the local
-    // store and served it, which on a cache miss means serving whatever the
-    // *previous* account's session had pulled onto this machine — to a second
-    // account, or to a caller who has signed out. Authorization for a project
-    // is a fact the server establishes, and on this path the server has not
-    // been reached at all, so there is nothing to check the caller against and
-    // no filter that could stand in for one.
-    //
-    // `briefing::unavailable` is given no `Daemon` and no store to read, so
-    // this is a structural answer rather than a careful one.
-    //
-    // **Only for a project whose briefing is server-side.** An unlinked project
-    // has no server authority to defer to and never had one: its local store is
-    // the only authority there is, and withholding it would answer "unavailable"
-    // to a developer who never asked for a server. §12.3 is the outage
-    // behaviour of a *server-side* briefing, and this is the line that keeps it
-    // to that.
-    let server_side = resolved.project.linked && resolved.project.server_project_id.is_some();
-    let payload_result = if response.is_none() && server_side {
-        let git = crate::state::git_status(resolved.repo.worktree_path.clone()).await;
-        let config = d.config.read().await.clone();
-        git.map(|git| {
-            crate::briefing::unavailable(
-                &resolved.project,
-                crate::state::repo_state(&git),
-                cairn_core::context::Caps {
-                    warnings_in_context_max: config.warnings_in_context_max,
-                    pins_in_context_max: config.pins_in_context_max,
-                    reserve_fraction: config.min_safe_context_fraction,
-                    global_share_max: cairn_core::context::GLOBAL_SHARE_MAX,
-                },
-                local_budget,
-            )
-        })
-    } else {
-        let session = cairn_store::repo::session(&d.store, session_id).await.ok();
-        // `FromServer` when the server answered — it already selected and paid
-        // for the durable sections. `Local` only for an unlinked project, whose
-        // store is its own authority.
-        let durable = if response.is_some() {
-            crate::briefing::Durable::FromServer
-        } else {
-            crate::briefing::Durable::Local
-        };
-        // When the server answered, it already selected and already paid for
-        // the durable sections — so this build must not read them. Assembling
-        // them here and letting the merge overwrite them would spend budget on
-        // content that is thrown away, and the replacement costs its own amount
-        // on top: the briefing then exceeds the budget it states, which is what
-        // FR-029 forbids and what a merged answer of 357 tokens against a
-        // stated 300 looked like.
-        crate::briefing::build(
-            d,
-            resolved,
-            session.as_ref(),
-            crate::briefing::Assembly::local(local_budget, ContextDepth::Standard)
-                .with_durable(durable),
-        )
-        .await
-    };
-    let mut payload = match payload_result {
-        Ok(built) => serde_json::to_value(built).unwrap_or_else(|_| json!({})),
-        Err(e) => json!({ "error": e.message }),
-    };
-
-    match response.as_ref().and_then(|r| r.get("sections")) {
-        Some(sections) => merge_durable_sections(&mut payload, sections),
-        // Nothing fresh and nothing cached for this session and account:
-        // said, not silently served as though there were nothing to say
-        // (§12.3's closing bullet).
-        None => {
-            if let Some(obj) = payload.as_object_mut() {
-                obj.insert("fresh_knowledge_unavailable".into(), json!(true));
-            }
-        }
-    }
+    let mut payload = response.unwrap_or_else(|| json!({
+        "fresh_knowledge_unavailable": true,
+        "degradation_level": "none",
+        "sections": {},
+    }));
     embed_meta(&mut payload, &meta, served_from_cache);
 
     Delivered {
-        trace_id: meta.trace_id,
         payload,
-        degradation_level: meta.degradation_level,
-        served_from_cache,
     }
 }
 
@@ -494,7 +400,9 @@ enum Answer {
 struct ResponseMeta {
     trace_id: Option<Uuid>,
     degradation_level: String,
+    #[cfg(test)]
     tokens: usize,
+    #[cfg(test)]
     spent: usize,
 }
 
@@ -508,8 +416,8 @@ impl ResponseMeta {
         Self {
             trace_id: None,
             degradation_level: "none".to_string(),
-            tokens: 0,
-            spent: 0,
+            #[cfg(test)] tokens: 0,
+            #[cfg(test)] spent: 0,
         }
     }
 
@@ -537,12 +445,12 @@ impl ResponseMeta {
                 .and_then(|v| v.as_str())
                 .unwrap_or("none")
                 .to_string(),
-            tokens: response
+            #[cfg(test)] tokens: response
                 .get("budget")
                 .and_then(|b| b.get("tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize,
-            spent: response
+            #[cfg(test)] spent: response
                 .get("budget")
                 .and_then(|b| b.get("spent"))
                 .and_then(|v| v.as_u64())
@@ -557,6 +465,7 @@ impl ResponseMeta {
     /// this (`budget.reserved_for_level0`), so this never recomputes that
     /// fraction itself. The whole local budget when nothing durable was
     /// retrieved at all: nothing else claimed a share of it that time.
+    #[cfg(test)]
     fn local_budget(&self, full: usize) -> usize {
         if self.tokens == 0 {
             full
@@ -570,6 +479,7 @@ impl ResponseMeta {
 /// it, discarding everything but the rendered text — reference keys, ranks
 /// and costs are trace-only detail (`contracts/retrieval-delivery.md` §6),
 /// not briefing content.
+#[cfg(test)]
 fn section_contents(sections: &Value, name: &str) -> Vec<String> {
     sections
         .get(name)
@@ -595,6 +505,7 @@ fn section_contents(sections: &Value, name: &str) -> Vec<String> {
 /// shown. `patterns` is rendered from the canonical fields the server sent
 /// with its selection, under the very id the server traced; see the module
 /// docs for why that one is not merely a preference.
+#[cfg(test)]
 fn merge_durable_sections(payload: &mut Value, sections: &Value) {
     let Some(briefing) = payload.get_mut("briefing").and_then(|b| b.as_object_mut()) else {
         return;

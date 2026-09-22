@@ -1,7 +1,7 @@
 //! Request dispatch: the daemon's whole behaviour, one function per verb.
 
 use crate::state::{git_status, storage_err, Daemon, Resolved};
-use crate::{briefing, capture, handoffs};
+use crate::handoffs;
 use cairn_core::domain::*;
 use cairn_core::wire::*;
 use cairn_store::repo;
@@ -155,43 +155,9 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         } => {
             let r = d.resolve(&cwd).await?;
             let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-
-            // A checkpoint anchors to a handoff. When none exists yet, one is
-            // derived first rather than refusing with `no_boundary_record` —
-            // asking for a checkpoint is a reasonable thing to do at any point,
-            // and the boundary record is Cairn's job to produce (FR-425).
-            let handoff = match repo::latest_handoff(&d.store, s.id)
-                .await
-                .map_err(storage_err)?
-            {
-                Some(h) => h,
-                None => {
-                    handoffs::generate_boundary_record(d, &s, HandoffTrigger::PreCompact, r.policy)
-                        .await?
-                }
-            };
-
-            let worktree = std::path::PathBuf::from(r.worktree());
-            let checkpoint = crate::continuity::write(
-                d,
-                &s,
-                handoff.id,
-                CheckpointTrigger::Explicit,
-                &worktree,
-                &handoff.next_step,
-            )
-            .await?;
-
-            Ok(json!({
-                "checkpoint": {
-                    "id": checkpoint.id,
-                    "handoff_id": checkpoint.handoff_id,
-                    "trigger": checkpoint.trigger,
-                    "assumed": checkpoint.assumed,
-                    "next_action": checkpoint.next_action,
-                    "relevant_paths": checkpoint.assumed.path_fingerprints.len(),
-                }
-            }))
+            queue_knowledge_command(d, Some(r.project.id), Some(s.id),
+                cairn_store::spool::CommandKind::VerificationAttestation,
+                &json!({ "recovery_override": "checkpoint" })).await
         }
 
         Request::HandoffGenerate {
@@ -832,55 +798,11 @@ pub(crate) async fn observe(
     d: &Daemon,
     cwd: &str,
     agent_session_key: Option<String>,
-    observation: ObservationInput,
+    _observation: ObservationInput,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
-    let session = resolve_session_for_event(d, &r, agent_session_key.as_deref()).await?;
-    let config = d.config.read().await.clone();
-
-    let stored = capture::capture(
-        &d.store,
-        &config,
-        capture::CaptureContext {
-            session_id: session.id,
-            branch: &session.branch,
-            commit_sha: session.commit_sha.as_deref(),
-        },
-        observation,
-    )
-    .await
-    .map_err(storage_err)?;
-
-    repo::touch_session(&d.store, session.id)
-        .await
-        .map_err(storage_err)?;
-
-    // Drift marking rides the capture path (T063). It is one indexed lookup by
-    // exact locator, capped at `evidence_lookups_per_event_max`, and it writes
-    // exactly `verification` on the memories the fact supports. Exceeding the
-    // cap defers to the background pass and is not an error, which is what
-    // keeps a hook inside Feature 001's 250 ms deadline with its always-exit-0
-    // rule unchanged (FR-374, FR-475).
-    if let Some(o) = &stored {
-        if o.kind == ObservationType::FileChanged {
-            if let Some(path) = o.path.as_deref() {
-                let report = crate::drift::mark_for_path(d, r.project.id, path).await;
-                if report.marked > 0 {
-                    tracing::debug!(
-                        path,
-                        marked = report.marked,
-                        deferred = report.deferred,
-                        "marked claims for recheck"
-                    );
-                }
-            }
-        }
-    }
-
-    match stored {
-        Some(o) => Ok(json!({ "observation_id": o.id, "recorded": true })),
-        None => Ok(json!({ "recorded": false, "reason": "excluded" })),
-    }
+    let _ = resolve_session_for_event(d, &r, agent_session_key.as_deref()).await?;
+    Ok(json!({ "recorded": false, "reason": "use capture_events" }))
 }
 
 // ---------------------------------------------------------------------------
@@ -903,10 +825,10 @@ async fn context(
     cwd: &str,
     agent_session_key: Option<String>,
     session_id: Option<Uuid>,
-    reason: Option<ContextReason>,
+    _reason: Option<ContextReason>,
     token_budget: Option<usize>,
-    explain: bool,
-    depth: Option<cairn_core::wire::ContextDepth>,
+    _explain: bool,
+    _depth: Option<cairn_core::wire::ContextDepth>,
     trigger: Option<String>,
     open_trigger: Option<String>,
 ) -> Reply {
@@ -918,99 +840,13 @@ async fn context(
     // another agent's session context (FR-010, M1).
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    // Absent means `standard` — today's full assembly — so a caller that has
-    // never named `depth` sees no change (FR-481, T156).
-    let depth = depth.unwrap_or(cairn_core::wire::ContextDepth::Standard);
-
-    let mut out = match (explain, session.as_ref()) {
-        // `--explain` diagnoses the daemon's own local assembly and its
-        // reasons; the server's `sections` carry a `selection_rule` of their
-        // own but no per-reader diagnostic to merge with it, so this stays a
-        // purely local read exactly as it was before Feature 005 US2
-        // (`contracts/retrieval-delivery.md` §8 keeps a *reason* out of the
-        // trace for the parallel cause).
-        (true, _) => {
-            let payload = briefing::build(
-                d,
-                &r,
-                session.as_ref(),
-                briefing::Assembly::local(budget, depth).explaining(true),
-            )
-            .await?;
-            serde_json::to_value(payload).unwrap_or(json!({}))
-        }
-        // No session bound in this worktree: `/api/retrieve` requires one to
-        // bind to, and there is none, so this is the daemon's own local
-        // assembly exactly as it always was (FR-031).
-        (false, None) => {
-            let payload =
-                briefing::build(d, &r, None, briefing::Assembly::local(budget, depth)).await?;
-            serde_json::to_value(payload).unwrap_or(json!({}))
-        }
-        (false, Some(s)) => {
-            let trigger = trigger
-                .as_deref()
-                .map(crate::deliver::Trigger::parse)
-                .unwrap_or(crate::deliver::Trigger::Explicit);
-            let deadline =
-                std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
-            let delivered = crate::deliver::deliver(
-                d,
-                &r,
-                s.id,
-                trigger,
-                open_trigger.as_deref(),
-                budget,
-                deadline,
-            )
-            .await;
-            // These three already travel inside `delivered.payload` too
-            // (a caller that only sees the wire reply, such as the hook
-            // process, has no other way to read them) — logged here as well
-            // because this is the one place a server outage or a degraded
-            // level is otherwise silent on the daemon's own side.
-            tracing::debug!(
-                trace_id = ?delivered.trace_id,
-                degradation_level = %delivered.degradation_level,
-                served_from_cache = delivered.served_from_cache,
-                "server-side retrieval delivered"
-            );
-            let mut payload = delivered.payload;
-            // FR-477: `minimum` excludes both global sections entirely,
-            // unconditionally. `deliver` has no `depth` parameter of its own
-            // — the merge is identical at every depth — so the gate is
-            // enforced here, on the merged result, instead of before the
-            // fetch. The server has no notion of `depth` either, so this is
-            // the only place the guarantee can live regardless.
-            if depth.is_minimum() {
-                if let Some(briefing) = payload.get_mut("briefing").and_then(|b| b.as_object_mut())
-                {
-                    briefing.remove("personal_notes");
-                    briefing.remove("team_guidance");
-                }
-            }
-            payload
-        }
-    };
-
-    // The mode Cairn can honestly promise this agent — derived from Feature
-    // 002's capability profile, never from a capability of its own (FR-426).
-    if let Some(mode) = continuity_mode(d, session.as_ref()).await {
-        if let Some(o) = out.as_object_mut() {
-            o.insert("continuity_mode".into(), json!(mode));
-        }
-    }
-
-    // A post-compaction refresh is where a checkpoint is restored.
-    if reason == Some(ContextReason::PostCompaction) {
-        if let Some(restored) = restore_checkpoint(d, &r, session.as_ref()).await {
-            if let Some(o) = out.as_object_mut() {
-                o.insert("checkpoint".into(), restored);
-            }
-        }
-    }
-
-    Ok(out)
+    let session = session.ok_or_else(|| WireError::new(codes::NO_ACTIVE_SESSION, "context needs an active session"))?;
+    let trigger = trigger
+        .as_deref()
+        .map(crate::deliver::Trigger::parse)
+        .unwrap_or(crate::deliver::Trigger::Explicit);
+    let deadline = std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
+    Ok(crate::deliver::deliver(d, &r, session.id, trigger, open_trigger.as_deref(), budget, deadline).await.payload)
 }
 
 /// The session a read-only request applies to.
@@ -1325,43 +1161,4 @@ async fn memory_search(
         "personal": personal,
         "team": team,
     }))
-}
-
-async fn continuity_mode(d: &Daemon, session: Option<&Session>) -> Option<String> {
-    let _ = d;
-    let agent = session.map(|s| s.agent.as_str())?;
-    let agent = cairn_integrate::AgentId::parse(agent)?;
-    let adapter = cairn_integrate::adapter_for(agent);
-    // The declared profile, not a detected one: the mode is a statement about
-    // what this agent's lifecycle can do, which does not depend on whether its
-    // configuration happens to be installed right now.
-    let profile = adapter.capabilities(&cairn_integrate::Detection::found(None, None));
-    Some(profile.continuity_mode().as_str().to_string())
-}
-
-/// Restore the checkpoint this session should resume from.
-///
-/// The session's own newest checkpoint, else the newest on this branch — a
-/// session that compacted before it had one still resumes informed.
-async fn restore_checkpoint(
-    d: &Daemon,
-    r: &Resolved,
-    session: Option<&Session>,
-) -> Option<serde_json::Value> {
-    let checkpoint = match session {
-        Some(s) => match cairn_store::continuity::latest(&d.store, s.id).await {
-            Ok(Some(c)) => Some(c),
-            _ => cairn_store::continuity::latest_on_branch(&d.store, r.project.id, &s.branch)
-                .await
-                .ok()
-                .flatten(),
-        },
-        None => None,
-    }?;
-
-    let worktree = std::path::PathBuf::from(r.worktree());
-    let restored = crate::continuity::restore(d, &checkpoint, &worktree)
-        .await
-        .ok()?;
-    serde_json::to_value(restored).ok()
 }

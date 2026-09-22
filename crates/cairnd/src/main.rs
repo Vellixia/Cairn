@@ -5,20 +5,15 @@
 //! linked.
 
 mod arrival;
-mod briefing;
 mod capture;
-mod continuity;
 mod deliver;
-mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
-mod recover;
 mod state;
 mod sync;
 #[cfg(test)]
 mod testsupport;
-mod verify;
 
 use cairn_core::domain::new_id;
 use cairn_core::wire::{Envelope, Request, WireError};
@@ -113,77 +108,9 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         last_observed_instance: Arc::new(RwLock::new(None)),
     });
 
-    let reconciled = recover::reconcile_previous_runs(&daemon).await;
-    if reconciled > 0 {
-        tracing::info!(reconciled, "reconciled sessions from a previous run");
-    }
-    let stale = recover::reconcile_stale_memory(&daemon).await;
-    if stale > 0 {
-        tracing::info!(stale, "memory marked stale");
-    }
-    // Queued work a previous run claimed but never delivered is ours again.
-    // The backstop for the process dying between the seal and the synthesis —
-    // not the only retry path, which is the point of D22 (FR-240).
-    let owed = recover::sweep_pending_handoffs(&daemon, std::time::Duration::ZERO).await;
-    if owed > 0 {
-        tracing::info!(owed, "produced handoffs owed by a previous run");
-    }
-
-    let released = recover::release_abandoned_claims(&daemon).await;
-    if released > 0 {
-        tracing::info!(released, "released outbox claims from a previous run");
-    }
-
     // Automatic delivery. Queued work reaches the server without anyone typing
     // `cairn sync now` (FR-056, C1).
     tokio::spawn(sync::run_worker(Arc::clone(&daemon)));
-
-    // Sessions nobody is driving any more. Start-time reconciliation only sees
-    // previous runs, so a long-lived daemon needs this to notice one that went
-    // quiet under its own run.
-    {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
-            // The first tick fires immediately; that is wanted, since a daemon
-            // may be starting after a long absence.
-            loop {
-                ticks.tick().await;
-                let reaped = recover::reap_idle_sessions(
-                    &daemon,
-                    recover::IDLE_SESSION_TIMEOUT,
-                    recover::SUPERSEDED_SESSION_TIMEOUT,
-                )
-                .await;
-                // The same tick sweeps any boundary still owing a handoff, so
-                // progress does not depend on a restart (FR-240, D22).
-                let swept =
-                    recover::sweep_pending_handoffs(&daemon, recover::HANDOFF_SWEEP_AFTER).await;
-                if swept > 0 {
-                    tracing::info!(swept, "produced handoffs owed by sealed boundaries");
-                }
-                if reaped > 0 {
-                    tracing::info!(reaped, "closed idle sessions");
-                }
-
-                // The bounded verification pass joins the tick that already
-                // does the periodic work, rather than introducing a scheduler
-                // (FR-472). It is capped three ways and yields rather than
-                // overrunning; whatever it does not finish is picked up next
-                // tick. Nothing here ever runs on the session-open path.
-                let report = verify::sweep_projects(&daemon).await;
-                if report.runs_recorded > 0 || report.yielded {
-                    tracing::info!(
-                        facts = report.facts_examined,
-                        runs = report.runs_recorded,
-                        updated = report.memories_updated,
-                        yielded = report.yielded,
-                        "bounded verification pass"
-                    );
-                }
-            }
-        });
-    }
 
     Ok(daemon)
 }

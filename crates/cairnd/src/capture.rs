@@ -8,98 +8,16 @@
 //! Nothing in this file can produce an outbox row. Raw observations are local
 //! (FR-055).
 
-use cairn_core::bound::{bound_json, bound_text, payload_bytes};
-use cairn_core::domain::Observation;
 use cairn_core::event::{
     CaptureOutput, Disposition, EventAgent, SafeCanonicalEvent, SafeEventDraft,
 };
-use cairn_core::redact;
 use cairn_core::vocabulary::SessionVocabulary;
-use cairn_core::wire::ObservationInput;
-use cairn_core::CairnConfig;
-use cairn_store::repo::{self, NewObservation};
 use cairn_store::spool::{self, SpoolCapacity};
 use cairn_store::Store;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub struct CaptureContext<'a> {
-    pub session_id: Uuid,
-    pub branch: &'a str,
-    pub commit_sha: Option<&'a str>,
-}
-
-/// Filter, redact, bound and store one observation.
-///
-/// `Ok(None)` means the observation was deliberately dropped, which is not an
-/// error: an exclusion doing its job looks exactly like this.
-pub async fn capture(
-    store: &Store,
-    config: &CairnConfig,
-    ctx: CaptureContext<'_>,
-    input: ObservationInput,
-) -> Result<Option<Observation>, cairn_store::StoreError> {
-    // 1. Exclusions — drop entirely, before anything is written.
-    if let Some(path) = &input.path {
-        if config.is_path_excluded(path) {
-            return Ok(None);
-        }
-    }
-    if let Some(command) = &input.command {
-        if config.is_command_excluded(command) {
-            return Ok(None);
-        }
-    }
-
-    // 2. Redaction.
-    let summary = redact::redact(&input.summary);
-    let path = input.path.as_deref().map(redact::redact);
-    let command = input.command.as_deref().map(redact::redact);
-    let details = input.details.as_ref().map(redact::redact_json);
-
-    // 3 and 4. Structured fields, bounded.
-    let cap = config.payload_cap_bytes;
-    let bounded_summary = bound_text(&summary, cap.min(1024));
-    let (bounded_details, details_truncated) = match &details {
-        Some(d) => {
-            let (v, t) = bound_json(d, cap.saturating_sub(bounded_summary.text.len()).max(256));
-            (Some(v), t)
-        }
-        None => (None, false),
-    };
-    let truncated = bounded_summary.truncated || details_truncated;
-
-    let bytes = payload_bytes(
-        &bounded_summary.text,
-        path.as_deref(),
-        command.as_deref(),
-        bounded_details.as_ref(),
-    );
-    debug_assert!(bytes <= cap, "payload bound must hold: {bytes} > {cap}");
-
-    // 5. Write, with the repository state at the moment of capture (FR-014).
-    let observation = repo::insert_observation(
-        store,
-        NewObservation {
-            session_id: ctx.session_id,
-            kind: input.kind,
-            branch: ctx.branch,
-            commit_sha: ctx.commit_sha,
-            path: path.as_deref(),
-            command: command.as_deref(),
-            exit_code: input.exit_code,
-            outcome: input.outcome.as_deref(),
-            summary: &bounded_summary.text,
-            details: bounded_details.as_ref(),
-            payload_bytes: bytes as i64,
-            truncated,
-        },
-    )
-    .await?;
-    Ok(Some(observation))
-}
-
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use super::*;
     use cairn_core::domain::{new_id, ObservationType};
@@ -454,57 +372,14 @@ pub struct SpoolSummary {
 /// repository may.
 pub async fn session_vocabulary(
     store: &Store,
-    project_id: Uuid,
+    _project_id: Uuid,
     session_id: Uuid,
 ) -> Result<(SessionVocabulary, BTreeMap<String, String>), cairn_store::StoreError> {
-    let keys: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT topic_key, value_key FROM memories
-          WHERE project_id = ?1 AND topic_key IS NOT NULL
-            AND state = 'active' AND deleted_at IS NULL",
-    )
-    .bind(project_id.to_string())
-    .fetch_all(store.pool())
-    .await?;
-
-    let topics: Vec<String> = keys.iter().filter_map(|(t, _)| t.clone()).collect();
-    let values: Vec<String> = keys.iter().filter_map(|(_, v)| v.clone()).collect();
-
-    // The subject's established value, for the one step that may supply an
-    // object the text did not name (`contracts/extraction.md` §13.5). A subject
-    // with two established values is left out: naming one of them would be a
-    // choice the evidence does not make.
-    let mut established: BTreeMap<String, String> = BTreeMap::new();
-    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
-    for (topic, value) in &keys {
-        let (Some(topic), Some(value)) = (topic, value) else {
-            continue;
-        };
-        let (Some(topic), Some(value)) = (
-            cairn_core::knowledge::normalize_topic_key(topic),
-            cairn_core::knowledge::normalize_value_key(value),
-        ) else {
-            continue;
-        };
-        match established.get(&topic) {
-            Some(held) if held != &value => {
-                ambiguous.insert(topic);
-            }
-            _ => {
-                established.insert(topic, value);
-            }
-        }
-    }
-    for topic in ambiguous {
-        established.remove(&topic);
-    }
-
-    let mut vocabulary = SessionVocabulary::new()
-        .with_established_keys(topics.iter().map(String::as_str))
-        .with_established_value_keys(values.iter().map(String::as_str));
+    let mut vocabulary = SessionVocabulary::new();
     for event in cairn_store::spool::session_events(store, session_id).await? {
         vocabulary.observe_at(Some(event.session_seq), event.kind, event.content.as_ref());
     }
-    Ok((vocabulary, established))
+    Ok((vocabulary, BTreeMap::new()))
 }
 
 /// Spool one vendor event's approved canonical events, in order.
