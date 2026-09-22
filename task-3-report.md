@@ -167,3 +167,28 @@ Deferred schema/module deletion: `cairn-store` local `repo`, `search`,
 `knowledge`, `global`, `evidence`, `patterns`, `continuity`, `outbox`,
 `authority`, and `cursor` remain because session/integration/removed-feature
 migration callers still compile against them. No schema migration was added.
+
+## Task 3 phase F — session/handoff edge deletion
+
+- Session start/end retain SQLite correlation only, then enqueue immutable
+  boundary-class safe events. They no longer write entity-outbox session
+  snapshots or use daemon-side `SyncPolicy`.
+- Handoff generate/annotate are typed recovery commands; latest reads only the
+  server handoff endpoint. Deleted local handoff synthesis/storage handler and
+  its daemon module.
+- Removed compaction continuity lookup, local trait/owner helpers revealed by
+  that deletion, and obsolete daemon test support.
+
+Validation with Rust 1.97.1: `cargo check -p cairnd --all-targets`, `cargo
+test -p cairnd` (27 passed), `cargo test -p cairn mcp::tests` (9 passed), and
+`git diff --check` pass. `cargo clippy -p cairnd -p cairn-store --all-targets
+-- -D warnings` cannot start: Cargo selects Homebrew Rust 1.95.0 even with the
+1.97.1 `RUSTC` binary; workspace requires Rust 1.97.1.
+
+### Phase F correction — command-spool vocabulary
+
+- Added forward SQLite migration `0015_handoff_commands`: the new typed
+  handoff recovery command kinds now pass the database `CHECK` while preserving
+  every existing command-spool row and index.
+- Added focused proofs for stable handoff command identities and server-only
+  latest-handoff failure (`server_unavailable` rather than SQLite fallback).

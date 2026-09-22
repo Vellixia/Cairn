@@ -21,13 +21,7 @@ use uuid::Uuid;
 mod tests {
     use super::*;
     use cairn_core::domain::{new_id, ObservationType};
-    use cairn_store::outbox::SyncPolicy;
     use cairn_store::repo::StartSession;
-
-    const LOCAL: SyncPolicy = SyncPolicy {
-        linked: false,
-        server_project_id: None,
-    };
 
     async fn fixture() -> (Store, Uuid) {
         let store = Store::open_memory().await.unwrap();
@@ -46,7 +40,6 @@ mod tests {
                 commit_sha: None,
                 worktree_path: "/tmp/c",
                 daemon_run_id: new_id(),
-                policy: LOCAL,
             },
         )
         .await

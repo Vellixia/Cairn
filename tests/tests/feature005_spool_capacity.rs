@@ -39,7 +39,6 @@ use cairn_core::event::{
     SafeCanonicalEvent,
 };
 use cairn_e2e::feature005::Local;
-use cairn_store::outbox::SyncPolicy;
 use cairn_store::repo::{start_session, StartSession};
 use cairn_store::spool::{
     self, CommandAdmission, CommandKind, CommandScope, EventAdmission, NewCommand, NewEvent,
@@ -84,13 +83,6 @@ async fn fixture() -> Fixture {
             commit_sha: None,
             worktree_path: "/fixture/capacity",
             daemon_run_id: Uuid::now_v7(),
-            // Unlinked: nothing here is about synchronization, and a linked
-            // project would queue outbox work this test would then have to
-            // explain away.
-            policy: SyncPolicy {
-                linked: false,
-                server_project_id: None,
-            },
         },
     )
     .await

@@ -1,8 +1,8 @@
 //! Request dispatch: the daemon's whole behaviour, one function per verb.
 
 use crate::state::{git_status, storage_err, Daemon, Resolved};
-use crate::handoffs;
 use cairn_core::domain::*;
+use cairn_core::event::{EventContent, EventKind, OpenTrigger, SafeCanonicalEvent};
 use cairn_core::wire::*;
 use cairn_store::repo;
 use serde_json::json;
@@ -155,9 +155,14 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         } => {
             let r = d.resolve(&cwd).await?;
             let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            queue_knowledge_command(d, Some(r.project.id), Some(s.id),
+            queue_knowledge_command(
+                d,
+                Some(r.project.id),
+                Some(s.id),
                 cairn_store::spool::CommandKind::VerificationAttestation,
-                &json!({ "recovery_override": "checkpoint" })).await
+                &json!({ "recovery_override": "checkpoint" }),
+            )
+            .await
         }
 
         Request::HandoffGenerate {
@@ -171,8 +176,14 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 Some(_) => resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?,
                 None => resolve_session_for_event(d, &r, agent_session_key.as_deref()).await?,
             };
-            let h = handoffs::generate(d, &s, trigger, r.policy).await?;
-            Ok(json!({ "handoff": h }))
+            queue_knowledge_command(
+                d,
+                Some(r.project.id),
+                Some(s.id),
+                cairn_store::spool::CommandKind::HandoffGenerate,
+                &json!({ "trigger": trigger.as_str(), "recovery_override": "handoff" }),
+            )
+            .await
         }
         Request::HandoffLatest {
             cwd,
@@ -187,16 +198,15 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         } => {
             let r = d.resolve(&cwd).await?;
             let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
-            let latest = repo::latest_handoff(&d.store, s.id)
-                .await
-                .map_err(storage_err)?
-                .ok_or_else(|| WireError::not_found("handoff"))?;
-            // Bounded and clearly attributed; it cannot alter derived fields.
             let note = cairn_core::bound::bound_text(&cairn_core::redact::redact(&note), 2000).text;
-            let h = repo::annotate_handoff(&d.store, latest.id, &note)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "handoff": h }))
+            queue_knowledge_command(
+                d,
+                Some(r.project.id),
+                Some(s.id),
+                cairn_store::spool::CommandKind::HandoffAnnotate,
+                &json!({ "note": note, "recovery_override": "handoff_annotation" }),
+            )
+            .await
         }
 
         Request::MemoryPin {
@@ -209,9 +219,14 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         } => {
             let r = d.resolve(&cwd).await?;
             let _ = (agent_session_key, reason);
-            queue_knowledge_command(d, Some(r.project.id), session_id,
+            queue_knowledge_command(
+                d,
+                Some(r.project.id),
+                session_id,
                 cairn_store::spool::CommandKind::Pin,
-                &json!({ "target_id": memory_id, "pinned": pinned })).await
+                &json!({ "target_id": memory_id, "pinned": pinned }),
+            )
+            .await
         }
 
         Request::MemoryCreate {
@@ -238,7 +253,9 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                  `action: \"promote\", target: \"team\"` — no MCP action authors \
                  authoritative team policy directly",
             )),
-            Some(KnowledgeDomain::Personal) => personal_create(d, &cwd, kind, content, topic_key, value_key).await,
+            Some(KnowledgeDomain::Personal) => {
+                personal_create(d, &cwd, kind, content, topic_key, value_key).await
+            }
             None | Some(KnowledgeDomain::Project) => {
                 memory_create(
                     d,
@@ -383,12 +400,26 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 "domain: \"team\" cannot be forgotten through cairn_remember; \
                  use `cairn team retire` (admin only)",
             )),
-            Some(KnowledgeDomain::Personal) => queue_knowledge_command(d, None, None,
-                cairn_store::spool::CommandKind::PersonalForget, &json!({ "target_id": memory_id })).await,
+            Some(KnowledgeDomain::Personal) => {
+                queue_knowledge_command(
+                    d,
+                    None,
+                    None,
+                    cairn_store::spool::CommandKind::PersonalForget,
+                    &json!({ "target_id": memory_id }),
+                )
+                .await
+            }
             None | Some(KnowledgeDomain::Project) => {
                 let r = d.resolve(&cwd).await?;
-                queue_knowledge_command(d, Some(r.project.id), None,
-                    cairn_store::spool::CommandKind::Forget, &json!({ "target_id": memory_id })).await
+                queue_knowledge_command(
+                    d,
+                    Some(r.project.id),
+                    None,
+                    cairn_store::spool::CommandKind::Forget,
+                    &json!({ "target_id": memory_id }),
+                )
+                .await
             }
         },
         Request::MemorySearch {
@@ -412,7 +443,6 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 .get("/api/team/knowledge?limit=50")
                 .await
         }
-
     }
 }
 
@@ -439,7 +469,9 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
 async fn migrate_removed_feature_tasks(d: &Daemon) -> serde_json::Value {
     migrate_removed_feature_tasks_at(
         d,
-        &cairn_core::paths::home().join("removed_feature").join("tasks-v1"),
+        &cairn_core::paths::home()
+            .join("removed_feature")
+            .join("tasks-v1"),
     )
     .await
 }
@@ -460,11 +492,17 @@ async fn migrate_removed_feature_tasks_at(d: &Daemon, dir: &std::path::Path) -> 
     let snapshot = dir.join("legacy.sqlite");
     let manifest_path = dir.join("legacy.manifest.json");
     let bundle_path = dir.join("removed_feature.json");
-    if let Ok(Some((path, _))) = transfer::removed_feature_tasks_exported_pending_cleanup(&d.store).await {
+    if let Ok(Some((path, _))) =
+        transfer::removed_feature_tasks_exported_pending_cleanup(&d.store).await
+    {
         let bundle_path = std::path::PathBuf::from(path);
         return match transfer::cleanup_removed_feature_tasks(&d.store).await {
-            Ok(()) => json!({ "status": "exported_cleaned", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": "resumed cleanup" }),
-            Err(error) => json!({ "status": "warning", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": error.to_string() }),
+            Ok(()) => {
+                json!({ "status": "exported_cleaned", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": "resumed cleanup" })
+            }
+            Err(error) => {
+                json!({ "status": "warning", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": error.to_string() })
+            }
         };
     }
     let result = async {
@@ -698,30 +736,27 @@ async fn session_start(
             commit_sha: git.commit_sha.as_deref(),
             worktree_path: &r.worktree(),
             daemon_run_id: d.run_id,
-            policy: r.policy,
         },
     )
     .await
     .map_err(storage_err)?;
 
+    spool_lifecycle_event(
+        d,
+        &r,
+        &session,
+        EventKind::SessionOpened,
+        EventContent::SessionOpen {
+            open_trigger: OpenTrigger::Startup,
+        },
+    )
+    .await?;
     Ok(json!({
         "session": SessionSummary::from_session(&session, chrono::Utc::now()),
         "agent_session_key": key,
     }))
 }
 
-/// The sealed close (D22, FR-240).
-///
-/// Two phases. **Seal**, synchronously, before the reply: one transaction sets
-/// the terminal status, the end reason, `ended_at` and `handoff_pending`. No
-/// Git, no capture quiesce, no synthesis. **Synthesize**, immediately after:
-/// build the handoff, write it, clear `handoff_pending`.
-///
-/// A caller that waits — `cairn session end` from the command line — gets
-/// Feature 001's behavior unchanged, because nothing holds a deadline over it.
-/// A hook-driven boundary does not wait: Codex's session-end handler has a
-/// one-second default budget, and the Feature 001 path can exceed it, which
-/// would make the completion guarantee unprovable rather than merely slow.
 async fn session_end(
     d: &Daemon,
     cwd: &str,
@@ -729,45 +764,28 @@ async fn session_end(
     agent_session_key: Option<String>,
     status: SessionStatus,
     reason: Option<String>,
-    wait_for_handoff: bool,
+    _wait_for_handoff: bool,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let session = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    // Phase one: durable termination, before anything is acknowledged.
-    let sealed = repo::seal_session(&d.store, session.id, status, reason.as_deref(), r.policy)
+    let sealed = repo::seal_session(&d.store, session.id, status, reason.as_deref())
         .await
         .map_err(storage_err)?;
-
-    if wait_for_handoff {
-        // Phase two, inline. The caller asked to wait, so a failure here is
-        // reported to it rather than left owed.
-        let handoff = handoffs::generate(d, &sealed, HandoffTrigger::SessionEnd, r.policy).await?;
-        repo::clear_handoff_pending(&d.store, sealed.id)
-            .await
-            .map_err(storage_err)?;
-        let ended = repo::session(&d.store, sealed.id)
-            .await
-            .map_err(storage_err)?;
-        return Ok(json!({
-            "session": SessionSummary::from_session(&ended, chrono::Utc::now()),
-            "handoff": handoff,
-        }));
-    }
-
-    // Phase two, after the reply. Progress is guaranteed while the daemon runs
-    // (FR-240 clause 2): this task retries with bounded backoff, and the
-    // maintenance tick sweeps anything it gives up on.
-    let daemon = d.clone();
-    let policy = r.policy;
-    let id = sealed.id;
-    tokio::spawn(async move {
-        crate::handoffs::synthesize_pending(&daemon, id, policy).await;
-    });
+    spool_lifecycle_event(
+        d,
+        &r,
+        &sealed,
+        EventKind::SessionClosed,
+        EventContent::SessionClose {
+            close_reason: status.as_str().to_owned(),
+        },
+    )
+    .await?;
 
     Ok(json!({
         "session": SessionSummary::from_session(&sealed, chrono::Utc::now()),
-        "handoff_pending": true,
+        "accepted_for_delivery": true,
     }))
 }
 
@@ -840,13 +858,25 @@ async fn context(
     // another agent's session context (FR-010, M1).
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    let session = session.ok_or_else(|| WireError::new(codes::NO_ACTIVE_SESSION, "context needs an active session"))?;
+    let session = session.ok_or_else(|| {
+        WireError::new(codes::NO_ACTIVE_SESSION, "context needs an active session")
+    })?;
     let trigger = trigger
         .as_deref()
         .map(crate::deliver::Trigger::parse)
         .unwrap_or(crate::deliver::Trigger::Explicit);
     let deadline = std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
-    Ok(crate::deliver::deliver(d, &r, session.id, trigger, open_trigger.as_deref(), budget, deadline).await.payload)
+    Ok(crate::deliver::deliver(
+        d,
+        &r,
+        session.id,
+        trigger,
+        open_trigger.as_deref(),
+        budget,
+        deadline,
+    )
+    .await
+    .payload)
 }
 
 /// The session a read-only request applies to.
@@ -907,10 +937,6 @@ fn ambiguous_session(active: &[Session]) -> WireError {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Handoffs
-// ---------------------------------------------------------------------------
-
 async fn handoff_latest(
     d: &Daemon,
     cwd: &str,
@@ -922,15 +948,12 @@ async fn handoff_latest(
         (None, None) => most_recent_session(d, &r).await?,
         _ => resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?,
     };
-    let handoff = repo::latest_handoff(&d.store, session.id)
+    crate::sync::client(d)
+        .await?
+        .get(&format!("/api/sessions/{}/handoff", session.id))
         .await
-        .map_err(storage_err)?
-        .ok_or_else(|| WireError::not_found(format!("handoff for session {}", session.id)))?;
-    Ok(json!({ "handoff": handoff, "session_id": session.id }))
 }
 
-/// The newest session in this project, active or not — what `cairn handoff
-/// show` means with no arguments.
 async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireError> {
     repo::list_sessions(&d.store, r.project.id)
         .await
@@ -938,6 +961,55 @@ async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireEr
         .into_iter()
         .next()
         .ok_or_else(|| WireError::new(codes::NO_ACTIVE_SESSION, "this project has no sessions yet"))
+}
+
+async fn spool_lifecycle_event(
+    d: &Daemon,
+    r: &Resolved,
+    session: &Session,
+    kind: EventKind,
+    content: EventContent,
+) -> Result<(), WireError> {
+    let account_id = d.account_identity().await.ok_or_else(|| {
+        WireError::new(
+            codes::NOT_LINKED,
+            "sign in before recording a lifecycle event",
+        )
+    })?;
+    let agent = event_agent(&session.agent)
+        .ok_or_else(|| WireError::invalid("unsupported lifecycle agent"))?;
+    let event = SafeCanonicalEvent {
+        event_id: Uuid::nil(),
+        contract_version: cairn_core::event::CONTRACT_VERSION,
+        kind,
+        agent,
+        vendor_event: None,
+        session_id: session.id,
+        session_seq: 0,
+        occurred_at: chrono::Utc::now(),
+        content: Some(content),
+    };
+    match cairn_store::spool::spool_event(
+        &d.store,
+        cairn_store::spool::SpoolCapacity::default(),
+        cairn_store::spool::NewEvent {
+            project_id: r.project.id,
+            account_id,
+            server_instance_id: cairn_store::cursor::bound_server_instance(&d.store)
+                .await
+                .map_err(storage_err)?,
+            event,
+        },
+    )
+    .await
+    .map_err(storage_err)?
+    {
+        cairn_store::spool::EventAdmission::Spooled { .. } => Ok(()),
+        cairn_store::spool::EventAdmission::Saturated { .. } => Err(WireError::new(
+            codes::STORAGE_UNAVAILABLE,
+            "lifecycle event queue is full",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1054,8 +1126,12 @@ async fn server_replay(d: &Daemon, cwd: &str) -> Reply {
         .await
 }
 async fn personal_create(
-    d: &Daemon, cwd: &str, kind: MemoryType, content: String,
-    topic_key: Option<String>, value_key: Option<String>,
+    d: &Daemon,
+    cwd: &str,
+    kind: MemoryType,
+    content: String,
+    topic_key: Option<String>,
+    value_key: Option<String>,
 ) -> Reply {
     d.resolve(cwd).await?;
     queue_knowledge_command(d, None, None, cairn_store::spool::CommandKind::PersonalCreate,
@@ -1064,12 +1140,23 @@ async fn personal_create(
 
 #[allow(clippy::too_many_arguments)]
 async fn memory_create(
-    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
-    kind: MemoryType, scope: Option<MemoryScope>, scope_key: Option<String>, content: String,
-    _evidence: Vec<Uuid>, local_only: bool, supersedes: Option<Uuid>, subject: SubjectProposal,
+    d: &Daemon,
+    cwd: &str,
+    _agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    kind: MemoryType,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+    content: String,
+    _evidence: Vec<Uuid>,
+    local_only: bool,
+    supersedes: Option<Uuid>,
+    subject: SubjectProposal,
 ) -> Reply {
     if local_only {
-        return Err(WireError::invalid("local-only memory is unavailable; server owns durable knowledge"));
+        return Err(WireError::invalid(
+            "local-only memory is unavailable; server owns durable knowledge",
+        ));
     }
     let r = d.resolve(cwd).await?;
     let scope = scope.unwrap_or(MemoryScope::Project);
@@ -1080,29 +1167,60 @@ async fn memory_create(
         "topic_key": subject.topic_key, "value_key": subject.value_key,
         "session_id": session_id,
     });
-    queue_knowledge_command(d, Some(r.project.id), session_id,
-        if supersedes.is_some() { cairn_store::spool::CommandKind::Supersede } else { cairn_store::spool::CommandKind::Remember },
-        &payload).await
+    queue_knowledge_command(
+        d,
+        Some(r.project.id),
+        session_id,
+        if supersedes.is_some() {
+            cairn_store::spool::CommandKind::Supersede
+        } else {
+            cairn_store::spool::CommandKind::Remember
+        },
+        &payload,
+    )
+    .await
 }
 
 async fn memory_reinforce(
-    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
-    memory_id: Uuid, from_memory_id: Option<Uuid>,
+    d: &Daemon,
+    cwd: &str,
+    _agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    memory_id: Uuid,
+    from_memory_id: Option<Uuid>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
-    from_memory_id.ok_or_else(|| WireError::invalid("reinforcement needs the memory that carries the confirming statement"))?;
-    queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::Reinforce,
-        &json!({ "target_id": memory_id, "session_id": session_id })).await
+    from_memory_id.ok_or_else(|| {
+        WireError::invalid("reinforcement needs the memory that carries the confirming statement")
+    })?;
+    queue_knowledge_command(
+        d,
+        Some(r.project.id),
+        session_id,
+        cairn_store::spool::CommandKind::Reinforce,
+        &json!({ "target_id": memory_id, "session_id": session_id }),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn memory_reconcile(
-    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
-    from_memory_id: Uuid, to_memory_id: Uuid, relation: RelationKind, basis: RelationBasis,
-    basis_evidence_id: Option<Uuid>, rationale: Option<String>,
+    d: &Daemon,
+    cwd: &str,
+    _agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    from_memory_id: Uuid,
+    to_memory_id: Uuid,
+    relation: RelationKind,
+    basis: RelationBasis,
+    basis_evidence_id: Option<Uuid>,
+    rationale: Option<String>,
 ) -> Reply {
     if relation == RelationKind::ConflictsWith {
-        return Err(WireError::new(codes::NOT_CONFLICTED, "a conflict is detected, not declared; resolve it by superseding or narrowing"));
+        return Err(WireError::new(
+            codes::NOT_CONFLICTED,
+            "a conflict is detected, not declared; resolve it by superseding or narrowing",
+        ));
     }
     let r = d.resolve(cwd).await?;
     queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::Relate,
@@ -1113,52 +1231,136 @@ async fn memory_reconcile(
 
 #[allow(clippy::too_many_arguments)]
 async fn evidence_add(
-    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, session_id: Option<Uuid>,
-    _kind: EvidenceKind, _collector: Option<EvidenceCollector>, _subject: String, _observed_value: String,
-    _source_locator: String, _observation_id: Option<Uuid>, memory_id: Option<Uuid>, _role: Option<EvidenceRole>,
+    d: &Daemon,
+    cwd: &str,
+    _agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    _kind: EvidenceKind,
+    _collector: Option<EvidenceCollector>,
+    _subject: String,
+    _observed_value: String,
+    _source_locator: String,
+    _observation_id: Option<Uuid>,
+    memory_id: Option<Uuid>,
+    _role: Option<EvidenceRole>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
-    let memory_id = memory_id.ok_or_else(|| WireError::invalid("evidence needs a memory target"))?;
-    queue_knowledge_command(d, Some(r.project.id), session_id, cairn_store::spool::CommandKind::VerificationAttestation,
+    let memory_id =
+        memory_id.ok_or_else(|| WireError::invalid("evidence needs a memory target"))?;
+    queue_knowledge_command(
+        d,
+        Some(r.project.id),
+        session_id,
+        cairn_store::spool::CommandKind::VerificationAttestation,
         &json!({ "memory_ref": { "domain": "project", "knowledge_id": memory_id },
             "verdict": "inconclusive", "verifier_kind": "runtime_state",
-            "attesting_agent": "mcp-client", "run_at": chrono::Utc::now().to_rfc3339() })).await
+            "attesting_agent": "mcp-client", "run_at": chrono::Utc::now().to_rfc3339() }),
+    )
+    .await
 }
 
-async fn verify_now(d: &Daemon, cwd: &str, memory_id: Option<Uuid>, all: bool, _explain: bool) -> Reply {
+async fn verify_now(
+    d: &Daemon,
+    cwd: &str,
+    memory_id: Option<Uuid>,
+    all: bool,
+    _explain: bool,
+) -> Reply {
     let r = d.resolve(cwd).await?;
-    let memory_id = memory_id.ok_or_else(|| WireError::invalid(if all { "verify all is unavailable; verify a memory" } else { "verify needs --memory or --all" }))?;
+    let memory_id = memory_id.ok_or_else(|| {
+        WireError::invalid(if all {
+            "verify all is unavailable; verify a memory"
+        } else {
+            "verify needs --memory or --all"
+        })
+    })?;
     queue_knowledge_command(d, Some(r.project.id), None, cairn_store::spool::CommandKind::VerificationRun,
         &json!({ "memory_ref": { "domain": "project", "knowledge_id": memory_id },
             "verdict": "inconclusive", "verifier_kind": "runtime_state", "run_at": chrono::Utc::now().to_rfc3339() })).await
 }
 
 async fn memory_search(
-    d: &Daemon, cwd: &str, _agent_session_key: Option<String>, _session_id: Option<Uuid>, query: MemoryQuery,
+    d: &Daemon,
+    cwd: &str,
+    _agent_session_key: Option<String>,
+    _session_id: Option<Uuid>,
+    query: MemoryQuery,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
-    let project_id = r.project.server_project_id.ok_or_else(|| WireError::new(codes::NOT_LINKED, "project is not linked to a server"))?;
+    let project_id = r
+        .project
+        .server_project_id
+        .ok_or_else(|| WireError::new(codes::NOT_LINKED, "project is not linked to a server"))?;
     let mut params = vec![("domain".into(), "project".into())];
-    for (key, value) in [("q", query.query), ("scope", query.scope.map(|v| v.as_str().to_string())),
-        ("scope_key", query.scope_key), ("type", query.kind.map(|v| v.as_str().to_string())),
-        ("state", query.state.map(|v| v.as_str().to_string())), ("limit", query.limit.map(|v| v.to_string()))] {
-        if let Some(value) = value { params.push((key.into(), value)); }
+    for (key, value) in [
+        ("q", query.query),
+        ("scope", query.scope.map(|v| v.as_str().to_string())),
+        ("scope_key", query.scope_key),
+        ("type", query.kind.map(|v| v.as_str().to_string())),
+        ("state", query.state.map(|v| v.as_str().to_string())),
+        ("limit", query.limit.map(|v| v.to_string())),
+    ] {
+        if let Some(value) = value {
+            params.push((key.into(), value));
+        }
     }
     let client = crate::sync::client(d).await?;
-    let domains = query.domains.unwrap_or_else(|| vec![KnowledgeDomain::Project, KnowledgeDomain::Personal, KnowledgeDomain::Team]);
+    let domains = query.domains.unwrap_or_else(|| {
+        vec![
+            KnowledgeDomain::Project,
+            KnowledgeDomain::Personal,
+            KnowledgeDomain::Team,
+        ]
+    });
     let project = if domains.contains(&KnowledgeDomain::Project) {
-        client.get_with_query(&format!("/api/projects/{project_id}/memories"), &params).await?
-    } else { json!({ "memories": [], "total": 0 }) };
+        client
+            .get_with_query(&format!("/api/projects/{project_id}/memories"), &params)
+            .await?
+    } else {
+        json!({ "memories": [], "total": 0 })
+    };
     let personal = if domains.contains(&KnowledgeDomain::Personal) {
-        client.get_with_query("/api/personal/knowledge", &params).await?
-    } else { json!([]) };
+        client
+            .get_with_query("/api/personal/knowledge", &params)
+            .await?
+    } else {
+        json!([])
+    };
     let team = if domains.contains(&KnowledgeDomain::Team) {
-        client.get_with_query("/api/team/knowledge", &params).await?
-    } else { json!([]) };
+        client
+            .get_with_query("/api/team/knowledge", &params)
+            .await?
+    } else {
+        json!([])
+    };
     Ok(json!({
         "results": project.get("memories").cloned().unwrap_or_else(|| json!([])),
         "total": project.get("total").cloned().unwrap_or_else(|| json!(0)),
         "personal": personal,
         "team": team,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ServerCredentials;
+    use crate::testsupport as fx;
+
+    #[tokio::test]
+    async fn latest_handoff_never_reads_sqlite_when_server_is_unavailable() {
+        let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
+        *repo.daemon.server.write().await = ServerCredentials {
+            url: Some("http://127.0.0.1:1".into()),
+            token: Some("test-token".into()),
+            account_id: Some(Uuid::now_v7()),
+        };
+        let resolved = repo.daemon.resolve(&repo.cwd).await.expect("resolve");
+        let session = fx::session(&repo.daemon, &resolved.project, "handoff").await;
+
+        let error = handoff_latest(&repo.daemon, &repo.cwd, Some(session.id), None)
+            .await
+            .expect_err("server is unavailable");
+        assert_eq!(error.code, codes::SERVER_UNAVAILABLE);
+    }
 }

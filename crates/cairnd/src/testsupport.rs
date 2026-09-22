@@ -19,10 +19,8 @@
 //! it.
 
 use crate::state::{Daemon, ServerCredentials};
-use cairn_core::domain::{ObservationType, Project, Session};
+use cairn_core::domain::{Project, Session};
 use cairn_core::CairnConfig;
-use cairn_store::outbox::SyncPolicy;
-use cairn_store::repo::NewObservation;
 use cairn_store::{repo, Store};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
@@ -87,7 +85,6 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         lifecycle_kinds: Arc::new(RwLock::new(HashMap::new())),
         run_id: Uuid::now_v7(),
         config: Arc::new(RwLock::new(config)),
-        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),
@@ -134,7 +131,6 @@ pub async fn session_in_run(d: &Daemon, p: &Project, key: &str, run: Uuid) -> Se
             commit_sha: Some("abc1234"),
             worktree_path: &worktree(&p.name),
             daemon_run_id: run,
-            policy: SyncPolicy::from_project(p),
         },
     )
     .await
@@ -144,68 +140,6 @@ pub async fn session_in_run(d: &Daemon, p: &Project, key: &str, run: Uuid) -> Se
 /// A session belonging to this daemon's current run.
 pub async fn session(d: &Daemon, p: &Project, key: &str) -> Session {
     session_in_run(d, p, key, d.run_id).await
-}
-
-/// A session on a named branch, for the branch-scoped lookups.
-pub async fn session_on_branch(d: &Daemon, p: &Project, key: &str, branch: &str) -> Session {
-    repo::start_session(
-        &d.store,
-        repo::StartSession {
-            project_id: p.id,
-            user_id: d.user_id,
-            agent: "claude-code",
-            agent_session_key: key,
-            branch,
-            commit_sha: Some("abc1234"),
-            worktree_path: &worktree(&p.name),
-            daemon_run_id: d.run_id,
-            policy: SyncPolicy::from_project(p),
-        },
-    )
-    .await
-    .expect("session")
-}
-
-/// End `s`, so it stops being active.
-pub async fn end(d: &Daemon, p: &Project, s: &Session) {
-    repo::end_session(
-        &d.store,
-        s.id,
-        cairn_core::domain::SessionStatus::Completed,
-        Some("done"),
-        SyncPolicy::from_project(p),
-    )
-    .await
-    .expect("end session");
-}
-
-/// Record one file edit against `session`.
-pub async fn observe_edit(d: &Daemon, s: &Session, path: &str) {
-    repo::insert_observation(
-        &d.store,
-        NewObservation {
-            session_id: s.id,
-            kind: ObservationType::FileChanged,
-            branch: "main",
-            commit_sha: Some("abc1234"),
-            path: Some(path),
-            command: None,
-            exit_code: None,
-            outcome: None,
-            summary: &format!("Edited {path}"),
-            details: None,
-            payload_bytes: 0,
-            truncated: false,
-        },
-    )
-    .await
-    .expect("observation");
-}
-
-/// Re-read a project, so a test asserts on stored state rather than on the
-/// value it happened to be handed earlier.
-pub async fn reload(d: &Daemon, id: Uuid) -> Project {
-    repo::project(&d.store, id).await.expect("project reload")
 }
 
 /// A daemon plus a real Git repository, for the handlers that need one.

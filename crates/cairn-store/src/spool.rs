@@ -247,6 +247,8 @@ pub enum CommandKind {
     PatternForget,
     VerificationRun,
     VerificationAttestation,
+    HandoffGenerate,
+    HandoffAnnotate,
 }
 
 impl CommandKind {
@@ -264,6 +266,8 @@ impl CommandKind {
         CommandKind::PatternForget,
         CommandKind::VerificationRun,
         CommandKind::VerificationAttestation,
+        CommandKind::HandoffGenerate,
+        CommandKind::HandoffAnnotate,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -281,6 +285,8 @@ impl CommandKind {
             CommandKind::PatternForget => "pattern_forget",
             CommandKind::VerificationRun => "verification_run",
             CommandKind::VerificationAttestation => "verification_attestation",
+            CommandKind::HandoffGenerate => "handoff_generate",
+            CommandKind::HandoffAnnotate => "handoff_annotate",
         }
     }
 }

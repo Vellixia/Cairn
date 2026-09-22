@@ -169,7 +169,6 @@ pub struct StartSession<'a> {
     pub commit_sha: Option<&'a str>,
     pub worktree_path: &'a str,
     pub daemon_run_id: Uuid,
-    pub policy: SyncPolicy,
 }
 
 /// Start a session, or return the existing one for this agent session.
@@ -227,26 +226,7 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
         }
     }
 
-    let created = session(store, id).await?;
-    enqueue_session(store, input.policy, &created).await?;
-    Ok(created)
-}
-
-/// Queue a session's minimal provenance for a linked project (FR-055).
-async fn enqueue_session(store: &Store, policy: SyncPolicy, s: &Session) -> Result<()> {
-    let mut tx = tx::begin(store, "enqueue_session").await?;
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        s.project_id,
-        OutboxEntityType::Session,
-        s.id,
-        OutboxOperation::Upsert,
-        &outbox::session_payload(s),
-    )
-    .await?;
-    tx::commit(tx, "enqueue_session").await?;
-    Ok(())
+    session(store, id).await
 }
 
 /// The most recently ended session on this branch, with `id` breaking ties.
@@ -350,7 +330,6 @@ pub async fn end_session(
     id: Uuid,
     status: SessionStatus,
     reason: Option<&str>,
-    policy: SyncPolicy,
 ) -> Result<Session> {
     let now = rows::now_text();
     sqlx::query(
@@ -363,9 +342,7 @@ pub async fn end_session(
     .bind(id.to_string())
     .execute(store.pool())
     .await?;
-    let ended = session(store, id).await?;
-    enqueue_session(store, policy, &ended).await?;
-    Ok(ended)
+    session(store, id).await
 }
 
 /// A later event arrived for a session reconciled at daemon start: resume it
@@ -1845,7 +1822,6 @@ pub async fn seal_session(
     id: Uuid,
     status: SessionStatus,
     reason: Option<&str>,
-    policy: SyncPolicy,
 ) -> Result<Session> {
     let now = rows::now_text();
     sqlx::query(
@@ -1860,9 +1836,7 @@ pub async fn seal_session(
     .bind(id.to_string())
     .execute(store.pool())
     .await?;
-    let sealed = session(store, id).await?;
-    enqueue_session(store, policy, &sealed).await?;
-    Ok(sealed)
+    session(store, id).await
 }
 
 /// The handoff landed: the boundary is complete (FR-240 clause 2).

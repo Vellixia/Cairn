@@ -8,7 +8,6 @@ mod arrival;
 mod capture;
 mod deliver;
 mod handlers;
-mod handoffs;
 mod integrations;
 mod state;
 mod sync;
@@ -94,7 +93,6 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         lifecycle_kinds: Arc::new(RwLock::new(Default::default())),
         run_id: new_id(),
         config: Arc::new(RwLock::new(config)),
-        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),
@@ -689,11 +687,7 @@ mod serve_tests {
         let _ahead = arrivals.take();
         let behind = arrivals.take();
 
-        let answered = connection(
-            daemon,
-            behind,
-            &Request::DaemonStatus,
-        );
+        let answered = connection(daemon, behind, &Request::DaemonStatus);
         // Well inside the gate's bound, so "was not gated" and "was gated and
         // gave up" cannot both pass this.
         let reply = tokio::time::timeout(Duration::from_secs(2), answered)

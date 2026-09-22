@@ -833,7 +833,6 @@ mod tests {
                 commit_sha: None,
                 worktree_path: "/tmp/x",
                 daemon_run_id: new_id(),
-                policy: LOCAL,
             },
         )
         .await

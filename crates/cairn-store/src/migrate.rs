@@ -86,6 +86,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "removed_feature_manifest",
         include_str!("../migrations/0014_removed_feature_manifest.sql"),
     ),
+    (
+        15,
+        "handoff_commands",
+        include_str!("../migrations/0015_handoff_commands.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

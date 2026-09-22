@@ -20,7 +20,6 @@ use cairn_store::global::{
     create_personal, get_personal, merge_synced_personal, merge_synced_team, NewPersonalKnowledge,
     SyncedPersonalKnowledge, SyncedTeamKnowledge,
 };
-use cairn_store::outbox::SyncPolicy;
 use cairn_store::repo::{ensure_project, start_session, StartSession};
 use cairn_store::spool::{
     self, CommandKind, CommandScope, EventAdmission, NewCommand, NewEvent, SpoolCapacity,
@@ -71,10 +70,6 @@ async fn fixture() -> Fixture {
             commit_sha: None,
             worktree_path: "/tmp/spool",
             daemon_run_id: Uuid::now_v7(),
-            policy: SyncPolicy {
-                linked: false,
-                server_project_id: None,
-            },
         },
     )
     .await
@@ -936,6 +931,34 @@ async fn commands_drain_in_sequence_order_within_their_scope() {
             eventid::command_id("session", &f.session_id.to_string(), c.command_seq)
         );
     }
+}
+
+/// Recovery handoff commands use the same durable command identity as every
+/// other server-owned mutation. This fails if their schema vocabulary drifts
+/// from `CommandKind`.
+#[tokio::test]
+async fn handoff_commands_are_admitted_with_stable_ids() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let scope = CommandScope::Session(f.session_id);
+    let first = spool_command(&f, scope, account, CommandKind::HandoffGenerate).await;
+    let second = spool_command(&f, scope, account, CommandKind::HandoffAnnotate).await;
+
+    assert_ne!(first, second);
+    let commands = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
+        .await
+        .expect("claim");
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0].kind, CommandKind::HandoffGenerate);
+    assert_eq!(commands[1].kind, CommandKind::HandoffAnnotate);
+    assert_eq!(
+        commands[0].command_id,
+        eventid::command_id("session", &f.session_id.to_string(), 1)
+    );
+    assert_eq!(
+        commands[1].command_id,
+        eventid::command_id("session", &f.session_id.to_string(), 2)
+    );
 }
 
 /// A command in flight holds back everything behind it in its own scope.
