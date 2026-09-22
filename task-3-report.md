@@ -92,3 +92,12 @@ focused typed-worker/backoff tests passed under same toolchain.
   reports 128 dead-code warnings. Remaining work must trim local handlers,
   sync entity/pull/authority code, integration mutation helpers, and promotion
   runtime before Clippy `-D warnings` can pass.
+
+## Task 3 phase C — spool-only sync
+
+- Replaced `cairnd/src/sync.rs` with typed event/command spool delivery and
+  minimal authenticated HTTP client. Removed entity outbox, pull, namespace,
+  account/admin/member, link, backfill, authority, and manual-sync runtime.
+- Removed orphan `promote` module declaration. Legacy status probes and local
+  post-ratification mutation no longer keep deleted sync paths alive.
+- Validation: `RUSTC=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc rustup run 1.97.1 cargo check -p cairnd --all-targets` passes. Clippy cannot start because this environment invokes Homebrew Rust 1.95.0 despite the 1.97.1 toolchain; remaining daemon dead-code warnings also require the next handler/module deletion slice.

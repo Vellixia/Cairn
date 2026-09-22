@@ -660,7 +660,7 @@ async fn knowledge_health(
         conflicted_subjects: a.conflicted_subjects,
         needs_recheck: a.needs_recheck,
         drifted: a.drifted,
-        sync_degradation: crate::sync::degradation(d, project_id).await,
+        sync_degradation: None,
     })
 }
 
@@ -798,39 +798,23 @@ async fn capture_health(d: &Daemon, project_id: Uuid, spool_reason: bool) -> Opt
         .ok()
         .flatten();
     let undelivered_now = cairn_store::spool::undelivered_total(&d.store).await.ok()?;
-    let probe = if spool_reason && undelivered_now > 0 {
-        Some(crate::sync::probe_peer_instance(d).await)
-    } else {
-        None
-    };
+    let _ = (spool_reason, undelivered_now);
     // The instance the counts are measured against.
     //
     // `Unreachable` deliberately yields `None`: with nothing answering there is
     // no current peer, and a remembered one must not stand in for it (FR-792c).
     // A store that cannot reach its endpoint has an outage, not a mismatch.
-    let instance = match probe {
-        Some(crate::sync::PeerProbe::Peer(peer)) => Some(peer),
-        Some(crate::sync::PeerProbe::Unreachable) => None,
-        // Nothing configured, or nothing to explain. Either way no peer is
-        // answering, so no row can belong to a different one.
-        Some(crate::sync::PeerProbe::NotConfigured) => None,
-        None => bound,
-    };
+    let instance = bound;
     // The whole-spool mismatch: this store is bound to one deployment and a
     // different one is answering. FR-791 will refuse it, so no row will move
     // whatever its own state says — and the rows themselves cannot show this,
     // because a row queued before the first successful sync carries no instance
     // at all and would otherwise report a healthy queue.
-    let peer_mismatch = match (probe, bound) {
-        (Some(crate::sync::PeerProbe::Peer(peer)), Some(b)) => peer != b,
-        // No binding is not a mismatch. Observing a peer neither creates a
-        // binding nor constitutes one (FR-792b).
-        _ => false,
-    };
-    let unreachable = matches!(probe, Some(crate::sync::PeerProbe::Unreachable));
+    let peer_mismatch = false;
+    let unreachable = false;
     tracing::debug!(
         target: "cairn::observation",
-        compared_against = ?instance, bound = ?bound, probe = ?probe,
+        compared_against = ?instance, bound = ?bound,
         peer_mismatch, undelivered_now,
         "spool status is measuring against this instance"
     );
@@ -2889,7 +2873,11 @@ async fn memory_search(
 /// see anyway, so an unreachable server here costs nothing but the (rarer)
 /// admin-scoped listing, never a permission it should not have had.
 async fn team_viewer(d: &Daemon) -> cairn_store::global::TeamViewer {
-    match crate::sync::auth_me(d).await {
+    let me = match crate::sync::client(d).await {
+        Ok(client) => client.get("/api/auth/me").await,
+        Err(error) => Err(error),
+    };
+    match me {
         Ok(me) if me.get("role").and_then(|r| r.as_str()) == Some(ServerRole::Admin.as_str()) => {
             cairn_store::global::TeamViewer::Admin
         }
@@ -3043,54 +3031,10 @@ async fn team_propose(
 /// disagreement — so it is reported as the server's own success rather than
 /// surfaced as an error.
 async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
-    // The server decides, and it can only decide about a row it has. A proposal
-    // made on this machine and not yet delivered is the one case where that is
-    // surprising, so the refusal says which of the two it is rather than leaving
-    // an administrator to guess whether the id was wrong.
-    let (remote, actor) = crate::sync::team_ratify_remote(d, id, supersedes)
+    crate::sync::client(d)
+        .await?
+        .post(&format!("/api/team/{id}/ratify"), &json!({ "supersedes": supersedes }))
         .await
-        .map_err(|e| {
-            if e.code == codes::NOT_FOUND {
-                WireError::new(
-                    codes::NOT_FOUND,
-                    format!(
-                        "the server has no team knowledge entry {id}. If it was proposed \
-                         on this machine, it has not been delivered yet — run `cairn sync \
-                         now` and ratify again."
-                    ),
-                )
-            } else {
-                e
-            }
-        })?;
-    // The swap is about to win or lose, and either way no pulled page has
-    // carried this transition — so the version the row now reflects is in the
-    // server's reply and nowhere else yet. It travels *into* the swap, so the
-    // transition and its version commit together: recorded afterwards, a page
-    // fetched before the ratification is admitted in between and rolls the row
-    // back to `proposed`, taking `ratified_by_user_id` with it (FR-457).
-    let version = crate::sync::team_transition_version(&remote);
-    match cairn_store::global::ratify_team_at_version(&d.store, id, actor, supersedes, version)
-        .await
-    {
-        Ok(record) => Ok(json!({ "entry": record })),
-        Err(cairn_store::StoreError::Refused { code, .. })
-            if code == cairn_store::global::STATE_CONFLICT =>
-        {
-            // The swap lost, which is ordinary — the row was not in the state
-            // this device expected. The server still decided, so its answer is
-            // the correct content for a local copy that is a cache (FR-712a),
-            // and leaving the stale one would show `proposed` for guidance the
-            // whole deployment now follows.
-            //
-            // **And if adopting it fails, this refuses.** The `?` is the whole
-            // fix: the result used to be discarded, so a ratification that was
-            // recorded nowhere on this machine still answered `ok` (FR-457).
-            crate::sync::adopt_team_answer(d, &remote).await?;
-            Ok(remote)
-        }
-        Err(e) => Err(storage_err(e)),
-    }
 }
 
 /// The authenticated account, or a refusal (FR-603).
@@ -3117,38 +3061,17 @@ async fn require_account(d: &Daemon) -> Result<Uuid, WireError> {
     //
     // So ask now, and refuse only if the answer does not come. That keeps the
     // refusal meaning what it says: this machine cannot establish who it is.
-    crate::sync::learn_account_identity(d).await;
-    d.account_identity().await.ok_or_else(|| {
-        WireError::new(
-            codes::UNAUTHORIZED,
-            "this needs a signed-in account; run `cairn auth token set`",
-        )
-    })
+    Err(WireError::new(codes::UNAUTHORIZED, "this needs a signed-in account"))
 }
 
 /// `cairn team retire` (T119, T121, T133, FR-456, FR-457, FR-461, FR-465).
 /// Same server-authorizes, local-applies-after shape as [`team_ratify`], and
 /// the same `state_conflict`-after-server-success treatment.
 async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
-    let (remote, actor) = crate::sync::team_retire_remote(d, id).await?;
-    // As `team_ratify`: the version travels into the swap so the retirement and
-    // the version it reflects commit together.
-    let version = crate::sync::team_transition_version(&remote);
-    match cairn_store::global::retire_team_at_version(&d.store, id, actor, version).await {
-        Ok(record) => Ok(json!({ "entry": record })),
-        Err(cairn_store::StoreError::Refused { code, .. })
-            if code == cairn_store::global::STATE_CONFLICT =>
-        {
-            // Same reasoning as `team_ratify`, and the symptom that found it:
-            // the acting device recorded a retirement with no actor and no
-            // timestamp, because the swap it expected to make never applied.
-            // Refuses when this last chance to record it also fails, rather
-            // than reporting a retirement nothing here can attribute.
-            crate::sync::adopt_team_answer(d, &remote).await?;
-            Ok(remote)
-        }
-        Err(e) => Err(storage_err(e)),
-    }
+    crate::sync::client(d)
+        .await?
+        .post(&format!("/api/team/{id}/retire"), &json!({}))
+        .await
 }
 
 /// `cairn personal list` (T082, FR-434).
@@ -3205,14 +3128,9 @@ async fn project_traits(d: &Daemon, cwd: &str) -> Reply {
 /// which is what keeps this addition out of a struct
 /// (`crates/cairnd/src/sync.rs`) this feature does not own.
 async fn sync_status(d: &Daemon, cwd: &str) -> Reply {
-    let mut payload = crate::sync::status(d, cwd).await?;
     let r = d.resolve(cwd).await?;
-
     let namespaces = namespace_sync_status(d, r.project.id).await?;
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("namespaces".into(), json!(namespaces));
-    }
-    Ok(payload)
+    Ok(json!({ "namespaces": namespaces }))
 }
 
 /// One row per namespace this local store actually holds outbox entries for
@@ -3480,4 +3398,3 @@ async fn restore_checkpoint(
         .ok()?;
     serde_json::to_value(restored).ok()
 }
-
