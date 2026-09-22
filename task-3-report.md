@@ -168,6 +168,20 @@ Deferred schema/module deletion: `cairn-store` local `repo`, `search`,
 `authority`, and `cursor` remain because session/integration/removed-feature
 migration callers still compile against them. No schema migration was added.
 
+### Phase E review fix
+
+- Typed event batches now register their referenced sessions atomically before
+  ingest. Registration is idempotent, derives ownership from the bearer token,
+  and requires existing project membership; fresh edge sessions can therefore
+  deliver their first event without a local-authority server write path.
+- Event and command 5xx responses are transient; 4xx responses are terminal
+  except declared capability deferral. Cached retrieval entries expire after
+  five minutes, carry cache age/account identity, and are removed immediately
+  on a live refusal before a later outage can reuse them.
+
+Validation: Rust 1.97.1 `cargo check -p cairnd -p cairn-server --all-targets`
+and `git diff --check` pass.
+
 ## Task 3 phase F — session/handoff edge deletion
 
 - Session start/end retain SQLite correlation only, then enqueue immutable

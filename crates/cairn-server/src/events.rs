@@ -52,7 +52,22 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct EventBatch {
     pub contract_version: u16,
+    #[serde(default)]
+    pub sessions: Vec<SessionRegistration>,
     pub events: Vec<Value>,
+}
+
+/// Minimal authenticated session registration for fresh edge spools. A client
+/// cannot choose an owner: `user_id` is always the bearer-token account.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRegistration {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub agent: String,
+    pub branch: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 /// What happened to one event.
@@ -186,6 +201,24 @@ pub async fn ingest_batch(
     }
 
     let reader = ReaderContext::load(&state.pool, &user).await?;
+    for session in &batch.sessions {
+        if !reader.is_member_of(session.project_id) {
+            return Err(ApiError::forbidden("not a project member"));
+        }
+        sqlx::query(
+            "INSERT INTO sessions (id, project_id, user_id, agent, branch, commit_sha, status, started_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'active', now())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(session.id)
+        .bind(session.project_id)
+        .bind(user.id)
+        .bind(&session.agent)
+        .bind(&session.branch)
+        .bind(&session.commit_sha)
+        .execute(&state.pool)
+        .await?;
+    }
     let mut results = Vec::with_capacity(batch.events.len());
 
     // Events are validated in the order they arrive, and the client is required

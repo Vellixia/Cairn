@@ -109,6 +109,9 @@ impl Client {
             return Ok(ServerAnswer::Accepted);
         }
         let status = response.status();
+        if status.is_server_error() {
+            return Err(WireError::new(codes::SERVER_UNAVAILABLE, "server_error"));
+        }
         let body: serde_json::Value = response.json().await.unwrap_or_default();
         let code = body
             .pointer("/error/code")
@@ -125,6 +128,9 @@ async fn decode(response: Result<reqwest::Response, reqwest::Error>) -> Reply {
     let body: serde_json::Value = response.json().await.unwrap_or_default();
     if status.is_success() {
         return Ok(body);
+    }
+    if status.is_server_error() {
+        return Err(WireError::new(codes::SERVER_UNAVAILABLE, "server_error"));
     }
     Err(WireError::new(
         body.pointer("/error/code")
@@ -234,15 +240,30 @@ async fn drain_events(d: &Daemon, limit: i64) -> Result<(), WireError> {
     if rows.is_empty() {
         return Ok(());
     }
+    let mut sessions = Vec::new();
+    for row in &rows {
+        let project = repo::project(&d.store, row.project_id).await.map_err(storage_err)?;
+        let Some(project_id) = project.server_project_id else { continue };
+        let session = repo::session(&d.store, row.event.session_id).await.map_err(storage_err)?;
+        sessions.push(serde_json::json!({
+            "id": session.id,
+            "project_id": project_id,
+            "agent": session.agent,
+            "branch": session.branch,
+            "commit_sha": session.commit_sha,
+        }));
+    }
     let body = serde_json::json!({
         "contract_version": cairn_core::event::CONTRACT_VERSION,
+        "sessions": sessions,
         "events": rows.iter().map(|row| &row.event).collect::<Vec<_>>(),
     });
     let response = match context.client.post("/api/events/batch", &body).await {
         Ok(response) => response,
         Err(error) => {
+            let state = outcome(Some(&error.code));
             for row in rows {
-                settle_event(d, row.event_id, Outcome::Transient, "transport").await?;
+                settle_event(d, row.event_id, state, &error.code).await?;
             }
             return Err(error);
         }

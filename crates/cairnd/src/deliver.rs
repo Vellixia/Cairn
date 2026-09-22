@@ -99,9 +99,11 @@ impl Trigger {
 
 const CACHE_MAX_SESSIONS: usize = 200;
 const CACHE_MAX_BYTES: usize = 64 * 1024;
+const CACHE_TTL: Duration = Duration::from_secs(300);
 
 struct CachedResponse {
     account_id: Uuid,
+    cached_at: std::time::Instant,
     /// The server's own answer, verbatim — `sections`, `degradation_level`,
     /// `budget`, `trace_id` and all. Read back through the same parser a
     /// fresh response goes through ([`ResponseMeta::extract`]), with
@@ -149,6 +151,7 @@ impl OutageCache {
             session_id,
             CachedResponse {
                 account_id,
+                cached_at: std::time::Instant::now(),
                 response: response.clone(),
             },
         );
@@ -168,9 +171,25 @@ impl OutageCache {
         if hit.account_id != account_id {
             return None;
         }
-        let response = hit.response.clone();
+        if hit.cached_at.elapsed() > CACHE_TTL {
+            self.entries.remove(&session_id);
+            self.order.retain(|id| *id != session_id);
+            return None;
+        }
+        let mut response = hit.response.clone();
+        if let Some(object) = response.as_object_mut() {
+            object.insert("cache_age_seconds".into(), json!(hit.cached_at.elapsed().as_secs()));
+            object.insert("cache_account_id".into(), json!(account_id));
+        }
         self.touch(session_id);
         Some(response)
+    }
+
+    fn invalidate(&mut self, session_id: Uuid, account_id: Uuid) {
+        if self.entries.get(&session_id).is_some_and(|entry| entry.account_id == account_id) {
+            self.entries.remove(&session_id);
+            self.order.retain(|id| *id != session_id);
+        }
     }
 
     #[cfg(test)]
@@ -235,7 +254,12 @@ pub async fn deliver(
         }
         // Refused, by something that was there to refuse. No cache, because a
         // hit would claim an authorization this very call was denied.
-        Answer::Refused => (None, false),
+        Answer::Refused => {
+            if let Some(account_id) = account_id {
+                d.outage_cache.lock().await.invalidate(session_id, account_id);
+            }
+            (None, false)
+        }
         Answer::Unreachable => {
             let cached = match account_id {
                 Some(account_id) => d.outage_cache.lock().await.get(session_id, account_id),
