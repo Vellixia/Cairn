@@ -20,7 +20,7 @@ use cairn_e2e::feature005::{Account, Pg};
 use cairn_e2e::{
     post_file_status_bearer, post_json_bearer, post_json_status_bearer, post_status_bearer,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 macro_rules! pg {
@@ -73,6 +73,20 @@ fn file_event(session: Uuid, seq: u64, path: &str) -> Value {
 
 fn batch(events: Vec<Value>) -> Value {
     json!({ "contract_version": 1, "events": events })
+}
+
+fn fresh_session_batch(project: Uuid, session: Uuid, events: Vec<Value>) -> Value {
+    json!({
+        "contract_version": 1,
+        "sessions": [{
+            "id": session,
+            "project_id": project,
+            "agent": "claude_code",
+            "branch": "main",
+            "commit_sha": "0123456789abcdef",
+        }],
+        "events": events,
+    })
 }
 
 fn post(pg: &Pg, who: &Account, body: &Value) -> (Value, u16) {
@@ -189,6 +203,41 @@ fn redelivering_an_event_is_a_duplicate_and_a_duplicate_is_a_success() {
     assert_eq!(
         pg.server.count(&format!(
             "SELECT count(*) FROM consolidation_work WHERE event_id = '{id}'"
+        )),
+        1
+    );
+}
+
+#[test]
+fn fresh_session_and_redelivery_have_one_canonical_effect() {
+    let pg = pg!();
+    let session = Uuid::now_v7();
+    let body = fresh_session_batch(pg.project, session, vec![file_event(session, 1, "a.rs")]);
+
+    let (first, status) = post(&pg, &pg.owner, &body);
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(statuses(&first), vec!["accepted"]);
+
+    let (again, status) = post(&pg, &pg.owner, &body);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(statuses(&again), vec!["duplicate"]);
+
+    let event_id = event_id(session, 1);
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM sessions WHERE id = '{session}'"
+        )),
+        1
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM safe_events WHERE event_id = '{event_id}'"
+        )),
+        1
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_work WHERE event_id = '{event_id}'"
         )),
         1
     );

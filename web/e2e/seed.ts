@@ -201,96 +201,45 @@ export async function seed(): Promise<Seeded> {
   });
   const projectId = project.id as string;
 
-  const taskId = uuid();
   const sessionId = uuid();
-  const handoffId = uuid();
-  const memoryId = uuid();
   const memoryContent = "Errors are returned, never logged and swallowed";
 
-  await json("/api/sync/batch", {
+  await json("/api/events/batch", {
     method: "POST",
     headers: auth,
     body: JSON.stringify({
-      project_id: projectId,
-      items: [
-        {
-          idempotency_key: `t-${taskId}`,
-          entity_type: "task",
-          entity_id: taskId,
-          operation: "upsert",
-          payload: {
-            title: "Add rate limiting",
-            goal: "Requests over the limit get 429",
-            acceptance_criteria: ["429 returned above threshold"],
-            status: "in_progress",
-          },
-        },
-        {
-          idempotency_key: `s-${sessionId}`,
-          entity_type: "session",
-          entity_id: sessionId,
-          operation: "upsert",
-          payload: {
-            task_id: taskId,
-            agent: "claude-code",
-            branch: "main",
-            commit_sha: "abc1234",
-            status: "completed",
-            started_at: new Date().toISOString(),
-            ended_at: new Date().toISOString(),
-            end_reason: "clear",
-          },
-        },
-        {
-          idempotency_key: `h-${handoffId}`,
-          entity_type: "handoff",
-          entity_id: handoffId,
-          operation: "upsert",
-          payload: {
-            session_id: sessionId,
-            trigger: "session_end",
-            goal: "Requests over the limit get 429",
-            progress: "1 file changed, 1 test command run, 1 failure open",
-            completed_work: ["Changed 1 file(s): src/limiter.rs"],
-            remaining_work: ["Open failure: Test failed: cargo test"],
-            changed_files: ["src/limiter.rs"],
-            decisions: ["Chose a token bucket"],
-            failures: ["Test failed: cargo test"],
-            // `runner`, not `command`. The server's wire check screens field
-            // *names* recursively, so a `command` key anywhere inside a handoff
-            // payload is refused outright (FR-532) — this seed's handoff never
-            // landed, and the session page then had no handoff to render at all.
-            tests_executed: [{ runner: "cargo test", outcome: "failed" }],
-            repository_state: {
-              branch: "main",
-              commit_sha: "abc1234",
-              staged: 0,
-              unstaged: 1,
-              untracked: 0,
-            },
-            next_step: "Fix the open failure: Test failed: cargo test",
-            evidence: { observation_ids: [uuid()], evidence_count: 1 },
-          },
-        },
-        {
-          idempotency_key: `m-${memoryId}`,
-          entity_type: "memory",
-          entity_id: memoryId,
-          operation: "upsert",
-          payload: {
-            type: "convention",
-            scope: "project",
-            scope_key: projectId,
-            content: memoryContent,
-            state: "active",
-            provenance: {
-              session_id: sessionId,
-              observation_ids: [],
-              evidence_count: 0,
-            },
-          },
-        },
-      ],
+      contract_version: 1,
+      sessions: [{
+        id: sessionId,
+        project_id: projectId,
+        agent: "claude_code",
+        branch: "main",
+        commit_sha: "abc1234",
+      }],
+      events: [event(sessionId, 1, "session_closed", {
+        SessionClose: { close_reason: "clear" },
+      })],
+    }),
+  });
+
+  await json("/api/commands", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      command_id: uuid(), kind: "remember", project_id: projectId, session_id: sessionId,
+      payload: {
+        type: "convention", scope: "project", content: memoryContent,
+        topic_key: "errors.returned", value_key: "never_swallowed",
+      },
+    }),
+  });
+
+  await json("/api/commands", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      command_id: uuid(), kind: "handoff_generate", project_id: projectId, session_id: sessionId,
+      payload: { trigger: "session_end" },
     }),
   });
 
@@ -546,28 +495,6 @@ function event(
   };
 }
 
-/**
- * Post a batch and insist every event landed.
- *
- * A per-event refusal comes back inside a `200`, so an unchecked ingest leaves
- * the whole fixture asserting against events that were never stored — and the
- * failure surfaces two minutes later as "consolidation never produced
- * anything", which points at the wrong thing entirely.
- */
-async function ingest(token: string, events: Record<string, unknown>[]) {
-  const body = await apiAs(token, "/api/events/batch", {
-    method: "POST",
-    body: JSON.stringify({ contract_version: 1, events }),
-  });
-  const results = (body.results ?? []) as { status: string; reason?: string }[];
-  const bad = results.filter((r) => r.status !== "accepted");
-  if (bad.length > 0 || results.length !== events.length) {
-    throw new Error(
-      `not every safe event was accepted: ${JSON.stringify(body)}`,
-    );
-  }
-}
-
 /** Everything the US5 browser tests read, and how each part came to exist. */
 export interface ControlPlaneFixture {
   /** Ordinary member; owns the project, the events and the retrieval. */
@@ -629,30 +556,6 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
   // A closed session, so consolidation elects it at once rather than waiting
   // out the ten-minute age threshold a still-open session is held to.
   const sessionId = uuid();
-  await apiAs(owner.token, "/api/sync/batch", {
-    method: "POST",
-    body: JSON.stringify({
-      project_id: projectId,
-      items: [
-        {
-          idempotency_key: `s-${sessionId}`,
-          entity_type: "session",
-          entity_id: sessionId,
-          operation: "upsert",
-          payload: {
-            agent: "claude-code",
-            branch: "main",
-            commit_sha: "abc1234",
-            status: "completed",
-            started_at: new Date().toISOString(),
-            ended_at: new Date().toISOString(),
-            end_reason: "clear",
-          },
-        },
-      ],
-    }),
-  });
-
   // The four events, in the order the vocabulary rule requires.
   //
   // A `decision_signal`'s tokens must be *justified* by events the server
@@ -663,19 +566,27 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
   // ingest answers `token_not_in_vocabulary`, which `ingest` above turns into a
   // failure here rather than into an empty activity feed later.
   const evidenceCommand = "cargo bench --bench crimson_pillar_probe";
-  await ingest(owner.token, [
-    event(sessionId, 1, "file_changed", {
+  const ingestBody = await apiAs(owner.token, "/api/events/batch", {
+    method: "POST",
+    body: JSON.stringify({
+      contract_version: 1,
+      sessions: [{
+        id: sessionId, project_id: projectId, agent: "claude_code", branch: "main",
+        commit_sha: "abc1234",
+      }],
+      events: [
+        event(sessionId, 1, "file_changed", {
       File: {
         repo_file: "ledger/marmoset.rs",
         repo_file_from: null,
         change_kind: "modified",
         file_identity: "present",
       },
-    }),
-    event(sessionId, 2, "command_executed", {
+        }),
+        event(sessionId, 2, "command_executed", {
       Command: { command_line: evidenceCommand, exit_status: 0 },
-    }),
-    event(sessionId, 3, "decision_signal", {
+        }),
+        event(sessionId, 3, "decision_signal", {
       Decision: {
         decision_kind: "adopt",
         subject_token: "ledger",
@@ -683,11 +594,17 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
         justified_by_seq: 1,
         lexicon_version: 1,
       },
-    }),
-    event(sessionId, 4, "session_closed", {
+        }),
+        event(sessionId, 4, "session_closed", {
       SessionClose: { close_reason: "clear" },
+        }),
+      ],
     }),
-  ]);
+  });
+  const statuses = (ingestBody.results ?? []) as { status: string }[];
+  if (statuses.length !== 4 || statuses.some((result) => result.status !== "accepted")) {
+    throw new Error(`not every safe event was accepted: ${JSON.stringify(ingestBody)}`);
+  }
 
   const { knowledgeId, knowledgeContent } = await awaitConsolidation(
     owner.token,

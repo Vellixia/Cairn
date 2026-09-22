@@ -607,3 +607,59 @@ pub async fn collect_capture_drops(d: &crate::state::Daemon) -> usize {
     }
     counted
 }
+
+#[cfg(test)]
+mod safe_event_tests {
+    use super::*;
+    use cairn_core::domain::new_id;
+    use cairn_core::event::{EventContent, EventKind, SafeEventDraft};
+    use cairn_store::repo::{self, StartSession};
+
+    #[tokio::test]
+    async fn fresh_store_capture_spools_a_typed_event() {
+        let store = Store::open_memory().await.unwrap();
+        let user = repo::ensure_local_user(&store).await.unwrap();
+        let project = repo::ensure_project(&store, "/fresh/.git", "fresh", None)
+            .await
+            .unwrap();
+        let session = repo::start_session(
+            &store,
+            StartSession {
+                project_id: project.id,
+                user_id: user,
+                agent: "claude-code",
+                agent_session_key: "fresh",
+                branch: "main",
+                commit_sha: None,
+                worktree_path: "/fresh",
+                daemon_run_id: new_id(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let summary = spool_safe_events(
+            &store,
+            project.id,
+            Uuid::now_v7(),
+            session.id,
+            EventAgent::Codex,
+            &CaptureOutput::default().event(SafeEventDraft {
+                kind: EventKind::SessionClosed,
+                agent: EventAgent::Codex,
+                vendor_event: Some("SessionEnd".to_owned()),
+                content: Some(EventContent::SessionClose {
+                    close_reason: "clear".to_owned(),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.spooled, 1);
+        let events = spool::session_events(&store, session.id).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EventKind::SessionClosed);
+        assert_eq!(events[0].session_seq, 1);
+    }
+}

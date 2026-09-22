@@ -174,7 +174,7 @@ async fn context(d: &Daemon) -> Result<Context, WireError> {
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Delivered,
     Refused,
@@ -237,9 +237,15 @@ async fn drain_events(d: &Daemon, limit: i64) -> Result<(), WireError> {
     }
     let mut sessions = Vec::new();
     for row in &rows {
-        let project = repo::project(&d.store, row.project_id).await.map_err(storage_err)?;
-        let Some(project_id) = project.server_project_id else { continue };
-        let session = repo::session(&d.store, row.event.session_id).await.map_err(storage_err)?;
+        let project = repo::project(&d.store, row.project_id)
+            .await
+            .map_err(storage_err)?;
+        let Some(project_id) = project.server_project_id else {
+            continue;
+        };
+        let session = repo::session(&d.store, row.event.session_id)
+            .await
+            .map_err(storage_err)?;
         sessions.push(serde_json::json!({
             "id": session.id,
             "project_id": project_id,
@@ -334,4 +340,19 @@ async fn drain_commands(d: &Daemon, limit: i64) -> Result<(), WireError> {
 enum ServerAnswer {
     Accepted,
     Refused(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_and_retryable_responses_share_typed_lane_rules() {
+        for terminal in ["invalid", "unauthorized", "forbidden"] {
+            assert_eq!(outcome(Some(terminal)), Outcome::Refused);
+        }
+        for retryable in [None, Some("server_error"), Some("storage_unavailable")] {
+            assert_eq!(outcome(retryable), Outcome::Transient);
+        }
+    }
 }
