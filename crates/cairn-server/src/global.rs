@@ -1527,11 +1527,7 @@ fn personal_row_json(
 
 /// One `team_knowledge` row on its way to the wire.
 ///
-/// **Field for field, this is `cairn_store::global::SyncedTeamKnowledge`** —
-/// the local mirror `merge_synced_team` takes. Every name here is a field name
-/// there, and the two lists are the same length, so a pulled row deserializes
-/// into the mirror without a translation layer that could drop something on the
-/// way.
+/// Edge clients consume this stable server contract directly.
 ///
 /// Two fields are deliberately not in both lists, and the asymmetries run in
 /// opposite directions. `origin_digest` is on the mirror and not here: it is
@@ -1901,9 +1897,8 @@ async fn record_supersedes(
 /// visible instead of clobbered: "not proposed" tells a caller to look, while
 /// "at state retired" tells them what happened.
 ///
-/// The message is word for word `cairn_store::global::state_conflict`'s, so an
-/// operator sees the same sentence whether the local store or the server
-/// refused. The state also travels as its own field, because a caller deciding
+/// The message is stable for edge clients. The state also travels as its own
+/// field, because a caller deciding
 /// what to do next should not have to parse prose to find the one fact the
 /// decision turns on.
 async fn state_refusal(pool: &PgPool, id: Uuid, required: TeamState) -> ApiError {
@@ -2296,19 +2291,15 @@ mod tests {
         }
     }
 
-    /// **The wire shape is `cairn_store::global::SyncedTeamKnowledge`, field for
-    /// field** (`crates/cairn-store/src/global.rs`) — `changed_at` excepted,
-    /// which the mirror names `server_changed_at`.
+    /// Wire shape belongs to this server contract; `changed_at` is server-owned.
     ///
     /// Asserted as an exact key set rather than field by field, because both
     /// directions of drift break the mirror: a missing field fails
     /// deserialization outright, and an extra one is how `origin_digest` would
     /// reach a wire it must never touch (D434, FR-551). The list is spelled out
-    /// here because this crate does not depend on `cairn-store` — a change to
-    /// the mirror's fields has to be made here too, and this test is what says
-    /// so out loud.
+    /// here so contract drift remains visible in this crate.
     #[test]
-    fn a_team_row_carries_exactly_the_local_mirrors_fields() {
+    fn a_team_row_carries_exactly_the_contract_fields() {
         let expected: std::collections::BTreeSet<&str> = [
             "id",
             "knowledge_type",

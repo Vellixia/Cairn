@@ -1,33 +1,16 @@
-//! Local storage: SQLite, migrations, repositories, lexical search, the
-//! transactional outbox and the Feature 005 edge spools (D2, D3, D9).
-//!
-//! Everything here is local and works offline. No call in this crate touches
-//! the network.
-//!
-//! Under server authority the local copies of personal and team knowledge are
-//! a **cache**, not an authority: [`global::merge_synced_personal`] and
-//! [`global::merge_synced_team`] let a pulled row replace what is stored,
-//! including a content correction and a state that did not advance (FR-712a).
+//! Local edge storage: binding, correlation, integration ownership, typed
+//! delivery spools, migration artifacts, diagnostics and transactions.
 
-pub mod authority;
 pub mod constraints;
-pub mod continuity;
 pub mod cursor;
 pub mod diag;
-pub mod evidence;
-pub mod global;
 pub mod integrations;
-pub mod knowledge;
 pub mod migrate;
-pub mod outbox;
-pub mod patterns;
 pub mod repo;
 pub mod rows;
-pub mod search;
 /// Feature 005's edge spools: approved events and knowledge commands waiting
 /// for the server, with durable ordinals and an exact per-account claim.
 pub mod spool;
-pub mod traits;
 /// Versioned, file-backed V1 export/import manifests and retry-safe restore.
 pub mod transfer;
 pub mod tx;
@@ -176,14 +159,6 @@ impl Store {
             .await?;
         Ok(())
     }
-
-    /// True when the FTS5 index is usable in this build of SQLite.
-    pub async fn fts_available(&self) -> bool {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_fts")
-            .fetch_one(&self.pool)
-            .await
-            .is_ok()
-    }
 }
 
 #[cfg(test)]
@@ -235,15 +210,5 @@ mod tests {
             Err(StoreError::Migrate(migrate::MigrateError::TooNew { .. })) => {}
             other => panic!("expected TooNew, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn fts5_is_available_in_this_build() {
-        // D3 depends on FTS5. If this fails, search has no ranking story.
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("cairn.sqlite3"))
-            .await
-            .unwrap();
-        assert!(store.fts_available().await, "SQLite build lacks FTS5");
     }
 }

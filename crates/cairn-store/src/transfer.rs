@@ -739,7 +739,10 @@ async fn reject_divergent_stable_ids(
 ) -> Result<()> {
     // This is the destination machine's singleton identity, not a portable
     // canonical record. Its fixed `id = 1` must remain destination-local.
-    if matches!(table, "writer_identity" | "authority_mode") {
+    if matches!(
+        table,
+        "writer_identity" | "authority_mode" | "removed_feature_manifest"
+    ) {
         return Ok(());
     }
     let info = sqlx::query(&format!("PRAGMA main.table_info({})", ql(table)))

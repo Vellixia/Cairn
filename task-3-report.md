@@ -214,3 +214,21 @@ pre-existing `cairn-server/src/api.rs` dead-code warnings). Focused command
 test compiles and runs, but its PostgreSQL assertions are skipped here because
 `CAIRN_TEST_DATABASE_URL` is unset. Clippy cannot start: Cargo invokes the
 Homebrew Rust 1.95.0 Clippy driver while this workspace requires Rust 1.97.1.
+
+## Task 3 phase G — local-store authority deletion
+
+- Deleted local authority, continuity, evidence, global, knowledge, entity
+  outbox, patterns, search, and traits modules. `repo` now keeps only project
+  binding and session correlation; `cursor` keeps only server-instance binding.
+- Removed legacy migration orchestration and local-canonical test suites.
+  Typed spools, integration ownership, transfer artifacts, diagnostics, and
+  transactions remain. Server comments now describe server-owned contracts.
+- No schema migration was added. Legacy SQLite tables remain only in immutable
+  migration history and export inventory until fresh-DB setup cutover.
+
+Validation: Rust 1.97.1 `cargo check --workspace --all-targets`, `cargo test
+--workspace --no-run`, `cargo test -p cairn-store spool` (3 passed), `cargo
+test -p cairn-store --test v1_migration` (4 passed), and `git diff --check`
+pass. `cargo clippy -p cairn-store -p cairnd -p cairn-server --all-targets -- -D warnings`
+is blocked because installed Clippy launches Rust 1.95.0 while
+the workspace requires Rust 1.97.1.

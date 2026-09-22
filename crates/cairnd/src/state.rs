@@ -125,19 +125,10 @@ impl Daemon {
 
     /// True when no session anywhere is still `active`.
     pub async fn no_active_sessions(&self) -> bool {
-        match repo::list_projects(&self.store).await {
-            Ok(projects) => {
-                for p in projects {
-                    match repo::list_sessions(&self.store, p.id).await {
-                        Ok(sessions) if sessions.iter().any(|s| s.is_active()) => return false,
-                        Ok(_) => {}
-                        Err(_) => return false,
-                    }
-                }
-                true
-            }
-            Err(_) => false,
-        }
+        repo::has_active_sessions(&self.store)
+            .await
+            .map(|active| !active)
+            .unwrap_or(false)
     }
 }
 
