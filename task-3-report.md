@@ -192,3 +192,25 @@ test -p cairnd` (27 passed), `cargo test -p cairn mcp::tests` (9 passed), and
   every existing command-spool row and index.
 - Added focused proofs for stable handoff command identities and server-only
   latest-handoff failure (`server_unavailable` rather than SQLite fallback).
+
+## Task 3 phase G — server handoff recovery boundary
+
+- `POST /api/commands` now handles only the two Phase F command-spool kinds
+  that need server work: `handoff_generate` and `handoff_annotate`.
+  Session lifecycle remains safe-event ingestion; no session command protocol
+  was added.
+- The daemon now transmits a command spool row's `session_id`. Server handlers
+  bind that session to the authenticated account and named project, reserve the
+  stable `command_id` in the existing receipt table, and return the original
+  handoff receipt after a lost acknowledgement.
+- Generation persists server-derived boundary state; annotation is bounded and
+  privacy-screened before updating only `agent_note` on the latest canonical
+  handoff. Focused coverage includes acceptance, duplicate receipt,
+  unauthorized project, and malformed payload/trigger rejection.
+
+Validation: Rust 1.97.1 `cargo check -p cairn-server --all-targets` and
+`cargo check --workspace --all-targets` pass (the workspace retains two
+pre-existing `cairn-server/src/api.rs` dead-code warnings). Focused command
+test compiles and runs, but its PostgreSQL assertions are skipped here because
+`CAIRN_TEST_DATABASE_URL` is unset. Clippy cannot start: Cargo invokes the
+Homebrew Rust 1.95.0 Clippy driver while this workspace requires Rust 1.97.1.

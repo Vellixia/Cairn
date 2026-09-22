@@ -300,7 +300,7 @@ async fn drain_commands(d: &Daemon, limit: i64) -> Result<(), WireError> {
             .and_then(|id| Uuid::parse_str(id).ok());
         let body = serde_json::json!({
             "command_id": row.command_id, "kind": row.kind.as_str(), "project_id": project_id,
-            "target_id": target_id, "payload": row.payload,
+            "target_id": target_id, "session_id": row.session_id, "payload": row.payload,
         });
         let (state, reason) = match context.client.post_outcome("/api/commands", &body).await {
             Ok(ServerAnswer::Accepted) => (Outcome::Delivered, "accepted".to_owned()),
