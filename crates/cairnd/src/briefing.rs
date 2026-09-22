@@ -433,27 +433,6 @@ async fn level1_patterns(
     out
 }
 
-/// What this project is currently showing, in comparable form.
-///
-/// Two sources, both already recorded: `error` observations from the current
-/// and previous session, and the text of `failure`-type memories in the
-/// applicable scopes. Nothing is inferred and nothing is asked of the agent.
-#[cfg(any())]
-pub(crate) async fn project_signals_for(
-    daemon: &Daemon,
-    project_id: Uuid,
-    branch: &str,
-) -> Vec<String> {
-    let mut raw = repo::recent_project_errors(&daemon.store, project_id, ERROR_OBSERVATIONS_MAX)
-        .await
-        .unwrap_or_default();
-    raw.extend(
-        repo::failure_memory_text(&daemon.store, project_id, branch, FAILURE_MEMORIES_MAX)
-            .await
-            .unwrap_or_default(),
-    );
-    cairn_core::patterns::normalize_signals(&raw)
-}
 
 async fn project_signals(
     daemon: &Daemon,

@@ -132,3 +132,15 @@ and `git diff --check` all pass. Workspace check retains two pre-existing
 Validation with Rust 1.97.1: `cargo check -p cairnd --all-targets`,
 `cargo clippy -p cairnd --all-targets -- -D warnings`, `cargo test -p cairnd`
 (84 passed), `cargo test -p cairn mcp::tests` (9 passed), and `git diff --check`.
+
+### Phase D cleanup
+
+Deleted all compile-disabled legacy local evidence, verification, reconciliation,
+personal-memory, local search, authority fallback, and on-demand-session code.
+No store module had an empty production caller graph: briefing, drift,
+continuity, verification, migration, or store tests still own each candidate.
+
+Validation with Rust 1.97.1: `cargo clippy -p cairnd -p cairn-store --all-targets -- -D warnings`,
+`cargo check --workspace --all-targets` (two pre-existing server warnings),
+`cargo test --workspace --no-run`, `cargo test -p cairnd` (84 passed),
+`cargo test -p cairn mcp::tests` (9 passed), and `git diff --check`.
