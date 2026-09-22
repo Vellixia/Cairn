@@ -37,11 +37,6 @@ export default function ProjectOverviewPage({
     queryKey: ["integration-health", id, "overview"],
     queryFn: () => api.integrationHealth(id),
   });
-  const sync = useQuery({
-    queryKey: ["sync", id, "overview"],
-    queryFn: () => api.syncStatus(id),
-  });
-
   // The header renders before the data does. Returning early instead made the
   // whole page swap out and jump once the request landed.
   const project = overview.data?.project;
@@ -180,13 +175,6 @@ export default function ProjectOverviewPage({
             </OverviewPanel>
             <OverviewPanel id="domains" title="Knowledge domains" testId="overview-domains">
               <DomainsPage params={Promise.resolve({ id })} />
-            </OverviewPanel>
-            <OverviewPanel id="sync" title="Sync" testId="overview-sync">
-              <p className="text-sm">
-                {sync.data
-                  ? `${sync.data.applied_items} accepted item${sync.data.applied_items === 1 ? "" : "s"}; last applied ${formatDate(sync.data.last_applied_at)}.`
-                  : "Loading server sync state…"}
-              </p>
             </OverviewPanel>
           </div>
         </>

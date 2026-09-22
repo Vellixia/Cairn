@@ -112,6 +112,9 @@ pub async fn run(pool: &SqlitePool) -> Result<i64, MigrateError> {
 /// database exists.
 pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
     run(pool).await?;
+    // `sessions.task_id` was part of the legacy table. Rebuild correlation
+    // before dropping Tasks so fresh stores contain no dangling foreign key.
+    pool.execute("DROP TABLE IF EXISTS sessions").await?;
     for table in [
         "memory_fts", "personal_fts", "team_fts", "memory_evidence_facts",
         "memory_evidence", "memory_relations", "evidence_facts", "verification_runs",
@@ -125,6 +128,23 @@ pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
     ] {
         pool.execute(format!("DROP TABLE IF EXISTS {table}").as_str()).await?;
     }
+    pool.execute(
+        "CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+            user_id TEXT NOT NULL, agent TEXT NOT NULL, branch TEXT NOT NULL,
+            commit_sha TEXT, worktree_path TEXT NOT NULL, agent_session_key TEXT NOT NULL,
+            previous_session_id TEXT REFERENCES sessions(id),
+            status TEXT NOT NULL CHECK (status IN ('active', 'completed', 'interrupted')),
+            started_at TEXT NOT NULL, ended_at TEXT, last_event_at TEXT NOT NULL,
+            last_turn_ended_at TEXT, daemon_run_id TEXT NOT NULL, end_reason TEXT,
+            handoff_pending INTEGER NOT NULL DEFAULT 0, handoff_attempts INTEGER NOT NULL DEFAULT 0,
+            handoff_error TEXT, deleted_at TEXT
+        );
+        CREATE UNIQUE INDEX sessions_agent_key ON sessions(project_id, agent_session_key) WHERE deleted_at IS NULL;
+        CREATE INDEX sessions_worktree ON sessions(project_id, worktree_path, status);
+        CREATE INDEX sessions_branch_recent ON sessions(project_id, branch, ended_at DESC);",
+    )
+    .await?;
     Ok(latest_version())
 }
 

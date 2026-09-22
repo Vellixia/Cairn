@@ -1273,59 +1273,6 @@ pub struct PatternListQuery {
     cursor: Option<String>,
 }
 
-/// `GET /api/sync/changes/patterns` — the feed a local pattern cache refills
-/// from.
-///
-/// Owner-scoped exactly as [`list_patterns`] is, and for the same reason: a
-/// promoted pattern is durability, not publication. The cursor convention is
-/// [`crate::global::PageCursor`] verbatim rather than a second one — the same
-/// `(changed_at, id)` pair, the same `since`, the same opaque encoding — so a
-/// client that already drains the personal and team feeds needs no new rule.
-///
-/// **Tombstones are included, and that is the whole point.** A forget has to
-/// reach a cache that already holds the pattern, and the only thing that can
-/// carry it is the row itself: a deleted row reaches nobody, and a feed
-/// filtered on `forgotten_at IS NULL` would leave every cache serving a pattern
-/// its owner had withdrawn. So a forgotten pattern travels once more, carrying
-/// its `forgotten_at` and no content.
-pub async fn pattern_changes(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Query(q): Query<crate::global::GlobalChangesQuery>,
-) -> ApiResult<Json<Value>> {
-    let since = crate::global::PageCursor::decode(q.since.as_deref());
-    // `GREATEST` over the row's own timestamps, for the reason
-    // `global::personal_changes` gives: ordering on `created_at` alone would
-    // make an in-place mutation unreachable to a cursor that had already passed
-    // the row's creation, so a forget could never arrive anywhere.
-    // `updated_at` moves on both an upsert and a tombstone, and `forgotten_at`
-    // is carried too so the ordering does not depend on the two being written
-    // in the same statement.
-    let rows = sqlx::query(&format!(
-        "WITH changed AS (
-             SELECT {PATTERN_WIRE_COLUMNS},
-                    pattern_id AS id,
-                    GREATEST(created_at, updated_at, forgotten_at) AS changed_at
-               FROM shared_patterns
-              WHERE owner_user_id = $1
-         )
-         SELECT * FROM changed
-          WHERE (changed_at, id) > ($2, $3)
-          ORDER BY changed_at ASC, id ASC LIMIT $4"
-    ))
-    .bind(user.id())
-    .bind(since.at)
-    .bind(since.id)
-    .bind(q.page())
-    .fetch_all(&state.pool)
-    .await?;
-    let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, true)).collect();
-    Ok(Json(json!({
-        "patterns": patterns,
-        "cursor": crate::global::page_cursor(&rows, since).encode(),
-    })))
-}
-
 // ---------------------------------------------------------------------------
 // Handoff recovery
 // ---------------------------------------------------------------------------

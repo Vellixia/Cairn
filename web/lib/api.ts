@@ -21,7 +21,6 @@ type Handoff = Contract.Handoff;
 type Memory = Contract.Memory;
 type MemoryPage = Contract.MemoryPage;
 type MemorySearch = Contract.MemorySearch;
-type SyncStatus = Contract.SyncStatus;
 type ActivityQuery = Contract.ActivityQuery;
 type ActivityPage = Contract.ActivityPage;
 type Funnel = Contract.Funnel;
@@ -222,9 +221,6 @@ export const api = {
     request<DeletedResponse>(`/api/memories/${memoryId}`, {
       method: "DELETE",
     }),
-  syncStatus: (id: string) =>
-    request<SyncStatus>(`/api/projects/${id}/sync-status`),
-
   // ---------------------------------------------------------------------
   // The web control plane (contracts/web-control-plane.md)
   //

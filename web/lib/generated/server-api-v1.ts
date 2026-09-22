@@ -196,11 +196,6 @@ export interface CreatePersonalKnowledgeBody { type: string; content: string; to
 export interface ProposeTeamKnowledgeBody { type: string; content: string; topic_key?: string; value_key?: string; command_id?: string; }
 export interface PromotePatternBody { title: string; problem: string; root_cause: string; approach: string; constraints?: string[]; applicability?: string[]; command_id?: string; }
 
-export interface SyncStatus {
-  applied_items: number;
-  last_applied_at: string | null;
-}
-
 // ---------------------------------------------------------------------------
 // The web control plane (contracts/web-control-plane.md)
 // ---------------------------------------------------------------------------

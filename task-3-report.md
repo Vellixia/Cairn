@@ -246,3 +246,18 @@ test -p cairn-store --test v1_migration` (4 passed), and `git diff --check`
 pass. `cargo clippy -p cairn-store -p cairnd -p cairn-server --all-targets -- -D warnings`
 is blocked because installed Clippy launches Rust 1.95.0 while
 the workspace requires Rust 1.97.1.
+
+## Task 3 phase H — entity-route deletion
+
+- Deleted live server entity sync/pull, pattern pull, migration/cutover routes
+  and their handlers/contracts; safe-event ingestion and typed commands remain.
+- Removed web Sync-status API/page and its generated contract entry. Route
+  inventory now derives no deleted endpoint from server source.
+- Fresh edge migration rebuilds session correlation without legacy `tasks` FK;
+  daemon session and outage/cache tests run against a task-free fresh database.
+
+Validation with Rust 1.97.1: `cargo check --workspace --all-targets`,
+`cargo test --workspace --no-run`, `cargo test -p cairn-store spool` (3
+passed), `cargo test -p cairnd` (28 passed), and `git diff --check` pass.
+Clippy remains unavailable: installed driver uses Rust 1.95.0, while workspace
+requires 1.97.1.

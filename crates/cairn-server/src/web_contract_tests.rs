@@ -166,15 +166,6 @@ fn every_web_wrapper_has_exact_registry_contract_and_structural_router_binding()
             "deleteMemory",
         ),
         (
-            "SYNC_STATUS",
-            "GET",
-            "/api/projects/{id}/sync-status",
-            "project_sync_status",
-            "none",
-            "SyncStatus",
-            "syncStatus",
-        ),
-        (
             "FUNNEL",
             "GET",
             "/api/projects/{id}/funnel",
@@ -367,7 +358,7 @@ fn every_web_wrapper_has_exact_registry_contract_and_structural_router_binding()
 
     assert_eq!(
         web_operations::ALL.len(),
-        38,
+        expected.len(),
         "add browser operation to registry"
     );
     for (operation, (name, method, path, _legacy_handler, request, response, client_name)) in

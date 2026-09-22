@@ -1,6 +1,6 @@
 //! Safe-event ingest (`contracts/safe-events.md` §7, FR-765–FR-780).
 //!
-//! A boundary of its own, deliberately not `/api/sync/batch`. The sync boundary
+//! A boundary of its own, deliberately not entity synchronization. That boundary
 //! carries whole entities a client already decided to store; this one carries
 //! typed observations the server decides what to do with. Sharing a route would
 //! mean one validation order for two different questions.
