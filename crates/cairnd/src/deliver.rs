@@ -174,14 +174,6 @@ impl OutageCache {
         Some(response)
     }
 
-    /// Invalidated on sign-out, on credential change, and on any change of
-    /// authenticated account (FR-790a) — called from
-    /// [`Daemon::mutate_credentials`], the single door for all three.
-    pub fn clear(&mut self) {
-        self.order.clear();
-        self.entries.clear();
-    }
-
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -832,23 +824,6 @@ mod tests {
             "the session nothing touched again must be the one evicted"
         );
         assert!(cache.get(newcomer, owner).is_some());
-    }
-
-    /// Sign-out, a credential change, and any account change all invalidate
-    /// the whole cache (FR-790a) — this is the primitive `mutate_credentials`
-    /// calls; the wiring itself is exercised in `state.rs`.
-    #[test]
-    fn clear_drops_every_entry() {
-        let mut cache = OutageCache::default();
-        let session = Uuid::now_v7();
-        let owner = Uuid::now_v7();
-        cache.put(session, owner, &response("t1", "full", 3000, 0));
-        assert!(cache.get(session, owner).is_some());
-
-        cache.clear();
-
-        assert!(cache.get(session, owner).is_none());
-        assert_eq!(cache.len(), 0);
     }
 
     // -- ResponseMeta ------------------------------------------------------

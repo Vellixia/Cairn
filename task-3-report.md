@@ -101,3 +101,21 @@ focused typed-worker/backoff tests passed under same toolchain.
 - Removed orphan `promote` module declaration. Legacy status probes and local
   post-ratification mutation no longer keep deleted sync paths alive.
 - Validation: `RUSTC=/Users/andresholivin/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc rustup run 1.97.1 cargo check -p cairnd --all-targets` passes. Clippy cannot start because this environment invokes Homebrew Rust 1.95.0 despite the 1.97.1 toolchain; remaining daemon dead-code warnings also require the next handler/module deletion slice.
+
+## Task 3 phase C — edge dead-code completion
+
+- Deleted unreachable daemon status, local evidence listing, subject, team,
+  personal, privacy, sync-status, and legacy integration mutation handlers.
+  Kept hook evidence recording, lifecycle capture, typed spools, server client,
+  bounded retrieval cache, binding/correlation, integration ownership, and
+  removed-feature migration.
+- Deleted obsolete credential mutation/cache-clear path and only its now-orphan
+  fixtures. Removed pattern promotion/outcome MCP actions left after their wire
+  variants were deleted; five MCP tools remain.
+- Net deletion: 1,723 lines, 9 added lines across the six affected sources.
+
+Validation with Rust 1.97.1: `cargo clippy -p cairnd --all-targets -- -D warnings`,
+`cargo check --workspace --all-targets`, `cargo test --workspace --no-run`,
+`cargo test -p cairnd` (84 passed), `cargo test -p cairn mcp::tests` (9 passed),
+and `git diff --check` all pass. Workspace check retains two pre-existing
+`cairn-server/src/api.rs` dead-code warnings outside this edge slice.

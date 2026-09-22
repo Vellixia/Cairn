@@ -190,7 +190,7 @@ fn tool_definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": [
                         "create", "supersede", "forget",
                         "reinforce", "attach_evidence", "verify", "pin",
-                        "reconcile", "promote", "record_outcome", "governance"
+                        "reconcile", "governance"
                     ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "scope": { "type": "string", "enum": ["project", "branch", "session"] },
@@ -228,42 +228,6 @@ fn tool_definitions() -> Vec<Value> {
                     "basis": { "type": "string", "enum": ["explicit_agent", "evidence"] },
                     "basis_evidence_id": { "type": "string" },
                     "rationale": { "type": "string" },
-                    // promote / record_outcome
-                    "signals": { "type": "array", "items": { "type": "string" } },
-                    "applicability": { "type": "array", "items": { "type": "string" }, "description": "Free-text applicability conditions. Only meaningful when `target` is `pattern` (the default)." },
-                    "root_cause": { "type": "string" },
-                    "approach": { "type": "string" },
-                    "constraints": { "type": "array", "items": { "type": "string" } },
-                    "dry_run": { "type": "boolean" },
-                    // What this promotion targets. Absent means `pattern`, so
-                    // a caller naming none keeps today's behaviour unchanged
-                    // (FR-506, D415).
-                    "target": { "type": "string", "enum": ["pattern", "personal", "team"], "description": "Defaults to `pattern`. `personal` and `team` promote into that domain instead, using `applicability_facts` rather than `applicability` for their conditions." },
-                    // Structured conditions for a `personal`/`team` target,
-                    // distinct from the free-text `applicability` above (which
-                    // stays a pattern's own condition list).
-                    //
-                    // Flat `kind=value` strings, not an array of objects. The
-                    // shape is not a style choice: an action's parameters are
-                    // flat here by rule (D70), because a nested object is how a
-                    // tool grows sub-operations, and `mcp_backward_compatibility`
-                    // enforces it. `Vec<String>` is also what the wire type has
-                    // always been, so this removes a conversion rather than
-                    // adding one.
-                    //
-                    // `kind` is a closed vocabulary — `language` or `tool`, nothing else,
-                    // because both are derivable from files in a working tree
-                    // with no content read (D410, D414). A `kind` outside it
-                    // is refused, never silently dropped, so a promotion never
-                    // ends up applying under a narrower condition than asked
-                    // for (FR-434, FR-514). `value` is open text; a malformed
-                    // one is the validator's business downstream, not this
-                    // schema's.
-                    "applicability_facts": { "type": "array", "items": { "type": "string" }, "description": "`kind=value` conditions for a `personal`/`team` promotion, e.g. `language=rust`, `tool=cargo`. `kind` must be `language` or `tool`; anything else is refused, never dropped. Ignored when target is `pattern`." },
-                    "pattern_id": { "type": "string" },
-                    "outcome": { "type": "string", "enum": ["resolved", "not_applicable", "failed"] },
-                    "alternative_cause": { "type": "string" },
-                    "evidence_id": { "type": "string" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -562,39 +526,6 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
-                "promote" => {
-                    client::send(&Request::PatternPromote {
-                        cwd,
-                        memory_id: uuid_arg(args, "memory_id")?,
-                        title: str_arg(args, "title"),
-                        problem: str_arg(args, "problem"),
-                        signals: str_list(args, "signals"),
-                        applicability: str_list(args, "applicability"),
-                        root_cause: str_arg(args, "root_cause"),
-                        approach: str_arg(args, "approach"),
-                        constraints: str_list(args, "constraints"),
-                        dry_run: bool_arg(args, "dry_run"),
-
-                        // Absent means `pattern`, so a caller naming none
-                        // gets today's behaviour unchanged (FR-506, D415).
-                        target: enum_arg(args, "target"),
-                        applicability_facts: applicability_facts_arg(args)?,
-                    })
-                    .await?
-                }
-                "record_outcome" => {
-                    client::send(&Request::PatternOutcome {
-                        cwd,
-                        id: uuid_arg(args, "pattern_id")?,
-                        outcome: enum_arg(args, "outcome")
-                            .ok_or_else(|| WireError::invalid("outcome is required"))?,
-                        signals: str_list(args, "signals"),
-                        alternative_cause: str_arg(args, "alternative_cause"),
-                        evidence_id: uuid_opt(args, "evidence_id"),
-                        session: uuid_opt(args, "session_id"),
-                    })
-                    .await?
-                }
                 "governance" => client::send(&Request::Governance { cwd }).await?,
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
@@ -732,18 +663,6 @@ fn bool_arg(args: &Value, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-fn str_list(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {
     args.get(key)
         .and_then(|v| v.as_array())
@@ -788,47 +707,6 @@ fn knowledge_domain_arg(args: &Value) -> Result<Option<cairn_core::KnowledgeDoma
         ));
     }
     Ok(domain)
-}
-
-/// `applicability_facts` for `cairn_remember action=promote`: `(kind,
-/// value)` pairs, formatted as `"kind=value"` strings, the encoding
-/// `Request::PatternPromote` expects on the wire. `kind` is the closed
-/// `language | tool` vocabulary (D410, D414) — an entry outside it is
-/// refused with an error naming the value, never dropped by a `filter_map`,
-/// because a promotion that silently lost a condition would apply more
-/// broadly than the caller asked for (FR-434, FR-514). A malformed `value`
-/// is passed through as-is; screening it is the content validator's job
-/// downstream, not this schema's.
-fn applicability_facts_arg(args: &Value) -> Result<Vec<String>, WireError> {
-    let Some(items) = args.get("applicability_facts").and_then(|v| v.as_array()) else {
-        return Ok(Vec::new());
-    };
-    items
-        .iter()
-        .map(|item| {
-            let raw = item.as_str().ok_or_else(|| {
-                WireError::invalid("applicability_facts[] entries are `kind=value` strings")
-            })?;
-            // Refused, never dropped (FR-434, FR-514). A silently discarded
-            // condition is worse than a refusal: the promotion still lands, and
-            // it lands applying *more* widely than the caller asked for — the one
-            // direction a mistake here must never go.
-            let (kind, _value) = raw.split_once('=').ok_or_else(|| {
-                WireError::invalid(format!(
-                    "applicability_facts[] entry `{raw}` is not `kind=value`"
-                ))
-            })?;
-            kind.trim()
-                .parse::<cairn_core::ApplicabilityKind>()
-                .map_err(|_| {
-                    WireError::invalid(format!(
-                        "applicability_facts[] kind `{kind}` is outside the closed \
-                         vocabulary (language | tool)"
-                    ))
-                })?;
-            Ok(raw.to_string())
-        })
-        .collect()
 }
 
 fn pretty(value: &Value) -> String {

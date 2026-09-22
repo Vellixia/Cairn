@@ -16,7 +16,7 @@
 
 use crate::state::{storage_err, Daemon};
 use cairn_core::lifecycle::{CanonicalEvent, CanonicalLifecycleEvent};
-use cairn_core::wire::{MigrationAction, WireError};
+use cairn_core::wire::WireError;
 use cairn_store::integrations as rec;
 use serde_json::json;
 
@@ -291,116 +291,6 @@ async fn dispatch(
     }
 }
 
-/// Everything the CLI needs to know about what is installed here.
-pub async fn snapshot(d: &Daemon) -> Reply {
-    let agents = rec::list_agents(&d.store).await.map_err(storage_err)?;
-    let mut out = Vec::new();
-    for agent in agents {
-        let row = rec::agent(&d.store, &agent).await.map_err(storage_err)?;
-        let resources = rec::bound_resources(&d.store, &agent)
-            .await
-            .map_err(storage_err)?;
-        let evidence = rec::evidence(&d.store, &agent).await.map_err(storage_err)?;
-        out.push(json!({
-            "agent": agent,
-            "record": row,
-            "resources": resources,
-            "evidence": evidence,
-        }));
-    }
-    let migrations = rec::list_migrations(&d.store).await.map_err(storage_err)?;
-    Ok(json!({ "agents": out, "migrations": migrations }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_agent(
-    d: &Daemon,
-    agent: String,
-    adapter_version: i64,
-    detected_version: Option<String>,
-    compatibility: String,
-    level: String,
-    completion_guarantee: String,
-) -> Reply {
-    rec::upsert_agent(
-        &d.store,
-        &rec::AgentIntegration {
-            agent: agent.clone(),
-            adapter_version,
-            detected_version,
-            compatibility,
-            level,
-            completion_guarantee,
-            connected_at: chrono::Utc::now().to_rfc3339(),
-            last_verified_at: Some(chrono::Utc::now().to_rfc3339()),
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    Ok(json!({ "agent": agent }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn bind(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    owner: String,
-    scope: String,
-    location: String,
-    content_hash: Option<String>,
-    artifact_schema: Option<i64>,
-    artifact_revision: Option<String>,
-    activation: String,
-    container_single_line: bool,
-    created_container: bool,
-) -> Reply {
-    let id = rec::bind(
-        &d.store,
-        &agent,
-        &rec::InstalledResource {
-            id: uuid::Uuid::now_v7(),
-            kind,
-            owner,
-            scope,
-            location,
-            content_hash,
-            artifact_schema,
-            artifact_revision,
-            activation,
-            installed_at: chrono::Utc::now().to_rfc3339(),
-            last_verified_at: None,
-            container_single_line,
-            created_container,
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    Ok(json!({ "resource_id": id }))
-}
-
-pub async fn unbind(d: &Daemon, agent: String, kind: String) -> Reply {
-    let outcome = rec::unbind(&d.store, &agent, &kind)
-        .await
-        .map_err(storage_err)?;
-    // The caller does the filesystem half only when the last binding went
-    // (FR-243). Saying which happened is the whole point of the reply.
-    Ok(match outcome {
-        rec::Unbound::Nothing => json!({ "outcome": "nothing" }),
-        rec::Unbound::ResourceKept { remaining } => {
-            json!({ "outcome": "resource_kept", "remaining": remaining })
-        }
-        rec::Unbound::ResourceRemoved => json!({ "outcome": "resource_removed" }),
-    })
-}
-
-pub async fn forget_agent(d: &Daemon, agent: String) -> Reply {
-    let removed = rec::remove_agent_if_unbound(&d.store, &agent)
-        .await
-        .map_err(storage_err)?;
-    Ok(json!({ "removed": removed }))
-}
-
 pub async fn record_evidence(
     d: &Daemon,
     agent: String,
@@ -409,12 +299,6 @@ pub async fn record_evidence(
     agent_version: Option<String>,
     degraded: Option<bool>,
 ) -> Reply {
-    // Observation evidence is version-bound, and the version it is bound to is
-    // the one recorded for the agent — not whatever the caller happened to
-    // know. A hook reporting a delivery has no idea what version the agent is;
-    // leaving the row versionless would make the next upgrade discard it as
-    // belonging to some other build, which is how a capability that is working
-    // perfectly well disappears from the report (FR-245).
     let agent_version = match agent_version {
         Some(v) => Some(v),
         None if evidence == "observation" => rec::agent(&d.store, &agent)
@@ -438,108 +322,6 @@ pub async fn record_evidence(
     .await
     .map_err(storage_err)?;
     Ok(json!({ "recorded": true }))
-}
-
-pub async fn invalidate_evidence(
-    d: &Daemon,
-    agent: String,
-    detected_version: Option<String>,
-) -> Reply {
-    let discarded =
-        rec::invalidate_observation_evidence(&d.store, &agent, detected_version.as_deref())
-            .await
-            .map_err(storage_err)?;
-    Ok(json!({ "discarded": discarded }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn migration(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    action: MigrationAction,
-    source: (Option<String>, Option<String>, Option<String>),
-    target: (Option<String>, Option<String>, Option<String>),
-    overlap_permitted: bool,
-    phase: Option<String>,
-    last_error: Option<String>,
-) -> Reply {
-    match action {
-        MigrationAction::Start => {
-            let state = rec::MigrationState {
-                id: uuid::Uuid::now_v7(),
-                agent: agent.clone(),
-                kind: kind.clone(),
-                source_owner: source.0.unwrap_or_default(),
-                source_scope: source.1.unwrap_or_default(),
-                source_location: source.2.unwrap_or_default(),
-                target_owner: target.0.unwrap_or_default(),
-                target_scope: target.1.unwrap_or_default(),
-                target_location: target.2.unwrap_or_default(),
-                phase: "planned".into(),
-                overlap_permitted,
-                started_at: chrono::Utc::now().to_rfc3339(),
-                last_error: None,
-            };
-            rec::start_migration(&d.store, &state)
-                .await
-                .map_err(storage_err)?;
-            Ok(serde_json::to_value(state).unwrap_or(json!({})))
-        }
-        MigrationAction::Advance => {
-            let phase = phase.ok_or_else(|| WireError::invalid("advance needs a phase"))?;
-            rec::set_migration_phase(&d.store, &agent, &kind, &phase, None)
-                .await
-                .map_err(storage_err)?;
-            read_migration(d, &agent, &kind).await
-        }
-        MigrationAction::Fail => {
-            rec::set_migration_phase(&d.store, &agent, &kind, "failed", last_error.as_deref())
-                .await
-                .map_err(storage_err)?;
-            read_migration(d, &agent, &kind).await
-        }
-        MigrationAction::Clear => {
-            rec::clear_migration(&d.store, &agent, &kind)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "migration": null }))
-        }
-        MigrationAction::Read => read_migration(d, &agent, &kind).await,
-    }
-}
-
-async fn read_migration(d: &Daemon, agent: &str, kind: &str) -> Reply {
-    let state = rec::migration(&d.store, agent, kind)
-        .await
-        .map_err(storage_err)?;
-    Ok(json!({ "migration": state }))
-}
-
-pub async fn record_recovery(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    source_path: String,
-    artifact_path: String,
-    content_hash: String,
-) -> Reply {
-    rec::record_recovery_artifact(
-        &d.store,
-        &rec::RecoveryArtifact {
-            id: uuid::Uuid::now_v7(),
-            agent,
-            kind,
-            source_path,
-            artifact_path: artifact_path.clone(),
-            content_hash,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    // Only the path is ever returned, never the content (FR-239).
-    Ok(json!({ "artifact_path": artifact_path }))
 }
 
 /// Whether this session-open is the same session returning from a compaction.
