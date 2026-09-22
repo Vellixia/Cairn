@@ -269,3 +269,8 @@ requires 1.97.1.
   typed endpoints directly without `/api/version` preflight. Fresh databases
   also remove `sync_meta` and `sync_cursor`.
 - Fresh inventory coverage asserts both legacy sync tables are absent.
+
+### Phase H cache follow-up
+
+- Added focused cache tests for finite TTL expiry, explicit refusal eviction
+  before a later outage, and returned cache age/account labels.

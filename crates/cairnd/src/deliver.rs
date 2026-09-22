@@ -700,6 +700,29 @@ mod tests {
 
         let got = cache.get(session, owner).expect("entry");
         assert_eq!(got["trace_id"], "t2");
+        assert_eq!(got["cache_account_id"], owner.to_string());
+        assert!(got["cache_age_seconds"].is_u64());
+    }
+
+    #[test]
+    fn an_expired_entry_cannot_answer_an_outage() {
+        let mut cache = OutageCache::default();
+        let session = Uuid::now_v7();
+        let owner = Uuid::now_v7();
+        cache.put(session, owner, &response("t1", "full", 3000, 100));
+        cache.entries.get_mut(&session).unwrap().cached_at =
+            std::time::Instant::now() - CACHE_TTL - Duration::from_secs(1);
+        assert!(cache.get(session, owner).is_none());
+    }
+
+    #[test]
+    fn a_live_refusal_removes_the_entry_before_a_later_outage() {
+        let mut cache = OutageCache::default();
+        let session = Uuid::now_v7();
+        let owner = Uuid::now_v7();
+        cache.put(session, owner, &response("t1", "full", 3000, 100));
+        cache.invalidate(session, owner);
+        assert!(cache.get(session, owner).is_none());
     }
 
     /// An over-budget entry is rejected outright, and whatever the session
