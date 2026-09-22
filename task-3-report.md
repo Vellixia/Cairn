@@ -261,3 +261,11 @@ Validation with Rust 1.97.1: `cargo check --workspace --all-targets`,
 passed), `cargo test -p cairnd` (28 passed), and `git diff --check` pass.
 Clippy remains unavailable: installed driver uses Rust 1.95.0, while workspace
 requires 1.97.1.
+
+## Task 3 phase H — binding follow-up
+
+- Fresh capture, lifecycle, and command rows no longer read legacy
+  `sync_cursor` namespace state. They are unbound when written; delivery calls
+  typed endpoints directly without `/api/version` preflight. Fresh databases
+  also remove `sync_meta` and `sync_cursor`.
+- Fresh inventory coverage asserts both legacy sync tables are absent.

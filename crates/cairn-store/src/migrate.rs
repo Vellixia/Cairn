@@ -119,7 +119,7 @@ pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
         "memory_fts", "personal_fts", "team_fts", "memory_evidence_facts",
         "memory_evidence", "memory_relations", "evidence_facts", "verification_runs",
         "continuity_checkpoints", "reusable_patterns", "pattern_applications", "memories",
-        "observations", "handoffs", "outbox", "sync_deferred", "sync_cursor",
+        "observations", "handoffs", "outbox", "sync_meta", "sync_deferred", "sync_cursor",
         "personal_knowledge_applicability", "personal_knowledge_relations", "personal_knowledge",
         "team_knowledge_applicability", "team_knowledge_relations", "team_knowledge",
         "project_traits", "cached_patterns", "authority_mode", "migration_state",

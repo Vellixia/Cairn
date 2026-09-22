@@ -67,31 +67,6 @@ pub struct Daemon {
     /// door for sign-out, credential change and account change alike
     /// (FR-790a).
     pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
-    /// The instance the endpoint last reported, if this process has asked.
-    ///
-    /// **Observation, never authority.** The store's binding is the singular
-    /// `team:*` lane (`cursor::bound_server_instance`, D438/FR-495/FR-496) and
-    /// a mismatching server never becomes it — FR-791 refuses that server, and
-    /// nothing here changes what a queued row is bound to.
-    ///
-    /// It exists because FR-792 asks a question the binding cannot answer.
-    /// "Which rows belong to a different deployment than the one answering?"
-    /// is measured against the server *answering*, and comparing rows to the
-    /// store's own binding always says none — the backlog then reads as a
-    /// queue that mysteriously stopped, which is the outcome FR-792 exists to
-    /// prevent. Before this, the spool report was handed whichever instance
-    /// sorted first among every lane, so it happened to be right about as
-    /// often as the ids fell the right way.
-    ///
-    /// **Telemetry, and nothing that decides a report** (FR-792c). It is in
-    /// memory and per process, which is exactly why it may not decide one: a
-    /// daemon exits within one supervision tick of another owning its socket,
-    /// so the process that observed a replacement server is routinely gone by
-    /// the time an operator asks what happened, and a reason held only here is
-    /// lost precisely when it is wanted. Status takes its own bounded sample
-    /// instead (`sync::probe_peer_instance`, FR-792a); this stays because it is
-    /// genuinely useful in a log when reconstructing what a daemon saw.
-    pub last_observed_instance: Arc<RwLock<Option<Uuid>>>,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever

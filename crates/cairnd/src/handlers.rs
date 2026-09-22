@@ -995,9 +995,7 @@ async fn spool_lifecycle_event(
         cairn_store::spool::NewEvent {
             project_id: r.project.id,
             account_id,
-            server_instance_id: cairn_store::cursor::bound_server_instance(&d.store)
-                .await
-                .map_err(storage_err)?,
+            server_instance_id: None,
             event,
         },
     )
@@ -1063,9 +1061,7 @@ pub(crate) async fn queue_knowledge_command(
         cairn_store::spool::NewCommand {
             // Bound to the server this store has established a lane with, at the
             // moment the command is written (FR-791). Never re-decided later.
-            server_instance_id: cairn_store::cursor::bound_server_instance(&d.store)
-                .await
-                .map_err(storage_err)?,
+            server_instance_id: None,
             scope,
             project_id,
             account_id,

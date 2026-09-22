@@ -163,15 +163,10 @@ async fn context(d: &Daemon) -> Result<Context, WireError> {
             Client::new(creds.url.as_deref(), creds.token.as_deref())?,
         )
     };
-    let version = client.get("/api/version").await?;
-    let peer = version
-        .get("server_instance_id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|id| Uuid::parse_str(id).ok())
-        .ok_or_else(|| {
-            WireError::new(codes::SERVER_UNAVAILABLE, "server did not identify itself")
-        })?;
-    *d.last_observed_instance.write().await = Some(peer);
+    // Typed operation endpoints own capability and authorization responses.
+    // No `/api/version` preflight may leave a queue stuck behind an unrelated
+    // 4xx. Fresh edge rows are unbound and use this stable local claim lane.
+    let peer = Uuid::nil();
     Ok(Context {
         account,
         peer,

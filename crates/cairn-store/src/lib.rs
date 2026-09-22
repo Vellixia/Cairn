@@ -2,7 +2,6 @@
 //! delivery spools, migration artifacts, diagnostics and transactions.
 
 pub mod constraints;
-pub mod cursor;
 pub mod diag;
 pub mod integrations;
 pub mod migrate;
@@ -192,7 +191,7 @@ mod tests {
         .fetch_all(store.pool())
         .await
         .unwrap();
-        for removed in ["memories", "observations", "handoffs", "outbox", "personal_knowledge", "team_knowledge"] {
+        for removed in ["memories", "observations", "handoffs", "outbox", "sync_meta", "sync_cursor", "personal_knowledge", "team_knowledge"] {
             assert!(!tables.iter().any(|table| table == removed), "fresh edge table: {removed}");
         }
         for retained in ["projects", "sessions", "event_spool", "command_spool", "agent_integrations", "removed_feature_manifest"] {
