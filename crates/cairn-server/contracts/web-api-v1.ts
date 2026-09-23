@@ -41,6 +41,29 @@ export interface PrivacyPolicy {
   screens_all_member_project_identities: true;
   stores_raw_observations: false;
 }
+export interface LogicalRecord { kind: string; source_id: string; payload: unknown; }
+export interface LogicalBundle {
+  format: "cairn-logical";
+  version: 1;
+  bundle_id: string;
+  exported_at: string;
+  records: LogicalRecord[];
+}
+export interface LogicalImportBody { import_id: string; bundle: unknown; }
+export interface RecordDisposition {
+  kind: string;
+  source_id: string;
+  disposition: "accepted" | "rejected" | "retained" | "unchanged";
+  reason?: string;
+}
+export interface LogicalImportReport {
+  import_id: string;
+  accepted: number;
+  rejected: number;
+  retained: number;
+  unchanged: number;
+  dispositions: RecordDisposition[];
+}
 
 export interface Release {
   tag: string;

@@ -300,6 +300,22 @@ pub(crate) mod web_operations {
         "PrivacyPolicy"
     );
     operation!(
+        LOGICAL_EXPORT,
+        "GET",
+        "/api/admin/logical-export",
+        "logical_export",
+        "none",
+        "LogicalBundle"
+    );
+    operation!(
+        LOGICAL_IMPORT,
+        "POST",
+        "/api/admin/logical-import",
+        "logical_import",
+        "LogicalImportBody",
+        "LogicalImportReport"
+    );
+    operation!(
         SYSTEM_HEALTH,
         "GET",
         "/api/system/health",
@@ -381,6 +397,8 @@ pub(crate) mod web_operations {
         RATIFY_TEAM,
         RETIRE_TEAM,
         PRIVACY_POLICY,
+        LOGICAL_EXPORT,
+        LOGICAL_IMPORT,
         SYSTEM_HEALTH,
         CONSOLIDATION_HEALTH,
         ADMIN_USERS,
@@ -619,6 +637,14 @@ pub fn routes() -> Router<AppState> {
         .web_operation(web_operations::RATIFY_TEAM, ratify_team)
         .web_operation(web_operations::RETIRE_TEAM, retire_team)
         .web_operation(web_operations::PRIVACY_POLICY, privacy_policy)
+        .web_operation(
+            web_operations::LOGICAL_EXPORT,
+            crate::transfer::logical_export,
+        )
+        .web_operation(
+            web_operations::LOGICAL_IMPORT,
+            crate::transfer::logical_import,
+        )
         // Migration and cutover (`contracts/migration-cutover.md`). The first
         // four are the client's own migration path (§4-§9) and stay reachable
         // whatever `server_authority.mode` says — a store migrating *after*

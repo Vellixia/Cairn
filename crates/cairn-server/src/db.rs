@@ -36,6 +36,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "web_settings",
         include_str!("../migrations/0007_web_settings.sql"),
     ),
+    (
+        8,
+        "logical_transfer",
+        include_str!("../migrations/0008_logical_transfer.sql"),
+    ),
 ];
 
 /// The highest migration this build carries.
@@ -43,7 +48,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// Not what the server advertises: a deployment can be held at a lower schema
 /// deliberately, and what it can actually hold is the schema it **applied**.
 /// See [`applied_version`].
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;

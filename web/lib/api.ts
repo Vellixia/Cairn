@@ -63,6 +63,8 @@ type KnowledgeType = Contract.KnowledgeType;
 type MemoryScope = Contract.MemoryScope;
 type RelationKind = Contract.RelationKind;
 type PrivacyPolicy = Contract.PrivacyPolicy;
+type LogicalBundle = Contract.LogicalBundle;
+type LogicalImportReport = Contract.LogicalImportReport;
 
 declare global {
   interface Window {
@@ -167,6 +169,8 @@ export const api = {
     }),
   logout: () => request<OkResponse>("/api/auth/logout", { method: "POST" }),
   privacyPolicy: () => request<PrivacyPolicy>("/api/privacy-policy"),
+  logicalExport: () => request<LogicalBundle>("/api/admin/logical-export"),
+  logicalImport: (importId: string, bundle: unknown) => request<LogicalImportReport>("/api/admin/logical-import", { method: "POST", body: JSON.stringify({ import_id: importId, bundle }) }),
   changePassword: (newPassword: string) => request<ChangedPassword>("/api/auth/password", { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
 
   /** Personal API tokens: the credential `cairnd` carries (D10). */

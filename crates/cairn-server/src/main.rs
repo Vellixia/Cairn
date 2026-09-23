@@ -13,6 +13,7 @@ mod events;
 mod extract;
 mod global;
 mod retrieve;
+mod transfer;
 mod verifysummary;
 mod version;
 #[cfg(test)]
