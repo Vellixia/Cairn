@@ -230,11 +230,25 @@ fn persist_credentials_at(
     config.server_url = Some(credentials.url.trim_end_matches('/').to_owned());
     config.server_account_id = Some(account_id);
     config.save_to(config_path)?;
-    std::fs::write(token_path, &credentials.token)?;
+    write_token(token_path, &credentials.token)
+}
+
+fn write_token(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(token.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(token_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

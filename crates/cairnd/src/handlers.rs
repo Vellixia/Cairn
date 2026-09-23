@@ -1,6 +1,6 @@
 //! Request dispatch: the daemon's whole behaviour, one function per verb.
 
-use crate::state::{Daemon, Resolved, git_status, storage_err};
+use crate::state::{Daemon, Resolved, ServerCredentials, git_status, storage_err};
 use cairn_core::domain::*;
 use cairn_core::event::{EventContent, EventKind, OpenTrigger, SafeCanonicalEvent};
 use cairn_core::wire::*;
@@ -451,6 +451,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
 // ---------------------------------------------------------------------------
 
 async fn init(d: &Daemon, cwd: &str) -> Reply {
+    reload_server_credentials(d).await;
     // `init` is the one place a checkout's identity is worth re-reading.
     d.forget_repo(cwd).await;
     let r = d.resolve(cwd).await?;
@@ -462,6 +463,19 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
         "git_common_dir": r.repo.git_common_dir.display().to_string(),
         "legacy_migration": legacy_migration,
     }))
+}
+
+/// Setup writes credentials before sending `Init`; a daemon already serving
+/// requests must observe those files rather than keep its startup snapshot.
+async fn reload_server_credentials(d: &Daemon) {
+    let config = cairn_core::CairnConfig::load();
+    let server = ServerCredentials::load(&config);
+    let changed = *d.server.read().await != server;
+    *d.config.write().await = config;
+    if changed {
+        *d.server.write().await = server;
+        *d.outage_cache.lock().await = crate::deliver::OutageCache::default();
+    }
 }
 
 async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project, WireError> {
@@ -1411,7 +1425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_binds_one_permitted_remote_match() {
+    async fn init_reloads_setup_credentials_for_existing_daemon() {
         let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
         assert!(
             std::process::Command::new("git")
@@ -1421,40 +1435,44 @@ mod tests {
                     "remote",
                     "add",
                     "origin",
-                    "https://example.test/fresh.git"
+                    "https://example.test/reloaded.git"
                 ])
                 .status()
                 .unwrap()
                 .success()
         );
-        let server_project_id = Uuid::now_v7();
+        let config_path = cairn_core::paths::config_path();
+        let token_path = cairn_core::paths::token_path();
+        let old_config = std::fs::read(&config_path).ok();
+        let old_token = std::fs::read(&token_path).ok();
+        let account = Uuid::now_v7();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let server_project_id = Uuid::now_v7();
+        let mut config = cairn_core::CairnConfig::default();
+        config.server_url = Some(format!("http://{address}"));
+        config.server_account_id = Some(account);
+        config.save().unwrap();
+        std::fs::write(&token_path, "reloaded-token").unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.unwrap();
-            let body = format!(r#"{{"projects":[{{"id":"{server_project_id}","name":"fresh"}}]}}"#);
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("authorization: Bearer reloaded-token"));
+            let body = format!(r#"{{"projects":[{{"id":"{server_project_id}"}}]}}"#);
             socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
-        *repo.daemon.server.write().await = ServerCredentials {
-            url: Some(format!("http://{address}")),
-            token: Some("token".into()),
-            account_id: Some(Uuid::now_v7()),
-        };
         let value = init(&repo.daemon, &repo.cwd).await.unwrap();
-        assert_eq!(
-            value["project"]["server_project_id"],
-            server_project_id.to_string()
-        );
-        assert_eq!(
-            repo.daemon
-                .resolve(&repo.cwd)
-                .await
-                .unwrap()
-                .project
-                .server_project_id,
-            Some(server_project_id)
-        );
+        assert_eq!(value["project"]["server_project_id"], server_project_id.to_string());
+        assert_eq!(repo.daemon.server.read().await.account_id, Some(account));
+        match old_config {
+            Some(value) => std::fs::write(&config_path, value).unwrap(),
+            None => { let _ = std::fs::remove_file(&config_path); }
+        }
+        match old_token {
+            Some(value) => std::fs::write(&token_path, value).unwrap(),
+            None => { let _ = std::fs::remove_file(&token_path); }
+        }
     }
 }
