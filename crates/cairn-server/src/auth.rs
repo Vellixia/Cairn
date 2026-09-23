@@ -289,28 +289,24 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     Created,
-    Updated,
+    Existing,
 }
 
 impl AdminOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             AdminOutcome::Created => "created",
-            AdminOutcome::Updated => "updated",
+            AdminOutcome::Existing => "existing",
         }
     }
 }
 
 /// Define the operator's account from the environment.
 ///
-/// A fresh deployment has no users, and `/api/auth/register` is the only route
-/// that makes one — which leaves nobody able to sign in and open registration
-/// to whoever reaches the server first. Naming the account in the environment
-/// closes both gaps.
+/// Fresh deployment has no users. Environment names first account.
 ///
-/// The environment is the source of truth, so this re-applies the password on
-/// every start: rotating it means editing the variable and restarting. Running
-/// twice with an unchanged password is still a write, but not a change.
+/// Environment credentials bootstrap a deployment with no administrator. Once
+/// one exists, web-managed password and role changes remain authoritative.
 pub async fn ensure_admin(
     pool: &PgPool,
     email: &str,
@@ -328,23 +324,6 @@ pub async fn ensure_admin(
         anyhow::bail!("CAIRN_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LEN} characters");
     }
 
-    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
-
-    // `xmax = 0` distinguishes the inserted row from the updated one: an INSERT
-    // leaves no deleting transaction behind, an UPDATE does. It is the only way
-    // to tell the two apart from a single upsert.
-    // `role` and `status` are restored, not merely set on insert (FR-539).
-    //
-    // This is the break-glass path, and it only works if it restores *authority*
-    // as well as the password. An operator who demoted or disabled the last
-    // administrator has no supported API left to recover through; without these
-    // two assignments a restart would hand them a working password on an account
-    // that still cannot administer anything.
-    //
-    // `must_change_password` is deliberately forced false (FR-540). The
-    // environment re-establishes this password on every start, so a forced
-    // change would be reverted by the next restart — an unbreakable loop rather
-    // than a security measure.
     // Below schema 3 there are no standing columns to restore — and nothing that
     // could have demoted or disabled the account either, so the seed reduces to
     // what it always was. Selecting them unconditionally made a held-back
@@ -359,41 +338,56 @@ pub async fn ensure_admin(
     .fetch_one(pool)
     .await?;
 
+    let mut tx = pool.begin().await?;
+    if standing_columns {
+        sqlx::query("SELECT pg_advisory_xact_lock(4770040003)")
+            .execute(&mut *tx)
+            .await?;
+        if let Some(id) = sqlx::query_scalar("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            tx.commit().await?;
+            return Ok((id, AdminOutcome::Existing));
+        }
+    }
+
+    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
     let sql = if standing_columns {
-        "INSERT INTO users (id, email, display_name, password_hash,
-                            role, status, must_change_password)
+        "INSERT INTO users (id, email, display_name, password_hash, role, status, must_change_password)
          VALUES ($1, $2, $3, $4, 'admin', 'active', false)
-         ON CONFLICT (email) DO UPDATE
-             SET password_hash        = EXCLUDED.password_hash,
-                 display_name         = EXCLUDED.display_name,
-                 role                 = 'admin',
-                 status               = 'active',
-                 must_change_password = false
-         RETURNING id, (xmax = 0) AS inserted"
+         ON CONFLICT (email) DO NOTHING
+         RETURNING id"
     } else {
         "INSERT INTO users (id, email, display_name, password_hash)
          VALUES ($1, $2, $3, $4)
-         ON CONFLICT (email) DO UPDATE
-             SET password_hash = EXCLUDED.password_hash,
-                 display_name  = EXCLUDED.display_name
-         RETURNING id, (xmax = 0) AS inserted"
+         ON CONFLICT (email) DO NOTHING
+         RETURNING id"
     };
-    let (id, inserted): (Uuid, bool) = sqlx::query_as(sql)
+    let id: Option<Uuid> = sqlx::query_scalar(sql)
         .bind(Uuid::now_v7())
         .bind(&email)
         .bind(display_name)
         .bind(&hash)
-        .fetch_one(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-    Ok((
-        id,
-        if inserted {
-            AdminOutcome::Created
-        } else {
-            AdminOutcome::Updated
-        },
-    ))
+    let result = match id {
+        Some(id) => Ok((id, AdminOutcome::Created)),
+        None if standing_columns => sqlx::query_scalar("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
+            .fetch_one(&mut *tx)
+            .await
+            .map(|id| (id, AdminOutcome::Existing))
+            .map_err(Into::into),
+        None => sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&mut *tx)
+            .await
+            .map(|id| (id, AdminOutcome::Existing))
+            .map_err(Into::into),
+    };
+    tx.commit().await?;
+    result
 }
 
 /// Create an account. The only way one comes into existence, besides

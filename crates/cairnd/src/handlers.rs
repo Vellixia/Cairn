@@ -487,17 +487,23 @@ async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project,
     })?;
     let response = crate::sync::client(d)
         .await?
-        .get_with_query(
-            "/api/projects/lookup",
-            &[("remote".to_owned(), remote.to_owned())],
-        )
+        .get("/api/projects")
         .await?;
     let projects = response
         .get("projects")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
-            WireError::new(codes::SERVER_UNAVAILABLE, "invalid project lookup response")
+            WireError::new(codes::SERVER_UNAVAILABLE, "invalid project list response")
         })?;
+    let projects: Vec<_> = projects
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .get("repository_remote")
+                .and_then(serde_json::Value::as_str)
+                == Some(remote)
+        })
+        .collect();
     let [candidate] = projects.as_slice() else {
         return Err(WireError::new(
             codes::NOT_LINKED,

@@ -466,14 +466,6 @@ pub fn routes() -> Router<AppState> {
         // talks to the database directly and is reachable only by whoever
         // already controls the host.
         //
-        // The route itself still answers, because removal is a compatibility
-        // event for every client built before it and `404` is the one status
-        // that cannot say so — it reads identically to a typo'd URL or a route
-        // that never existed. `410 Gone` means "this existed and was
-        // deliberately retired", and the body names the replacement so an
-        // operator holding only the response can act on it (FR-587,
-        // `compatibility.md` §1b).
-        .route("/api/auth/register", post(register_removed))
         .web_operation(web_operations::LOGIN, login)
         .route("/api/auth/password", post(change_password))
         // Administration. Every route here takes `AdminUser`, so authorization
@@ -493,21 +485,10 @@ pub fn routes() -> Router<AppState> {
         // Linking (FR-064)
         .web_operation(web_operations::PROJECTS, list_projects)
         .web_operation(web_operations::CREATE_PROJECT, create_project)
-        .route("/api/projects/lookup", get(lookup_projects))
         .route(
             "/api/projects/{id}/members",
             get(list_members).post(add_member).delete(remove_member),
         )
-        // No join route either, for the same reason. It required only that the
-        // project exist, so naming a UUID was enough to become a member of it —
-        // and `lookup` below handed those UUIDs out. A client attaching a fresh
-        // clone to a project it is already a member of does not need a route:
-        // `GET /api/projects` already reports the caller's memberships, and
-        // `cairn link --project` now checks that list instead of asking to be
-        // added to it.
-        //
-        // Same `410 Gone` treatment, for the same reason (FR-587).
-        .route("/api/projects/{id}/join", post(join_removed))
         // Sync
         // Safe-event ingest is its own boundary:
         // that one carries whole entities a client already decided to store,
@@ -1176,38 +1157,6 @@ fn event_ingest_route() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(cairn_core::event::BODY_MAX_BYTES))
 }
 
-/// The two routes the security prerequisite removed answer here (FR-587).
-///
-/// Neither takes an authentication extractor. A client that used to register
-/// had no account to authenticate with, and a client that used to self-join
-/// deserves to learn the route is gone rather than that its token is wrong —
-/// answering `401` first would hide the actual fact behind an unrelated one.
-///
-/// The message names both the replacement route and the CLI verb, because the
-/// two audiences that hit this are an integrator reading HTTP and an operator
-/// reading a terminal, and neither should have to translate for the other
-/// (`compatibility.md` §1b, SC-458).
-async fn register_removed() -> ApiError {
-    ApiError::new(
-        StatusCode::GONE,
-        "route_removed",
-        "self-registration is disabled; an administrator creates accounts with          `POST /api/admin/users` (`cairn user create`)",
-    )
-}
-
-/// See [`register_removed`].
-///
-/// The path segment is taken as a string rather than parsed as a UUID: a
-/// malformed id would otherwise be refused as a bad request, which says
-/// nothing about the route being gone.
-async fn join_removed(Path(_id): Path<String>) -> ApiError {
-    ApiError::new(
-        StatusCode::GONE,
-        "route_removed",
-        "self-join is disabled; an existing member or admin adds you with          `POST /api/projects/{id}/members` (`cairn project member add`)",
-    )
-}
-
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
@@ -1217,13 +1166,9 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
-    // Read fresh rather than from the application state: an administrator can
-    // cut this deployment over while it is running, and a client polls here to
-    // learn that they did.
-    let authority = crate::version::authority_for(&state.pool, state.schema_version).await;
     let payload = state
         .releases
-        .payload(state.schema_version, state.server_instance_id, authority)
+        .payload(state.schema_version, state.server_instance_id)
         .await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
@@ -1900,47 +1845,6 @@ async fn create_project(
         .await?;
     tx.commit().await?;
     Ok(Json(json!({ "id": id, "name": body.name })))
-}
-
-#[derive(Deserialize)]
-struct LookupQuery {
-    #[serde(default)]
-    remote: String,
-}
-
-/// A discovery *hint*. Returns only projects the caller may already see, and
-/// never links anything on its own (D14).
-///
-/// The doc comment above is what this was always documented to do. The query
-/// did not do it: it matched on `repository_remote` alone, with no reference to
-/// the caller at all. A git remote is not a secret — it is in every clone of
-/// the repository and often on a public forge — so any authenticated account
-/// could turn a remote URL into the project UUIDs behind it, which was exactly
-/// the input the join route needed. The membership join below is the fix; the
-/// comment needed no change, only the SQL.
-async fn lookup_projects(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Query(q): Query<LookupQuery>,
-) -> ApiResult<Json<Value>> {
-    if q.remote.trim().is_empty() {
-        return Ok(Json(json!({ "projects": [] })));
-    }
-    let rows = sqlx::query(
-        "SELECT p.id, p.name FROM projects p
-         JOIN project_members m ON m.project_id = p.id
-         WHERE p.repository_remote = $1 AND p.deleted_at IS NULL AND m.user_id = $2
-         ORDER BY p.created_at",
-    )
-    .bind(q.remote.trim())
-    .bind(user.id())
-    .fetch_all(&state.pool)
-    .await?;
-    let projects: Vec<Value> = rows
-        .iter()
-        .map(|r| json!({ "id": r.get::<Uuid, _>("id"), "name": r.get::<String, _>("name") }))
-        .collect();
-    Ok(Json(json!({ "projects": projects })))
 }
 
 async fn list_projects(

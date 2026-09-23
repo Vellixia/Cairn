@@ -79,49 +79,6 @@ pub const SCHEMA_4_CAPABILITIES: &[&str] = &[
     "context_retrieval",
 ];
 
-/// Whether this deployment has cut over to server authority
-/// (`contracts/migration-cutover.md` §1).
-///
-/// A structure rather than two loose fields, because the pair is only
-/// meaningful together: `cutover_at` without `mode` says nothing, and a
-/// `cutover_at` on a `pre_cutover` deployment would be a contradiction rather
-/// than an absence.
-///
-/// Absent below schema 4, where `server_authority` does not exist. Its absence
-/// is the answer — the same "no probe endpoint, no version table" discipline
-/// `SCHEMA_2_CAPABILITIES` established — and a client seeing no `authority`
-/// field knows it is talking to a server that has no cutover to report.
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthorityPayload {
-    pub mode: String,
-    pub cutover_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Read this deployment's cutover state.
-///
-/// From the database on every call, deliberately not cached on the
-/// application state. An administrator can throw this switch while the process
-/// is running, and a client polls this endpoint precisely to find out that they
-/// have — a value captured at start-up would say `pre_cutover` until the next
-/// restart, which is the one answer that must not be stale.
-///
-/// `None` below schema 4, where the table does not exist. A read error is also
-/// `None`: the version endpoint is unauthenticated and must not fail, and an
-/// absent field already means "this server has no cutover to report", which is
-/// the safe reading.
-pub async fn authority_for(pool: &sqlx::PgPool, schema_version: i64) -> Option<AuthorityPayload> {
-    if schema_version < 4 {
-        return None;
-    }
-    let row: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT mode, cutover_at FROM server_authority WHERE id = 1")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    row.map(|(mode, cutover_at)| AuthorityPayload { mode, cutover_at })
-}
-
 /// What a deployment at `schema_version` can hold.
 ///
 /// Derived from the schema the database **applied**, so a server held at an
@@ -168,12 +125,6 @@ pub struct VersionPayload {
     /// Absent below schema 3, where the table it comes from does not exist yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_instance_id: Option<Uuid>,
-    /// Whether this deployment has cut over to server authority (FR-876).
-    ///
-    /// Absent below schema 4. A client probes this the way it already probes
-    /// schema capability, so no new polling mechanism exists to maintain.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authority: Option<AuthorityPayload>,
 }
 
 #[derive(Default)]
@@ -201,7 +152,6 @@ impl ReleaseCache {
         &self,
         schema_version: i64,
         server_instance_id: Option<Uuid>,
-        authority: Option<AuthorityPayload>,
     ) -> VersionPayload {
         if self.is_stale().await {
             self.refresh().await;
@@ -222,7 +172,6 @@ impl ReleaseCache {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id,
-            authority,
         }
     }
 
@@ -301,7 +250,6 @@ mod tests {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id: None,
-            authority: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"current\":\"0.1.0\""));
@@ -346,37 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn authority_is_absent_rather_than_guessed_when_the_server_has_none() {
-        let p = VersionPayload {
-            current: "0.1.0".to_string(),
-            latest: None,
-            update_available: false,
-            checked_at: None,
-            schema_version: 3,
-            capabilities: vec![],
-            server_instance_id: None,
-            authority: None,
-        };
-        let s = serde_json::to_string(&p).unwrap();
-        assert!(
-            !s.contains("authority"),
-            "a pre-v4 server implied a cutover state it cannot have"
-        );
-
-        let p = VersionPayload {
-            authority: Some(AuthorityPayload {
-                mode: "pre_cutover".to_string(),
-                cutover_at: None,
-            }),
-            schema_version: 4,
-            ..p
-        };
-        let s = serde_json::to_string(&p).unwrap();
-        assert!(s.contains("\"mode\":\"pre_cutover\""));
-        assert!(s.contains("\"cutover_at\":null"));
-    }
-
-    #[test]
     fn version_payload_with_release_serializes() {
         let r = Release {
             tag: "v0.2.0".to_string(),
@@ -394,7 +311,6 @@ mod tests {
                 .map(|c| c.to_string())
                 .collect(),
             server_instance_id: None,
-            authority: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"tag\":\"v0.2.0\""));
