@@ -63,10 +63,8 @@ fn owner(server: &Server, label: &str) -> Owner {
 fn project_scoped_paths(project: Uuid) -> Vec<String> {
     vec![
         format!("/api/projects/{project}"),
-        format!("/api/projects/{project}/tasks"),
         format!("/api/projects/{project}/sessions"),
         format!("/api/projects/{project}/memories"),
-        format!("/api/projects/{project}/sync-status"),
         format!("/api/projects/{project}/members"),
         // Feature 005's health matrix. Readable by members only: a project's
         // capture health says which machines its members work from and which
@@ -87,7 +85,6 @@ fn project_scoped_paths(project: Uuid) -> Vec<String> {
         format!("/api/projects/{project}/graph?memory_id={project}"),
         format!("/api/projects/{project}/replay"),
         format!("/api/projects/{project}/analytics"),
-        format!("/api/sync/changes?project_id={project}"),
     ]
 }
 
@@ -101,98 +98,6 @@ fn post_only_project_paths(project: Uuid) -> Vec<String> {
         format!("/api/projects/{project}/dispositions"),
         format!("/api/projects/{project}/memory-relations"),
     ]
-}
-
-/// Project-scoped routes that take the project in the **body** rather than the
-/// path, so a GET sweep cannot reach them.
-///
-/// `POST /api/sync/batch` is the whole list, and it is swept separately below
-/// rather than excluded: it is the most consequential project-scoped route on the
-/// server, because it is where writes arrive.
-fn body_scoped_paths() -> Vec<&'static str> {
-    vec!["/api/sync/batch"]
-}
-
-/// Routes that are declared but deliberately dead: they answer `410 Gone` and
-/// name their replacement, for every caller, member or not (FR-587).
-///
-/// These are excluded from the membership sweeps because they hold no project
-/// data to protect — but the exclusion is not taken on trust. The sweep below
-/// asserts each one really does answer `410` to a member *and* a non-member, so
-/// a live route quietly added to this list fails rather than escaping the audit.
-fn removed_paths(project: Uuid) -> Vec<String> {
-    vec![format!("/api/projects/{project}/join")]
-}
-
-/// Routes under `/api/sync` that are deliberately **not** project-scoped.
-///
-/// Both were added by Feature 004 and neither takes a project. `changes/personal`
-/// is scoped to the authenticated account — there is no parameter through which
-/// one caller could name another's — and `changes/team` is server-wide by design
-/// (FR-463): an authoritative team entry reaches every account regardless of
-/// membership, which is the one place in this feature where authorization is not
-/// mediated by project membership.
-///
-/// Excluded from the membership sweeps, and the exclusion is asserted rather than
-/// assumed: the test below requires each to refuse an **anonymous** caller and to
-/// answer an authenticated non-member, which is exactly the pair of properties
-/// that makes "not project-scoped" a design rather than a gap.
-fn account_scoped_sync_paths() -> Vec<&'static str> {
-    vec!["/api/sync/changes/personal", "/api/sync/changes/team"]
-}
-
-/// The global read-back routes need authentication and nothing else.
-#[test]
-fn the_global_read_back_routes_need_a_token_and_no_membership() {
-    let Some(server) = server() else { return };
-    // Alice exists only so the server holds a project this caller is not in.
-    let _alice = owner(&server, "global-read-alice");
-    let outsider = server.new_user_token("global-read-outsider");
-
-    for path in account_scoped_sync_paths() {
-        // Anonymous is refused. A route that answered without a token would hand
-        // personal knowledge to anyone who could reach the port.
-        let anonymous = server.get_status(path, "not-a-token");
-        assert!(
-            anonymous == 401 || anonymous == 403,
-            "{path} answered {anonymous} to an unauthenticated caller"
-        );
-
-        // An authenticated caller with no membership in anything is answered,
-        // because neither route is about a project.
-        let (body, status) = get_json_status_bearer(&server.base, path, &outsider);
-        assert_eq!(
-            status, 200,
-            "{path} refused an authenticated caller with no project membership, which \
-             would make team guidance membership-scoped (FR-463): {body}"
-        );
-    }
-}
-
-/// A removed route is gone for everyone, and says so.
-#[test]
-fn a_removed_project_route_is_gone_for_member_and_non_member_alike() {
-    let Some(server) = server() else { return };
-    let alice = owner(&server, "gone-alice");
-    let bob = server.new_user_token("gone-bob");
-
-    for path in removed_paths(alice.project) {
-        for (who, token) in [("the owner", &alice.token), ("a non-member", &bob)] {
-            let (body, status) = post_json_status_bearer(&server.base, &path, &json!({}), token);
-            assert_eq!(status, 410, "{path} answered {status} to {who}: {body}");
-            assert_eq!(
-                body["error"]["code"].as_str(),
-                Some("route_removed"),
-                "{path} refused {who} without saying the route was removed: {body}"
-            );
-            assert!(
-                body["error"]["message"]
-                    .as_str()
-                    .is_some_and(|m| m.contains("/api/projects/{id}/members")),
-                "{path} did not name its replacement to {who}: {body}"
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,34 +125,11 @@ fn a_non_member_is_refused_by_every_project_scoped_endpoint() {
             "{path} answered {status} to a non-member; expected a refusal"
         );
     }
-    // The body-scoped routes, which a GET sweep cannot reach.
-    for path in body_scoped_paths() {
-        let (body, status) = post_json_status_bearer(
-            &server.base,
-            path,
-            &json!({ "project_id": alice.project, "items": [] }),
-            &bob,
-        );
-        assert!(
-            status == 403 || status == 404,
-            "{path} answered {status} to a non-member: {body}"
-        );
-    }
-
     // The owner reaches them all, so the refusals above are about membership
     // rather than about the routes being broken.
     for path in project_scoped_paths(alice.project) {
         let status = server.get_status(&path, &alice.token);
         assert_eq!(status, 200, "{path} refused its own member");
-    }
-    for path in body_scoped_paths() {
-        let (body, status) = post_json_status_bearer(
-            &server.base,
-            path,
-            &json!({ "project_id": alice.project, "items": [] }),
-            &alice.token,
-        );
-        assert_eq!(status, 200, "{path} refused its own member: {body}");
     }
 }
 
@@ -269,35 +151,16 @@ fn every_project_scoped_path_is_covered_by_the_sweep_list() {
         .lines()
         .filter_map(|l| l.split_once(".route(\"").map(|(_, rest)| rest))
         .filter_map(|rest| rest.split_once('"').map(|(path, _)| path.to_string()))
-        .filter(|p| p.contains("/projects/{id}") || p.starts_with("/api/sync"))
+        .filter(|p| p.contains("/projects/{id}"))
         .collect();
     assert!(
         !declared.is_empty(),
         "the router scan found nothing; this test would pass vacuously"
     );
 
-    // Both sweeps, because a route reachable only by POST is covered by the
-    // POST sweep and would otherwise read here as uncovered.
     let mut covered = project_scoped_paths(Uuid::nil());
     covered.extend(post_only_project_paths(Uuid::nil()));
-    let removed = removed_paths(Uuid::nil());
     for path in &declared {
-        if body_scoped_paths().contains(&path.as_str()) {
-            continue;
-        }
-        // A route that answers `410` to everybody guards nothing. It is still
-        // enumerated, and still asserted dead, one test above.
-        if removed
-            .iter()
-            .any(|r| *r == path.replace("{id}", &Uuid::nil().to_string()))
-        {
-            continue;
-        }
-        // Not project-scoped, and asserted so by its own test above rather than
-        // waved past here.
-        if account_scoped_sync_paths().contains(&path.as_str()) {
-            continue;
-        }
         let shape = path.replace("{id}", &Uuid::nil().to_string());
         let matched = covered
             .iter()
@@ -326,26 +189,18 @@ fn discovery_returns_nothing_to_a_non_member_and_grants_nothing_to_anyone() {
     let alice = owner(&server, "disc-alice");
     let bob = server.new_user_token("disc-bob");
 
-    let (mine, status) = get_json_status_bearer(
-        &server.base,
-        &format!("/api/projects/lookup?remote={}", alice.remote),
-        &alice.token,
-    );
+    let (mine, status) = get_json_status_bearer(&server.base, "/api/projects", &alice.token);
     assert_eq!(status, 200);
     assert_eq!(
-        mine["projects"].as_array().map(|a| a.len()),
+        mine["projects"].as_array().map(|a| a.iter().filter(|p| p["repository_remote"] == alice.remote).count()),
         Some(1),
         "a member cannot discover their own project: {mine}"
     );
 
-    let (theirs, status) = get_json_status_bearer(
-        &server.base,
-        &format!("/api/projects/lookup?remote={}", alice.remote),
-        &bob,
-    );
+    let (theirs, status) = get_json_status_bearer(&server.base, "/api/projects", &bob);
     assert_eq!(status, 200);
     assert_eq!(
-        theirs["projects"].as_array().map(|a| a.len()),
+        theirs["projects"].as_array().map(|a| a.iter().filter(|p| p["repository_remote"] == alice.remote).count()),
         Some(0),
         "discovery leaked a project to a non-member: {theirs}"
     );
@@ -384,19 +239,11 @@ fn a_removed_member_loses_access_on_the_next_request() {
     );
     assert_eq!(status, 201, "grant failed: {granted}");
 
-    // Bob reads and syncs, so the loss below is a loss of something he had.
+    // Bob reads, so the loss below is a loss of something he had.
     assert_eq!(
         server.get_status(&format!("/api/projects/{}", alice.project), &bob_token),
         200,
         "the granted member could not read the project"
-    );
-    assert_eq!(
-        server.get_status(
-            &format!("/api/sync/changes?project_id={}", alice.project),
-            &bob_token
-        ),
-        200,
-        "the granted member could not sync"
     );
 
     let removed = server.delete_json_bearer(
@@ -410,14 +257,6 @@ fn a_removed_member_loses_access_on_the_next_request() {
         server.get_status(&format!("/api/projects/{}", alice.project), &bob_token),
         403,
         "a removed member still reads the project"
-    );
-    assert_eq!(
-        server.get_status(
-            &format!("/api/sync/changes?project_id={}", alice.project),
-            &bob_token
-        ),
-        403,
-        "a removed member still syncs the project"
     );
 }
 

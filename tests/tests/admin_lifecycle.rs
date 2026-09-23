@@ -528,15 +528,36 @@ fn a_restart_restores_the_environment_account_from_corrupted_state() {
         1,
         "a restart did not restore the environment account's authority (FR-539)"
     );
-    // And it does not owe a password change, which would be an unbreakable loop:
-    // the environment re-applies the password on every start, so a forced change
-    // would be reverted by the next restart (FR-540).
+    // Role recovery does not manufacture a forced password change.
     assert_eq!(
         restarted.count(&format!(
             "SELECT count(*) FROM users WHERE email = '{ADMIN_EMAIL}' AND must_change_password"
         )),
         0,
         "the environment account owes a password change it can never satisfy"
+    );
+}
+
+#[test]
+fn restart_preserves_a_password_changed_in_web() {
+    let Some(mut server) = server() else { return };
+    let changed = "web-changed-password-1";
+    let session = server.cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD);
+    let (_, status) = server.post_with_cookie(
+        "/api/auth/password",
+        &json!({ "new_password": changed }),
+        &session,
+    );
+    assert_eq!(status, 200, "web password change refused");
+
+    let restarted = server.restarted_with_admin(ADMIN_EMAIL, ADMIN_PASSWORD);
+    assert!(
+        restarted.cookie_for_password(ADMIN_EMAIL, changed).contains("session="),
+        "web-changed password no longer authenticates after restart"
+    );
+    assert!(
+        restarted.try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD).is_none(),
+        "restart restored environment password over web change"
     );
 }
 
@@ -738,7 +759,7 @@ fn t055_role_backfill_lives_with_the_migration_it_tests() {
 /// A documentation task that writes the sentence cannot verify that — it is
 /// satisfied the moment the sentence exists, whether or not the sentence says
 /// anything. So this asserts both halves separately: the **mechanism** (the
-/// environment-named account, restored on every start) and the **reason** (whoever
+/// environment-named account, created only when no administrator exists) and the **reason** (whoever
 /// controls the host controls the environment). Either alone leaves the reader
 /// with half an answer, and the half they are missing is the one that tells them
 /// whether it matters for their deployment.
@@ -765,17 +786,13 @@ fn the_shipped_documentation_states_who_can_obtain_administrator_access_and_why(
              administrator (FR-543)"
         );
         assert!(
-            lowered.contains("every start")
-                || lowered.contains("on start")
-                || lowered.contains("restart"),
-            "{name} does not say that the environment-named account is restored when \
-             the server starts, which is the whole mechanism"
+            lowered.contains("no administrator") || lowered.contains("administrator exists"),
+            "{name} does not say that environment bootstrap is limited to deployments \
+             with no administrator"
         );
         assert!(
             lowered.contains("admin") && lowered.contains("active"),
-            "{name} does not say what the account is restored *to* — both its role \
-             and its status matter, since a restored admin that stayed disabled \
-             would not be a break-glass path at all"
+            "{name} does not say what bootstrap creates — both its role and status matter"
         );
 
         // The reason.

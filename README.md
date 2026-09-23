@@ -413,21 +413,18 @@ cairn user reset-password dev@example.com
 no route reads it back, not even for the administrator who created the account.
 If it is lost, reset it.
 
-**If your users relied on registering or joining themselves**, those two routes
-now answer `410 Gone` and name their replacement in the response body. The
-operator does the work instead:
+**If your users relied on registering or joining themselves**, those routes are
+absent (`404`). An administrator does the work instead:
 
 | A user who used to… | An administrator now runs |
 |---|---|
 | register an account | `cairn user create --email … --display-name …` (`POST /api/admin/users`) |
 | join a project by its identifier | `cairn project member add <project-id> <email>` (`POST /api/projects/{id}/members`) |
 
-A project-discovery lookup returns only projects the caller is already a member
-of, so discovery cannot be used to find something to join.
+`GET /api/projects` returns only projects the caller is already a member of.
 
 **Whoever can set the server's environment and restart the process can always
 obtain administrator access.** The account named by `CAIRN_ADMIN_EMAIL` is
-restored to `admin` and `active` on every start, which is the break-glass path
-for an operator who has locked themselves out. It cannot be demoted, disabled or
-reset through the API. See [SECURITY.md](SECURITY.md) for what that means for a
-deployment.
+created or promoted to `admin` and `active` only when no administrator exists;
+an existing administrator's password and role are not overwritten on restart.
+See [SECURITY.md](SECURITY.md) for deployment implications.
