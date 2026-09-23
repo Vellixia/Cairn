@@ -25,6 +25,8 @@ export interface GraphEdge { from: string; to: string; kind: string; depth: numb
 export interface ReplayResponse { events: ReplayEvent[]; limit: number; read_only: true; content_available: false; }
 export interface ReplayEvent { event_id: string; session_id: string; kind: string; accepted_at: string; }
 export interface Analytics { capture: number; consolidation: number; retrieval: number; delivery: number; failures: number; latency: { count: number; average_ms: number }; derived_from_existing_records: true; }
+export interface MemoryMutation { id?: string; applied?: "accepted" | "duplicate"; }
+export interface RelationMutation { from: string; to: string; kind: string; applied?: "duplicate"; }
 
 export interface Release {
   tag: string;

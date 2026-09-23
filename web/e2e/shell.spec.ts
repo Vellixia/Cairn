@@ -102,7 +102,7 @@ test("compact navigation reaches project workflows and global governance", async
 
   await openNav(page, testInfo);
   await page.getByTestId("nav-projects").click();
-  await page.getByText("UI Fixture").first().click();
+  await page.getByTestId("settings-projects").getByText("UI Fixture").first().click();
 
   for (const [testid, heading] of [
     ["nav-overview", "UI Fixture"],
@@ -127,6 +127,13 @@ test("administrator sees Settings in global navigation", async ({ page }, testIn
   await signIn(page, admin);
   await openNav(page, testInfo);
   await expect(page.getByTestId("nav-settings")).toBeVisible();
+});
+
+test("governance keeps member reads and administrator transitions separate", async ({ page }) => {
+  await signIn(page, admin);
+  await page.goto("/governance");
+  await expect(page.getByTestId("team-list")).toBeVisible();
+  await expect(page.getByTestId("team-more")).toHaveCount(0);
 });
 
 test("the mobile sidebar opens as a sheet", async ({ page }, testInfo) => {
@@ -184,4 +191,34 @@ test("memory search filters, and clears back to everything", async ({
 
   await page.getByRole("button", { name: "Clear search" }).click();
   await expect(page.getByTestId("memory-content").first()).toBeVisible();
+});
+
+test("memory detail keeps evidence, graph, and canonical mutations together", async ({ page }) => {
+  await signIn(page, fixture);
+  await page.goto(`/projects/${fixture.projectId}/memory`);
+  await page.getByTestId("memory-content").first().click();
+  await expect(page.getByTestId("memory-detail")).toBeVisible();
+  await expect(page.getByTestId("evidence-local-notice")).toBeVisible();
+  await expect(page.getByTestId("memory-graph")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reinforce" })).toBeVisible();
+  await expect(page.getByLabel("Replacement memory")).toBeVisible();
+  await expect(page.getByLabel("Related memory ID")).toBeVisible();
+});
+
+test("sessions retain handoff and accepted-event replay", async ({ page }) => {
+  await signIn(page, fixture);
+  await page.goto(`/projects/${fixture.projectId}/sessions`);
+  await expect(page.getByTestId("accepted-event-replay")).toBeVisible();
+  await page.getByTestId("session-list").getByRole("listitem").first().click();
+  await expect(page.getByTestId("handoff")).toBeVisible();
+});
+
+test("settings exposes password and member controls without user enumeration", async ({ page }) => {
+  await signIn(page, fixture);
+  await page.goto("/settings");
+  await expect(page.getByLabel("New password")).toBeVisible();
+  await page.getByText("UI Fixture").first().click();
+  await expect(page.getByTestId("project-members")).toBeVisible();
+  await expect(page.getByLabel("Member user ID")).toBeVisible();
+  await expect(page.getByTestId("account-table")).toHaveCount(0);
 });

@@ -57,6 +57,8 @@ type ProjectMembersResponse = Contract.ProjectMembersResponse;
 type GraphResponse = Contract.GraphResponse;
 type ReplayResponse = Contract.ReplayResponse;
 type Analytics = Contract.Analytics;
+type MemoryMutation = Contract.MemoryMutation;
+type RelationMutation = Contract.RelationMutation;
 
 declare global {
   interface Window {
@@ -219,10 +221,11 @@ export const api = {
   graph: (projectId: string, memoryId: string, hops = 1) => request<GraphResponse>(`/api/projects/${projectId}/graph${queryString({ memory_id: memoryId, hops })}`),
   replay: (projectId: string) => request<ReplayResponse>(`/api/projects/${projectId}/replay`),
   analytics: (projectId: string) => request<Analytics>(`/api/projects/${projectId}/analytics`),
-  reinforceMemory: (id: string) => request(`/api/memories/${id}/reinforce`, { method: "POST", body: JSON.stringify({}) }),
-  pinMemory: (id: string, pinned: boolean) => request(`/api/memories/${id}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }),
-  forgetMemory: (id: string) => request(`/api/memories/${id}/forget`, { method: "POST", body: JSON.stringify({}) }),
-  relateMemory: (projectId: string, from: string, to: string, kind: string) => request(`/api/projects/${projectId}/memory-relations`, { method: "POST", body: JSON.stringify({ from_memory_id: from, to_memory_id: to, kind }) }),
+  reinforceMemory: (id: string) => request<MemoryMutation>(`/api/memories/${id}/reinforce`, { method: "POST", body: JSON.stringify({}) }),
+  pinMemory: (id: string, pinned: boolean) => request<MemoryMutation>(`/api/memories/${id}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }),
+  forgetMemory: (id: string) => request<MemoryMutation>(`/api/memories/${id}/forget`, { method: "POST", body: JSON.stringify({}) }),
+  supersedeMemory: (id: string, content: string) => request<MemoryMutation>(`/api/memories/${id}/supersede`, { method: "POST", body: JSON.stringify({ type: "fact", scope: "project", content }) }),
+  relateMemory: (projectId: string, from: string, to: string, kind: string) => request<RelationMutation>(`/api/projects/${projectId}/memory-relations`, { method: "POST", body: JSON.stringify({ from_memory_id: from, to_memory_id: to, kind }) }),
   // ---------------------------------------------------------------------
   // The web control plane (contracts/web-control-plane.md)
   //
