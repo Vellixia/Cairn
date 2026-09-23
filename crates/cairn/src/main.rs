@@ -10,6 +10,9 @@ use cairn_core::wire::{codes, Request, WireError};
 #[cfg(test)]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
+use std::path::Path;
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(
@@ -89,8 +92,151 @@ fn cwd() -> String {
 }
 
 async fn setup() -> Result<serde_json::Value, WireError> {
+    if let Some(credentials) = headless_credentials()? {
+        let account_id = authenticated_account(&credentials).await?;
+        if let Some(expected) = credentials.account_id {
+            if expected != account_id {
+                return Err(WireError::new(
+                    codes::UNAUTHORIZED,
+                    "credential account mismatch",
+                ));
+            }
+        }
+        persist_credentials(&credentials, account_id).map_err(|error| {
+            WireError::new(
+                codes::STORAGE_UNAVAILABLE,
+                format!("could not save credentials: {error}"),
+            )
+        })?;
+    }
     let value = client::send(&Request::Init { cwd: cwd() }).await?;
     Ok(value)
+}
+
+struct HeadlessCredentials {
+    url: String,
+    token: String,
+    account_id: Option<Uuid>,
+}
+
+fn headless_credentials() -> Result<Option<HeadlessCredentials>, WireError> {
+    let url = std::env::var("CAIRN_SERVER_URL").ok();
+    let token = std::env::var("CAIRN_SERVER_TOKEN").ok();
+    let account_id = std::env::var("CAIRN_ACCOUNT_ID").ok();
+    if url.is_some() || token.is_some() || account_id.is_some() {
+        return parse_credentials(url, token, account_id);
+    }
+    if std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+        .map_err(|error| WireError::invalid(format!("could not read setup input: {error}")))?;
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    let value: serde_json::Value = serde_json::from_str(&input)
+        .map_err(|_| WireError::invalid("setup input must be JSON credentials"))?;
+    parse_credentials(
+        value
+            .get("server_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        value
+            .get("server_token")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        value
+            .get("account_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    )
+}
+
+fn parse_credentials(
+    url: Option<String>,
+    token: Option<String>,
+    account_id: Option<String>,
+) -> Result<Option<HeadlessCredentials>, WireError> {
+    let (Some(url), Some(token)) = (url, token) else {
+        return Err(WireError::invalid("setup needs both server URL and token"));
+    };
+    if url.trim().is_empty() || token.trim().is_empty() {
+        return Err(WireError::invalid("setup needs both server URL and token"));
+    }
+    let account_id = account_id
+        .filter(|id| !id.is_empty())
+        .map(|id| Uuid::parse_str(&id).map_err(|_| WireError::invalid("invalid account id")))
+        .transpose()?;
+    Ok(Some(HeadlessCredentials {
+        url,
+        token,
+        account_id,
+    }))
+}
+
+async fn authenticated_account(credentials: &HeadlessCredentials) -> Result<Uuid, WireError> {
+    let base = credentials.url.trim_end_matches('/');
+    let response = reqwest::Client::new()
+        .get(format!("{base}/api/auth/me"))
+        .bearer_auth(&credentials.token)
+        .send()
+        .await
+        .map_err(|_| {
+            WireError::new(
+                codes::SERVER_UNAVAILABLE,
+                "could not verify server credential",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(WireError::new(
+            codes::UNAUTHORIZED,
+            "server rejected credential",
+        ));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| WireError::new(codes::SERVER_UNAVAILABLE, "invalid credential response"))?;
+    body.get("id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(|| WireError::new(codes::SERVER_UNAVAILABLE, "invalid credential response"))
+}
+
+fn persist_credentials(credentials: &HeadlessCredentials, account_id: Uuid) -> std::io::Result<()> {
+    cairn_core::paths::ensure_home()?;
+    persist_credentials_at(
+        credentials,
+        account_id,
+        &cairn_core::paths::config_path(),
+        &cairn_core::paths::token_path(),
+    )
+}
+
+fn persist_credentials_at(
+    credentials: &HeadlessCredentials,
+    account_id: Uuid,
+    config_path: &Path,
+    token_path: &Path,
+) -> std::io::Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut config = cairn_core::CairnConfig::load_from(config_path).unwrap_or_default();
+    config.server_url = Some(credentials.url.trim_end_matches('/').to_owned());
+    config.server_account_id = Some(account_id);
+    config.save_to(config_path)?;
+    std::fs::write(token_path, &credentials.token)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(token_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 fn render_setup_success(value: &serde_json::Value, json: bool) -> String {
@@ -139,6 +285,9 @@ fn exit_code(error: &WireError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn public_surface_exposes_only_setup() {
@@ -175,6 +324,64 @@ mod tests {
             normalize_help(&Cli::command().render_help().to_string()),
             normalize_help(include_str!("../tests/snapshots/default-help.txt")),
         );
+    }
+
+    #[test]
+    fn headless_credentials_require_complete_pair() {
+        assert!(parse_credentials(Some("https://server".into()), None, None).is_err());
+        assert!(parse_credentials(None, Some("secret".into()), None).is_err());
+    }
+
+    #[test]
+    fn credential_persistence_is_idempotent_and_keeps_token_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = HeadlessCredentials {
+            url: "https://server/".into(),
+            token: "secret".into(),
+            account_id: None,
+        };
+        let account = Uuid::now_v7();
+        let config = dir.path().join("config.json");
+        let token = dir.path().join("token");
+        persist_credentials_at(&credentials, account, &config, &token).unwrap();
+        persist_credentials_at(&credentials, account, &config, &token).unwrap();
+        let saved = cairn_core::CairnConfig::load_from(&config).unwrap();
+        assert_eq!(saved.server_url.as_deref(), Some("https://server"));
+        assert_eq!(saved.server_account_id, Some(account));
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "secret");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&token).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_credential_uses_authenticated_account() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let account = Uuid::now_v7();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /api/auth/me"));
+            assert!(request.contains("authorization: Bearer secret"));
+            let body = format!(r#"{{"id":"{account}"}}"#);
+            socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let credentials = HeadlessCredentials {
+            url: format!("http://{address}"),
+            token: "secret".into(),
+            account_id: None,
+        };
+        assert_eq!(authenticated_account(&credentials).await.unwrap(), account);
     }
 
     fn normalize_help(help: &str) -> String {

@@ -190,7 +190,9 @@ fn outcome(code: Option<&str>) -> Outcome {
         {
             Outcome::Deferred
         }
-        Some("server_error" | "storage_unavailable") | None => Outcome::Transient,
+        Some(codes::SERVER_UNAVAILABLE | "server_error" | "storage_unavailable") | None => {
+            Outcome::Transient
+        }
         Some(_) => Outcome::Refused,
     }
 }
@@ -364,8 +366,45 @@ mod tests {
         for terminal in ["invalid", "unauthorized", "forbidden"] {
             assert_eq!(outcome(Some(terminal)), Outcome::Refused);
         }
-        for retryable in [None, Some("server_error"), Some("storage_unavailable")] {
+        for retryable in [
+            None,
+            Some(codes::SERVER_UNAVAILABLE),
+            Some("server_error"),
+            Some("storage_unavailable"),
+        ] {
             assert_eq!(outcome(retryable), Outcome::Transient);
+        }
+    }
+
+    #[tokio::test]
+    async fn event_transport_retries_5xx_and_refuses_4xx() {
+        for (status, body, expected) in [
+            ("500 Internal Server Error", "{}", Outcome::Transient),
+            (
+                "400 Bad Request",
+                r#"{"error":{"code":"invalid"}}"#,
+                Outcome::Refused,
+            ),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let client = Client::new(Some(&format!("http://{address}")), Some("token")).unwrap();
+            let error = client
+                .post("/api/events/batch", &serde_json::json!({}))
+                .await
+                .unwrap_err();
+            assert_eq!(outcome(Some(&error.code)), expected);
         }
     }
 
