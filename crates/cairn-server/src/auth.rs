@@ -345,7 +345,9 @@ pub async fn ensure_admin(
         sqlx::query("SELECT pg_advisory_xact_lock(4770040003)")
             .execute(&mut *tx)
             .await?;
-        if let Some(id) = sqlx::query_scalar("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
+        if let Some(id) = sqlx::query_scalar(
+            "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
+        )
             .fetch_optional(&mut *tx)
             .await?
         {
@@ -388,7 +390,9 @@ pub async fn ensure_admin(
 
     let result = match id {
         Some(id) => Ok((id, AdminOutcome::Created)),
-        None if standing_columns => sqlx::query_scalar("SELECT id FROM users WHERE role = 'admin' LIMIT 1")
+        None if standing_columns => sqlx::query_scalar(
+            "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
+        )
             .fetch_one(&mut *tx)
             .await
             .map(|id| (id, AdminOutcome::Existing))

@@ -506,14 +506,23 @@ fn the_environment_account_refuses_demotion_and_names_the_setting() {
 #[test]
 fn a_restart_restores_the_environment_account_from_corrupted_state() {
     let Some(mut server) = server() else { return };
+    let changed = "web-changed-before-recovery";
+    let session = server.cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD);
+    assert_eq!(
+        server
+            .post_with_cookie("/api/auth/password", &json!({ "new_password": changed }), &session)
+            .1,
+        200,
+        "web password change refused"
+    );
     // Corrupt it the way only direct database access can — no API permits this,
     // which is exactly why the recovery path exists.
     server.execute(&format!(
-        "UPDATE users SET role = 'member', status = 'disabled' WHERE email = '{ADMIN_EMAIL}'"
+        "UPDATE users SET role = 'admin', status = 'disabled' WHERE email = '{ADMIN_EMAIL}'"
     ));
     assert_eq!(
         server.count(&format!(
-            "SELECT count(*) FROM users WHERE email = '{ADMIN_EMAIL}' AND role = 'admin'"
+            "SELECT count(*) FROM users WHERE email = '{ADMIN_EMAIL}' AND role = 'admin' AND status = 'active'"
         )),
         0,
         "the corruption did not take, so the recovery below proves nothing"
@@ -528,6 +537,8 @@ fn a_restart_restores_the_environment_account_from_corrupted_state() {
         1,
         "a restart did not restore the environment account's authority (FR-539)"
     );
+    assert!(restarted.try_cookie_for_password(ADMIN_EMAIL, changed).is_some());
+    assert!(restarted.try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD).is_none());
     // Role recovery does not manufacture a forced password change.
     assert_eq!(
         restarted.count(&format!(
