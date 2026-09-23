@@ -479,9 +479,6 @@ async fn reload_server_credentials(d: &Daemon) {
 }
 
 async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project, WireError> {
-    if project.server_project_id.is_some() {
-        return Ok(project.clone());
-    }
     let remote = project.repository_remote.as_deref().ok_or_else(|| {
         WireError::new(
             codes::NOT_LINKED,
@@ -518,6 +515,15 @@ async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project,
         .ok_or_else(|| {
             WireError::new(codes::SERVER_UNAVAILABLE, "invalid project lookup response")
         })?;
+    if let Some(existing) = project.server_project_id {
+        if existing != server_project_id {
+            return Err(WireError::new(
+                codes::NOT_LINKED,
+                "server project no longer matches this local binding",
+            ));
+        }
+        return Ok(project.clone());
+    }
     repo::bind_server_project(&d.store, project.id, server_project_id)
         .await
         .map_err(storage_err)?;
@@ -1407,6 +1413,20 @@ mod tests {
     use crate::testsupport as fx;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    async fn lookup_server(project_id: Uuid) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).contains("authorization: Bearer reloaded-token"));
+            let body = format!(r#"{{"projects":[{{"id":"{project_id}"}}]}}"#);
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        format!("http://{address}")
+    }
+
     #[tokio::test]
     async fn latest_handoff_never_reads_sqlite_when_server_is_unavailable() {
         let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
@@ -1446,26 +1466,23 @@ mod tests {
         let old_config = std::fs::read(&config_path).ok();
         let old_token = std::fs::read(&token_path).ok();
         let account = Uuid::now_v7();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
         let server_project_id = Uuid::now_v7();
         let mut config = cairn_core::CairnConfig::default();
-        config.server_url = Some(format!("http://{address}"));
+        config.server_url = Some(lookup_server(server_project_id).await);
         config.server_account_id = Some(account);
         config.save().unwrap();
         std::fs::write(&token_path, "reloaded-token").unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 1024];
-            let read = socket.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.contains("authorization: Bearer reloaded-token"));
-            let body = format!(r#"{{"projects":[{{"id":"{server_project_id}"}}]}}"#);
-            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-        });
         let value = init(&repo.daemon, &repo.cwd).await.unwrap();
         assert_eq!(value["project"]["server_project_id"], server_project_id.to_string());
         assert_eq!(repo.daemon.server.read().await.account_id, Some(account));
+        config.server_url = Some(lookup_server(Uuid::now_v7()).await);
+        config.save().unwrap();
+        let error = init(&repo.daemon, &repo.cwd).await.unwrap_err();
+        assert_eq!(error.code, codes::NOT_LINKED);
+        assert_eq!(repo.daemon.resolve(&repo.cwd).await.unwrap().project.server_project_id, Some(server_project_id));
+        config.server_url = Some(lookup_server(server_project_id).await);
+        config.save().unwrap();
+        assert!(init(&repo.daemon, &repo.cwd).await.is_ok());
         match old_config {
             Some(value) => std::fs::write(&config_path, value).unwrap(),
             None => { let _ = std::fs::remove_file(&config_path); }
