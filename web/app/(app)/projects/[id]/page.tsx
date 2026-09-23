@@ -35,6 +35,7 @@ export default function ProjectOverviewPage({
     queryKey: ["integration-health", id, "overview"],
     queryFn: () => api.integrationHealth(id),
   });
+  const analytics = useQuery({ queryKey: ["analytics", id], queryFn: () => api.analytics(id) });
   // The header renders before the data does. Returning early instead made the
   // whole page swap out and jump once the request landed.
   const project = overview.data?.project;
@@ -148,16 +149,10 @@ export default function ProjectOverviewPage({
               />
             </OverviewPanel>
             <OverviewPanel id="retrieval" title="Retrieval" testId="overview-retrieval">
-              <SummaryRows
-                empty="No retrievals yet."
-                rows={retrievals.data?.traces.map((trace) => `${trace.trigger} · ${trace.delivery_state}`)}
-              />
+              <SummaryRows empty="No retrievals yet." rows={analytics.data ? [`${analytics.data.delivery} delivered of ${analytics.data.retrieval}`, `${analytics.data.failures} failed`, analytics.data.latency.count ? `${Math.round(analytics.data.latency.average_ms)}ms average` : "No latency reports"] : retrievals.data?.traces.map((trace) => `${trace.trigger} · ${trace.delivery_state}`)} />
             </OverviewPanel>
             <OverviewPanel id="agents" title="Agent health" testId="overview-agent-health">
-              <SummaryRows
-                empty="No agent health reported."
-                rows={health.data?.rows.slice(0, 5).map((row) => `${row.agent} · ${row.capability} · ${row.status}`)}
-              />
+              <SummaryRows empty="No installation report yet; current health is unknown." rows={health.data?.rows.slice(0, 5).map((row) => `${row.agent} · ${row.capability} · ${row.observed_at ? `reported ${formatDate(row.observed_at)}` : "never reported"}${row.observed_at && Date.now() - new Date(row.observed_at).getTime() > 7 * 86400000 ? " · stale" : ""}`)} />
             </OverviewPanel>
           </div>
         </>

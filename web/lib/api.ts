@@ -52,6 +52,11 @@ type MemoryDetailResponse = Contract.MemoryDetailResponse;
 type HealthRowsResponse = Contract.HealthRowsResponse;
 type UsersResponse = Contract.UsersResponse;
 type ResetPasswordResponse = Contract.ResetPasswordResponse;
+type ChangedPassword = Contract.ChangedPassword;
+type ProjectMembersResponse = Contract.ProjectMembersResponse;
+type GraphResponse = Contract.GraphResponse;
+type ReplayResponse = Contract.ReplayResponse;
+type Analytics = Contract.Analytics;
 
 declare global {
   interface Window {
@@ -155,6 +160,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => request<OkResponse>("/api/auth/logout", { method: "POST" }),
+  changePassword: (newPassword: string) => request<ChangedPassword>("/api/auth/password", { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
 
   /** Personal API tokens: the credential `cairnd` carries (D10). */
   tokens: () => request<TokensResponse>("/api/tokens"),
@@ -174,6 +180,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
   project: (id: string) => request<ProjectOverview>(`/api/projects/${id}`),
+  members: (id: string) => request<ProjectMembersResponse>(`/api/projects/${id}/members`),
+  addMember: (id: string, userId: string) => request(`/api/projects/${id}/members`, { method: "POST", body: JSON.stringify({ user_id: userId }) }),
+  removeMember: (id: string, userId: string) => request(`/api/projects/${id}/members`, { method: "DELETE", body: JSON.stringify({ user_id: userId }) }),
   sessions: (id: string) =>
     request<SessionsResponse>(`/api/projects/${id}/sessions`),
   handoff: (sessionId: string) =>
@@ -207,6 +216,13 @@ export const api = {
     request<DeletedResponse>(`/api/memories/${memoryId}`, {
       method: "DELETE",
     }),
+  graph: (projectId: string, memoryId: string, hops = 1) => request<GraphResponse>(`/api/projects/${projectId}/graph${queryString({ memory_id: memoryId, hops })}`),
+  replay: (projectId: string) => request<ReplayResponse>(`/api/projects/${projectId}/replay`),
+  analytics: (projectId: string) => request<Analytics>(`/api/projects/${projectId}/analytics`),
+  reinforceMemory: (id: string) => request(`/api/memories/${id}/reinforce`, { method: "POST", body: JSON.stringify({}) }),
+  pinMemory: (id: string, pinned: boolean) => request(`/api/memories/${id}/pin`, { method: "POST", body: JSON.stringify({ pinned }) }),
+  forgetMemory: (id: string) => request(`/api/memories/${id}/forget`, { method: "POST", body: JSON.stringify({}) }),
+  relateMemory: (projectId: string, from: string, to: string, kind: string) => request(`/api/projects/${projectId}/memory-relations`, { method: "POST", body: JSON.stringify({ from_memory_id: from, to_memory_id: to, kind }) }),
   // ---------------------------------------------------------------------
   // The web control plane (contracts/web-control-plane.md)
   //

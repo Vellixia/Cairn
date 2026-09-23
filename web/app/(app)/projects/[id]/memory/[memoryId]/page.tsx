@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { use } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Pin, ShieldCheck } from "lucide-react";
 import { api, type MemoryDetail } from "@/lib/api";
 import {
@@ -23,10 +23,16 @@ export default function MemoryDetailPage({
   params: Promise<{ id: string; memoryId: string }>;
 }) {
   const { id, memoryId } = use(params);
+  const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: ["memory", memoryId],
     queryFn: () => api.memory(memoryId),
   });
+  const graph = useQuery({ queryKey: ["graph", id, memoryId], queryFn: () => api.graph(id, memoryId, 2) });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["memory", memoryId] });
+  const reinforce = useMutation({ mutationFn: () => api.reinforceMemory(memoryId), onSuccess: refresh });
+  const pin = useMutation({ mutationFn: () => api.pinMemory(memoryId, !memory?.pinned), onSuccess: refresh });
+  const forget = useMutation({ mutationFn: () => api.forgetMemory(memoryId), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["memories", id] }) });
 
   const memory = detail.data?.memory;
 
@@ -50,10 +56,12 @@ export default function MemoryDetailPage({
       {memory && (
         <div className="space-y-4" data-testid="memory-detail">
           <Content memory={memory} />
+          <Card><CardContent className="flex flex-wrap gap-2"><Button size="sm" onClick={() => reinforce.mutate()}>Reinforce</Button><Button size="sm" variant="outline" onClick={() => pin.mutate()}>{memory.pinned ? "Unpin" : "Pin"}</Button><Button size="sm" variant="destructive" onClick={() => forget.mutate()}>Forget</Button></CardContent></Card>
           <Provenance memory={memory} projectId={id} />
           <Evidence memory={memory} />
           <Verification memory={memory} />
           <Relations memory={memory} projectId={id} />
+          <Card data-testid="memory-graph"><CardHeader><CardTitle className="text-sm font-medium">Graph</CardTitle></CardHeader><CardContent>{graph.data?.edges.length ? <ul className="text-sm">{graph.data.edges.map((edge) => <li key={`${edge.from}-${edge.to}-${edge.kind}`}>{edge.kind} · {edge.depth} hop</li>)}</ul> : <p className="text-muted-foreground text-sm">No related memory.</p>}</CardContent></Card>
           <Usage memory={memory} projectId={id} />
         </div>
       )}

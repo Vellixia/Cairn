@@ -51,6 +51,7 @@ export default function MemoryPage({
   const { id } = use(params);
   const queryClient = useQueryClient();
   const [q, setQ] = useState("");
+  const [content, setContent] = useState("");
   const [domain, setDomain] = useState<"project" | "personal">("project");
   const [scope, setScope] = useState(ANY);
   const [type, setType] = useState(ANY);
@@ -90,6 +91,10 @@ export default function MemoryPage({
       queryClient.invalidateQueries({ queryKey: ["memories", id] });
     },
     onError: (err: Error) => toast.error(err.message),
+  });
+  const create = useMutation({
+    mutationFn: async () => { if (domain === "project") await api.createMemory(id, { type: "fact", scope: "project", content }); else await api.createPersonalKnowledge({ type: "fact", content }); },
+    onSuccess: () => { setContent(""); queryClient.invalidateQueries({ queryKey: domain === "project" ? ["memories", id] : ["personal-knowledge"] }); },
   });
 
   const filtered =
@@ -185,6 +190,10 @@ export default function MemoryPage({
           </SelectContent>
         </Select>
       </div>
+      <form className="mb-4 flex gap-2" onSubmit={(event) => { event.preventDefault(); if (content.trim()) create.mutate(); }}>
+        <Input value={content} onChange={(event) => setContent(event.target.value)} placeholder={`Add ${domain} memory`} aria-label="Memory content" />
+        <Button type="submit" disabled={create.isPending}>Add</Button>
+      </form>
 
       <div
         className="text-muted-foreground mb-4 flex min-h-6 items-center gap-3 text-xs"

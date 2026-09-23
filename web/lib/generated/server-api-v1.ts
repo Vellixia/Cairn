@@ -18,6 +18,14 @@ export interface MemoryDetailResponse { memory: MemoryDetail; }
 export interface HealthRowsResponse { rows: HealthRow[]; }
 export interface UsersResponse { users: Account[]; }
 export interface ResetPasswordResponse { id: string; temporary_password: string; }
+export interface ChangedPassword { changed: boolean; }
+export interface ProjectMembersResponse { members: ProjectMember[]; }
+export interface ProjectMember { user_id: string; email: string; display_name: string; added_by_user_id: string | null; created_at: string; }
+export interface GraphResponse { seed: string; hops: number; max_hops: number; max_edges: number; truncated: boolean; edges: GraphEdge[]; }
+export interface GraphEdge { from: string; to: string; kind: string; depth: number; }
+export interface ReplayResponse { events: ReplayEvent[]; limit: number; read_only: true; content_available: false; }
+export interface ReplayEvent { event_id: string; session_id: string; kind: string; accepted_at: string; }
+export interface Analytics { capture: number; consolidation: number; retrieval: number; delivery: number; failures: number; latency: { count: number; average_ms: number }; derived_from_existing_records: true; }
 
 export interface Release {
   tag: string;
