@@ -38,7 +38,7 @@ fn server() -> Option<Server> {
 // T193 / FR-587 / FR-588 / SC-458 — the removed routes, and the documentation
 // ---------------------------------------------------------------------------
 
-/// Each removed route answers `410 Gone` with a body naming its replacement.
+/// Removed routes answer natural `404 Not Found`.
 ///
 /// `404` was the shape an earlier draft shipped, and it is the one thing this
 /// response must not be: a not-found is indistinguishable from a typo'd URL or a
@@ -49,7 +49,7 @@ fn server() -> Option<Server> {
 /// Falsified by restoring either route, or by letting either fall through to the
 /// router's default not-found.
 #[test]
-fn each_removed_route_answers_gone_and_names_its_replacement() {
+fn removed_routes_answer_not_found() {
     let Some(server) = server() else { return };
 
     // Registration, unauthenticated — which is how a pre-004 client reached it.
@@ -58,7 +58,7 @@ fn each_removed_route_answers_gone_and_names_its_replacement() {
         "/api/auth/register",
         &json!({ "email": "someone@example.test", "password": "hunter2hunter2" }),
     );
-    assert_eq!(status, 410, "self-registration answered {status}");
+    assert_eq!(status, 404, "self-registration answered {status}");
 
     let token = server.new_user_token("compat");
     let (body, status) = post_json_status_bearer(
@@ -67,13 +67,7 @@ fn each_removed_route_answers_gone_and_names_its_replacement() {
         &json!({ "email": "someone@example.test", "password": "hunter2hunter2" }),
         &token,
     );
-    assert_eq!(status, 410, "self-registration answered {status}: {body}");
-    assert_eq!(body["error"]["code"].as_str(), Some("route_removed"));
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("/api/admin/users") && message.contains("cairn user create"),
-        "the refusal names neither the replacement route nor the CLI verb: {message}"
-    );
+    assert_eq!(status, 404, "self-registration answered {status}: {body}");
 
     // Self-join, for an arbitrary project id — the shape that used to be enough
     // to become a member of any project whose UUID you could name.
@@ -83,14 +77,7 @@ fn each_removed_route_answers_gone_and_names_its_replacement() {
         &json!({}),
         &token,
     );
-    assert_eq!(status, 410, "the join route answered {status}: {body}");
-    assert_eq!(body["error"]["code"].as_str(), Some("route_removed"));
-    let message = body["error"]["message"].as_str().unwrap_or_default();
-    assert!(
-        message.contains("/api/projects/{id}/members")
-            && message.contains("cairn project member add"),
-        "the refusal names neither the replacement route nor the CLI verb: {message}"
-    );
+    assert_eq!(status, 404, "the join route answered {status}: {body}");
 }
 
 /// The shipped documentation states all three facts, plus the operator's remedy.

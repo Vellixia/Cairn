@@ -289,6 +289,7 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     Created,
+    Promoted,
     Existing,
 }
 
@@ -296,6 +297,7 @@ impl AdminOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             AdminOutcome::Created => "created",
+            AdminOutcome::Promoted => "promoted",
             AdminOutcome::Existing => "existing",
         }
     }
@@ -349,6 +351,18 @@ pub async fn ensure_admin(
         {
             tx.commit().await?;
             return Ok((id, AdminOutcome::Existing));
+        }
+        if let Some(id) = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            sqlx::query("UPDATE users SET role = 'admin', status = 'active' WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok((id, AdminOutcome::Promoted));
         }
     }
 

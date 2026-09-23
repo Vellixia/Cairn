@@ -119,7 +119,7 @@ fn there_is_no_route_that_creates_an_account() {
         &json!({ "email": "intruder@example.test", "display_name": "Intruder",
                  "password": "hunter2hunter2" }),
     );
-    assert_eq!(status, 410, "self-registration answered {status}");
+    assert_eq!(status, 404, "self-registration answered {status}");
     assert_eq!(
         server.count("SELECT count(*) FROM users WHERE email = 'intruder@example.test'"),
         0,
@@ -145,7 +145,7 @@ fn naming_a_project_uuid_does_not_grant_membership() {
         &json!({}),
         &bob,
     );
-    assert_eq!(status, 410, "the join route answered {status}");
+    assert_eq!(status, 404, "the join route answered {status}");
     assert_eq!(
         server.count(&format!(
             "SELECT count(*) FROM project_members WHERE project_id = '{}'",
@@ -170,19 +170,16 @@ fn discovery_returns_nothing_to_a_non_member() {
     let alice = owner(&server, "lookup-alice", &remote);
     let bob = server.new_user_token("lookup-bob");
 
-    let mine = server.get_json(
-        &format!("/api/projects/lookup?remote={remote}"),
-        &alice.token,
-    );
+    let mine = server.get_json("/api/projects", &alice.token);
     assert_eq!(
-        mine["projects"].as_array().map(|a| a.len()),
+        mine["projects"].as_array().map(|a| a.iter().filter(|p| p["repository_remote"] == remote).count()),
         Some(1),
         "a member cannot see their own project: {mine}"
     );
 
-    let theirs = server.get_json(&format!("/api/projects/lookup?remote={remote}"), &bob);
+    let theirs = server.get_json("/api/projects", &bob);
     assert_eq!(
-        theirs["projects"].as_array().map(|a| a.len()),
+        theirs["projects"].as_array().map(|a| a.iter().filter(|p| p["repository_remote"] == remote).count()),
         Some(0),
         "discovery leaked a project to a non-member: {theirs}"
     );

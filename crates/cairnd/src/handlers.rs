@@ -1473,9 +1473,11 @@ mod tests {
         let old_token = std::fs::read(&token_path).ok();
         let account = Uuid::now_v7();
         let server_project_id = Uuid::now_v7();
-        let mut config = cairn_core::CairnConfig::default();
-        config.server_url = Some(lookup_server(server_project_id).await);
-        config.server_account_id = Some(account);
+        let mut config = cairn_core::CairnConfig {
+            server_url: Some(lookup_server(server_project_id).await),
+            server_account_id: Some(account),
+            ..Default::default()
+        };
         config.save().unwrap();
         std::fs::write(&token_path, "reloaded-token").unwrap();
         let value = init(&repo.daemon, &repo.cwd).await.unwrap();

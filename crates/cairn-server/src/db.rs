@@ -240,6 +240,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_removal_archive_rejects_a_conflicting_retry_before_dropping_live_rows() {
+        let sql = include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql");
+        assert!(sql.contains("archived_counts <> counts"));
+        assert!(sql.contains("archived_payload <> source_payload"));
+        assert!(sql.contains("RAISE EXCEPTION 'task archive conservation failed'"));
+        assert!(sql.find("RAISE EXCEPTION").unwrap() < sql.find("DELETE FROM memory_relations").unwrap());
+    }
+
+    #[test]
+    fn task_removal_archive_keeps_session_dependents_before_task_column_drop() {
+        let sql = include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql");
+        for table in [
+            "handoffs",
+            "safe_events",
+            "consolidation_session",
+            "consolidation_work",
+            "consolidation_runs",
+            "retrieval_traces",
+            "retrieval_trace_items",
+            "delivered_context",
+            "knowledge_candidates",
+            "candidate_source_events",
+        ] {
+            assert!(sql.contains(&format!("'{table}'")), "missing {table} archive");
+        }
+        assert!(sql.find("'handoffs'").unwrap() < sql.find("DROP COLUMN IF EXISTS task_id").unwrap());
+    }
+
     /// The server accepts exactly the relation kinds the local store writes.
     ///
     /// A kind missing from the server's CHECK is not a degraded feature: it is
