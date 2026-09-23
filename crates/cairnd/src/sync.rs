@@ -235,12 +235,14 @@ async fn drain_events(d: &Daemon, limit: i64) -> Result<(), WireError> {
     if rows.is_empty() {
         return Ok(());
     }
+    let mut included = Vec::new();
     let mut sessions = Vec::new();
-    for row in &rows {
+    for row in rows {
         let project = repo::project(&d.store, row.project_id)
             .await
             .map_err(storage_err)?;
         let Some(project_id) = project.server_project_id else {
+            settle_event(d, row.event_id, Outcome::Deferred, "project_not_linked").await?;
             continue;
         };
         let session = repo::session(&d.store, row.event.session_id)
@@ -253,17 +255,21 @@ async fn drain_events(d: &Daemon, limit: i64) -> Result<(), WireError> {
             "branch": session.branch,
             "commit_sha": session.commit_sha,
         }));
+        included.push(row);
+    }
+    if included.is_empty() {
+        return Ok(());
     }
     let body = serde_json::json!({
         "contract_version": cairn_core::event::CONTRACT_VERSION,
         "sessions": sessions,
-        "events": rows.iter().map(|row| &row.event).collect::<Vec<_>>(),
+        "events": included.iter().map(|row| &row.event).collect::<Vec<_>>(),
     });
     let response = match context.client.post("/api/events/batch", &body).await {
         Ok(response) => response,
         Err(error) => {
             let state = outcome(Some(&error.code));
-            for row in rows {
+            for row in included {
                 settle_event(d, row.event_id, state, &error.code).await?;
             }
             return Err(error);
@@ -274,7 +280,7 @@ async fn drain_events(d: &Daemon, limit: i64) -> Result<(), WireError> {
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    for row in rows {
+    for row in included {
         let found = results.iter().find(|value| {
             value.get("event_id").and_then(serde_json::Value::as_str)
                 == Some(&row.event_id.to_string())
@@ -345,6 +351,13 @@ enum ServerAnswer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::spool_safe_events;
+    use crate::state::ServerCredentials;
+    use crate::testsupport as fx;
+    use cairn_core::domain::new_id;
+    use cairn_core::event::{CaptureOutput, EventAgent, EventContent, EventKind, SafeEventDraft};
+    use cairn_store::repo::{self, StartSession};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn terminal_and_retryable_responses_share_typed_lane_rules() {
@@ -354,5 +367,110 @@ mod tests {
         for retryable in [None, Some("server_error"), Some("storage_unavailable")] {
             assert_eq!(outcome(retryable), Outcome::Transient);
         }
+    }
+
+    #[tokio::test]
+    async fn linked_events_do_not_post_or_refuse_unlinked_rows() {
+        let daemon = fx::daemon().await;
+        let account = Uuid::now_v7();
+        let linked = repo::ensure_project(&daemon.store, "/linked/.git", "linked", None)
+            .await
+            .unwrap();
+        let unlinked = repo::ensure_project(&daemon.store, "/unlinked/.git", "unlinked", None)
+            .await
+            .unwrap();
+        repo::bind_server_project(&daemon.store, linked.id, Uuid::now_v7())
+            .await
+            .unwrap();
+        let make_session = |project_id, key| StartSession {
+            project_id,
+            user_id: daemon.user_id,
+            agent: "codex",
+            agent_session_key: key,
+            branch: "main",
+            commit_sha: None,
+            worktree_path: "/fixture",
+            daemon_run_id: new_id(),
+        };
+        let linked_session = repo::start_session(&daemon.store, make_session(linked.id, "linked"))
+            .await
+            .unwrap();
+        let unlinked_session =
+            repo::start_session(&daemon.store, make_session(unlinked.id, "unlinked"))
+                .await
+                .unwrap();
+        let output = || {
+            CaptureOutput::default().event(SafeEventDraft {
+                kind: EventKind::SessionClosed,
+                agent: EventAgent::Codex,
+                vendor_event: None,
+                content: Some(EventContent::SessionClose {
+                    close_reason: "clear".into(),
+                }),
+            })
+        };
+        spool_safe_events(
+            &daemon.store,
+            linked.id,
+            account,
+            linked_session.id,
+            EventAgent::Codex,
+            &output(),
+        )
+        .await
+        .unwrap();
+        spool_safe_events(
+            &daemon.store,
+            unlinked.id,
+            account,
+            unlinked_session.id,
+            EventAgent::Codex,
+            &output(),
+        )
+        .await
+        .unwrap();
+        let event_id = cairn_store::spool::session_events(&daemon.store, linked_session.id)
+            .await
+            .unwrap()[0]
+            .event_id;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains(&linked_session.id.to_string()));
+            assert!(!request.contains(&unlinked_session.id.to_string()));
+            let body =
+                format!(r#"{{"results":[{{"event_id":"{event_id}","status":"accepted"}}]}}"#);
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        *daemon.server.write().await = ServerCredentials {
+            url: Some(format!("http://{address}")),
+            token: Some("token".into()),
+            account_id: Some(account),
+        };
+        drain_events(&daemon, 8).await.unwrap();
+        let rows = cairn_store::spool::event_spool_breakdown(
+            &daemon.store,
+            cairn_store::spool::SpoolCapacity::default(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.deferred, 1);
+        assert_eq!(rows.terminal, 0);
+        repo::bind_server_project(&daemon.store, unlinked.id, Uuid::now_v7())
+            .await
+            .unwrap();
+        let claimed = cairn_store::spool::claim_events(&daemon.store, account, Uuid::nil(), 8)
+            .await
+            .unwrap();
+        assert!(
+            claimed
+                .iter()
+                .any(|row| row.event.session_id == unlinked_session.id)
+        );
     }
 }

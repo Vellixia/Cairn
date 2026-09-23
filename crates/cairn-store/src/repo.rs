@@ -1,7 +1,7 @@
 //! Edge binding and hook/session correlation. Canonical knowledge lives server-side.
 
-use crate::{rows, tx, Result, Store, StoreError};
-use cairn_core::domain::{new_id, Project, Session, SessionStatus};
+use crate::{Result, Store, StoreError, rows, tx};
+use cairn_core::domain::{Project, Session, SessionStatus, new_id};
 use uuid::Uuid;
 
 pub async fn ensure_local_user(store: &Store) -> Result<Uuid> {
@@ -72,6 +72,33 @@ pub async fn project(store: &Store, id: Uuid) -> Result<Project> {
         .await?
         .ok_or_else(|| StoreError::NotFound(format!("project {id}")))?;
     rows::project(&row)
+}
+
+/// Bind a local checkout to one already-authorized canonical project.
+pub async fn bind_server_project(store: &Store, id: Uuid, server_project_id: Uuid) -> Result<()> {
+    let mut transaction = tx::begin(store, "bind_server_project").await?;
+    let now = rows::now_text();
+    sqlx::query(
+        "UPDATE projects SET linked = 1, server_project_id = ?1, updated_at = ?2 WHERE id = ?3",
+    )
+    .bind(server_project_id.to_string())
+    .bind(&now)
+    .bind(id.to_string())
+    .execute(&mut *transaction)
+    .await?;
+    for table in ["event_spool", "command_spool"] {
+        sqlx::query(&format!(
+            "UPDATE {table}
+                SET state = 'pending', claimed_at = NULL, next_attempt_at = ?1, last_error_kind = NULL
+              WHERE project_id = ?2 AND last_error_kind = 'awaiting_capability'"
+        ))
+        .bind(&now)
+        .bind(id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    tx::commit(transaction, "bind_server_project").await?;
+    Ok(())
 }
 
 pub async fn has_active_sessions(store: &Store) -> Result<bool> {

@@ -1,6 +1,6 @@
 //! Request dispatch: the daemon's whole behaviour, one function per verb.
 
-use crate::state::{git_status, storage_err, Daemon, Resolved};
+use crate::state::{Daemon, Resolved, git_status, storage_err};
 use cairn_core::domain::*;
 use cairn_core::event::{EventContent, EventKind, OpenTrigger, SafeCanonicalEvent};
 use cairn_core::wire::*;
@@ -454,13 +454,62 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     // `init` is the one place a checkout's identity is worth re-reading.
     d.forget_repo(cwd).await;
     let r = d.resolve(cwd).await?;
+    let project = bind_detected_project(d, &r.project).await?;
     let legacy_migration = migrate_removed_feature_tasks(d).await;
     Ok(json!({
-        "project": ProjectSummary::from(&r.project),
+        "project": ProjectSummary::from(&project),
         "worktree_path": r.worktree(),
         "git_common_dir": r.repo.git_common_dir.display().to_string(),
         "legacy_migration": legacy_migration,
     }))
+}
+
+async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project, WireError> {
+    if project.server_project_id.is_some() {
+        return Ok(project.clone());
+    }
+    let remote = project.repository_remote.as_deref().ok_or_else(|| {
+        WireError::new(
+            codes::NOT_LINKED,
+            "repository has no remote; cannot select a server project",
+        )
+    })?;
+    let response = crate::sync::client(d)
+        .await?
+        .get_with_query(
+            "/api/projects/lookup",
+            &[("remote".to_owned(), remote.to_owned())],
+        )
+        .await?;
+    let projects = response
+        .get("projects")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            WireError::new(codes::SERVER_UNAVAILABLE, "invalid project lookup response")
+        })?;
+    let [candidate] = projects.as_slice() else {
+        return Err(WireError::new(
+            codes::NOT_LINKED,
+            if projects.is_empty() {
+                "no permitted server project matches this repository remote"
+            } else {
+                "multiple permitted server projects match this repository remote"
+            },
+        ));
+    };
+    let server_project_id = candidate
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(|| {
+            WireError::new(codes::SERVER_UNAVAILABLE, "invalid project lookup response")
+        })?;
+    repo::bind_server_project(&d.store, project.id, server_project_id)
+        .await
+        .map_err(storage_err)?;
+    repo::project(&d.store, project.id)
+        .await
+        .map_err(storage_err)
 }
 
 /// Setup is the sole automatic migration boundary. Failure is a warning: the
@@ -1342,6 +1391,7 @@ mod tests {
     use super::*;
     use crate::state::ServerCredentials;
     use crate::testsupport as fx;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn latest_handoff_never_reads_sqlite_when_server_is_unavailable() {
@@ -1358,5 +1408,53 @@ mod tests {
             .await
             .expect_err("server is unavailable");
         assert_eq!(error.code, codes::SERVER_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn init_binds_one_permitted_remote_match() {
+        let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &repo.cwd,
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/fresh.git"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let server_project_id = Uuid::now_v7();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = format!(r#"{{"projects":[{{"id":"{server_project_id}","name":"fresh"}}]}}"#);
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        *repo.daemon.server.write().await = ServerCredentials {
+            url: Some(format!("http://{address}")),
+            token: Some("token".into()),
+            account_id: Some(Uuid::now_v7()),
+        };
+        let value = init(&repo.daemon, &repo.cwd).await.unwrap();
+        assert_eq!(
+            value["project"]["server_project_id"],
+            server_project_id.to_string()
+        );
+        assert_eq!(
+            repo.daemon
+                .resolve(&repo.cwd)
+                .await
+                .unwrap()
+                .project
+                .server_project_id,
+            Some(server_project_id)
+        );
     }
 }

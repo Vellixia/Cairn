@@ -178,7 +178,10 @@ impl OutageCache {
         }
         let mut response = hit.response.clone();
         if let Some(object) = response.as_object_mut() {
-            object.insert("cache_age_seconds".into(), json!(hit.cached_at.elapsed().as_secs()));
+            object.insert(
+                "cache_age_seconds".into(),
+                json!(hit.cached_at.elapsed().as_secs()),
+            );
             object.insert("cache_account_id".into(), json!(account_id));
         }
         self.touch(session_id);
@@ -186,7 +189,11 @@ impl OutageCache {
     }
 
     fn invalidate(&mut self, session_id: Uuid, account_id: Uuid) {
-        if self.entries.get(&session_id).is_some_and(|entry| entry.account_id == account_id) {
+        if self
+            .entries
+            .get(&session_id)
+            .is_some_and(|entry| entry.account_id == account_id)
+        {
             self.entries.remove(&session_id);
             self.order.retain(|id| *id != session_id);
         }
@@ -256,10 +263,14 @@ pub async fn deliver(
         // hit would claim an authorization this very call was denied.
         Answer::Refused => {
             if let Some(account_id) = account_id {
-                d.outage_cache.lock().await.invalidate(session_id, account_id);
+                d.outage_cache
+                    .lock()
+                    .await
+                    .invalidate(session_id, account_id);
             }
             (None, false)
         }
+        Answer::Rejected => (None, false),
         Answer::Unreachable => {
             let cached = match account_id {
                 Some(account_id) => d.outage_cache.lock().await.get(session_id, account_id),
@@ -273,16 +284,16 @@ pub async fn deliver(
     };
 
     let meta = ResponseMeta::extract(response.as_ref(), served_from_cache);
-    let mut payload = response.unwrap_or_else(|| json!({
-        "fresh_knowledge_unavailable": true,
-        "degradation_level": "none",
-        "sections": {},
-    }));
+    let mut payload = response.unwrap_or_else(|| {
+        json!({
+            "fresh_knowledge_unavailable": true,
+            "degradation_level": "none",
+            "sections": {},
+        })
+    });
     embed_meta(&mut payload, &meta, served_from_cache);
 
-    Delivered {
-        payload,
-    }
+    Delivered { payload }
 }
 
 /// Report what actually happened to a generated briefing
@@ -336,17 +347,10 @@ pub async fn report_outcome(d: &Daemon, trace_id: Uuid, transmitted: bool, reaso
 ///   a 2xx whose body will not parse → [`Answer::Unreachable`]. Nothing
 ///   answered, or nothing intelligible did, so a previously authorized entry
 ///   for this account and session may still stand in (§12.3).
-/// - **any non-2xx status** → [`Answer::Refused`]. Something was there and
-///   declined, and a cache hit would claim an authorization this very call was
-///   denied. The cache is not consulted; the briefing says durable memory is
-///   unavailable this turn.
-///
-/// That second rule is deliberately status-blind: `401`, `403` and `404` are
-/// the refusals it exists for, and `5xx` is currently treated the same way
-/// rather than as silence. The stricter direction is the safe one — it can
-/// only *withhold* an entry the account was entitled to, never serve one it
-/// was not — but it is a real behavioural choice and not an oversight, so it
-/// is written down here rather than inferred from `is_success()`.
+/// - **401, 403, 404** → [`Answer::Refused`]. Authentication or existence was
+///   denied, so matching cache is invalidated.
+/// - **5xx** → [`Answer::Unreachable`]. Server failure is outage, not auth.
+/// - **other 4xx** → [`Answer::Rejected`]. No cache this turn, no invalidation.
 async fn retrieve_remote(
     d: &Daemon,
     session_id: Uuid,
@@ -382,6 +386,9 @@ async fn retrieve_remote(
         // Nothing answered. This is the outage the cache exists for.
         return Answer::Unreachable;
     };
+    if response.status().is_server_error() {
+        return Answer::Unreachable;
+    }
     if !response.status().is_success() {
         // **Something answered, and it refused.**
         //
@@ -394,7 +401,10 @@ async fn retrieve_remote(
         // to be evidence that the server authorized this account for this
         // session; a live refusal is evidence of the opposite, and it cannot be
         // allowed to produce one.
-        return Answer::Refused;
+        return match response.status().as_u16() {
+            401 | 403 | 404 => Answer::Refused,
+            _ => Answer::Rejected,
+        };
     }
     match response.json::<Value>().await {
         Ok(value) => Answer::Answered(value),
@@ -410,6 +420,7 @@ enum Answer {
     /// Reachable, and it declined — a wrong deployment, a revoked token, a
     /// session it does not hold. The outage cache must not answer for it.
     Refused,
+    Rejected,
     /// Nothing answered at all.
     Unreachable,
 }
@@ -440,8 +451,10 @@ impl ResponseMeta {
         Self {
             trace_id: None,
             degradation_level: "none".to_string(),
-            #[cfg(test)] tokens: 0,
-            #[cfg(test)] spent: 0,
+            #[cfg(test)]
+            tokens: 0,
+            #[cfg(test)]
+            spent: 0,
         }
     }
 
@@ -469,12 +482,14 @@ impl ResponseMeta {
                 .and_then(|v| v.as_str())
                 .unwrap_or("none")
                 .to_string(),
-            #[cfg(test)] tokens: response
+            #[cfg(test)]
+            tokens: response
                 .get("budget")
                 .and_then(|b| b.get("tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize,
-            #[cfg(test)] spent: response
+            #[cfg(test)]
+            spent: response
                 .get("budget")
                 .and_then(|b| b.get("spent"))
                 .and_then(|v| v.as_u64())
@@ -625,6 +640,9 @@ fn embed_meta(payload: &mut Value, meta: &ResponseMeta, served_from_cache: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ServerCredentials;
+    use crate::testsupport as fx;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn response(trace: &str, level: &str, tokens: u64, spent: u64) -> Value {
         json!({
@@ -723,6 +741,44 @@ mod tests {
         cache.put(session, owner, &response("t1", "full", 3000, 100));
         cache.invalidate(session, owner);
         assert!(cache.get(session, owner).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_server_error_uses_an_eligible_cached_answer() {
+        let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
+        let resolved = repo.daemon.resolve(&repo.cwd).await.unwrap();
+        let session = Uuid::now_v7();
+        let account = Uuid::now_v7();
+        repo.daemon.outage_cache.lock().await.put(
+            session,
+            account,
+            &response("cached", "full", 3000, 100),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+        });
+        *repo.daemon.server.write().await = ServerCredentials {
+            url: Some(format!("http://{address}")),
+            token: Some("token".into()),
+            account_id: Some(account),
+        };
+        let delivered = deliver(
+            &repo.daemon,
+            &resolved,
+            session,
+            Trigger::Explicit,
+            None,
+            3000,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(delivered.payload["served_from_cache"], true);
+        assert_eq!(delivered.payload["cache_account_id"], account.to_string());
     }
 
     /// An over-budget entry is rejected outright, and whatever the session
