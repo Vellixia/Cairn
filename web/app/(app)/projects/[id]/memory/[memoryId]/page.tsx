@@ -355,11 +355,6 @@ function Usage({
   memory: MemoryDetail;
   projectId: string;
 }) {
-  // The canonical key for a project memory. Written out rather than read from
-  // the response because the detail route carries no self-reference — and the
-  // domain is not a guess here: this route only ever serves project memories,
-  // which is exactly why the two-part reference can be reconstructed safely.
-  const referenceKey = `knowledge:project:${memory.id}`;
   return (
     <Card>
       <CardHeader className="flex flex-wrap items-center justify-between gap-2">
@@ -390,7 +385,7 @@ function Usage({
             {memory.retrieval_usage.map((u) => (
               <li key={u.trace_id} data-testid="usage-row">
                 <Link
-                  href={`/projects/${projectId}/retrievals/${u.trace_id}`}
+                  href={`/projects/${projectId}/memory`}
                   className="hover:bg-accent/50 flex flex-wrap items-center gap-2 rounded-md px-2 py-1.5 text-sm transition"
                 >
                   <Badge

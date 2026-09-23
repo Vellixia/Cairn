@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const SCOPES = ["project", "branch", "task", "session"];
+const SCOPES = ["project", "branch", "session"];
 const TYPES = ["fact", "decision", "convention", "failure", "procedure"];
 /** The lifecycle states a project memory can be read in. */
 const STATES = ["active", "superseded", "stale", "conflicted"];
@@ -51,6 +51,7 @@ export default function MemoryPage({
   const { id } = use(params);
   const queryClient = useQueryClient();
   const [q, setQ] = useState("");
+  const [domain, setDomain] = useState<"project" | "personal">("project");
   const [scope, setScope] = useState(ANY);
   const [type, setType] = useState(ANY);
   // Not `ANY`: the route filters on exactly one state and defaults to `active`,
@@ -76,6 +77,11 @@ export default function MemoryPage({
         limit: PAGE,
       }),
   });
+  const personal = useQuery({
+    queryKey: ["personal-knowledge", debouncedQ],
+    queryFn: () => api.personalKnowledge({ limit: PAGE }),
+    enabled: domain === "personal",
+  });
 
   const remove = useMutation({
     mutationFn: (memoryId: string) => api.deleteMemory(memoryId),
@@ -94,10 +100,14 @@ export default function MemoryPage({
     <div>
       <PageHeader
         title="Memory"
-        subtitle="Ranked scope-first: task, then branch, then project"
+        subtitle="Ranked scope-first: current session, branch, then project"
       />
 
       <div className="mb-3 flex flex-wrap gap-2">
+        <Select value={domain} onValueChange={(value) => setDomain(value === "personal" ? "personal" : "project")}>
+          <SelectTrigger className="w-32" aria-label="Memory domain"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="project">project</SelectItem><SelectItem value="personal">personal</SelectItem></SelectContent>
+        </Select>
         <div className="relative min-w-56 flex-1">
           <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
           <Input
@@ -203,9 +213,11 @@ export default function MemoryPage({
         )}
       </div>
 
-      {memories.isLoading && <ListSkeleton />}
-      {memories.error != null && <ApiErrorState error={memories.error} />}
-      {memories.data && count === 0 && (
+      {domain === "project" && memories.isLoading && <ListSkeleton />}
+      {domain === "project" && memories.error != null && <ApiErrorState error={memories.error} />}
+      {domain === "personal" && personal.isLoading && <ListSkeleton />}
+      {domain === "personal" && personal.error != null && <ApiErrorState error={personal.error} />}
+      {domain === "project" && memories.data && count === 0 && (
         <EmptyState
           title={filtered ? "No memory matches" : "No memory yet"}
           description={
@@ -216,7 +228,7 @@ export default function MemoryPage({
         />
       )}
 
-      <ul className="space-y-2" data-testid="memory-list">
+      {domain === "project" && <ul className="space-y-2" data-testid="memory-list">
         {memories.data?.memories.map((m) => (
           <MemoryRow
             key={m.id}
@@ -226,9 +238,12 @@ export default function MemoryPage({
             deleting={remove.isPending}
           />
         ))}
-      </ul>
+      </ul>}
+      {domain === "personal" && <ul className="space-y-2" data-testid="memory-list">
+        {personal.data?.items.filter((item) => !debouncedQ || item.content.toLowerCase().includes(debouncedQ.toLowerCase())).map((item) => <li key={item.id} className="rounded-md border p-3"><p className="text-sm">{item.content}</p><p className="text-muted-foreground mt-1 text-xs">{item.knowledge_type}</p></li>)}
+      </ul>}
 
-      {memories.data && (
+      {domain === "project" && memories.data && (
         <TruncationNotice
           shown={count}
           limit={memories.data.limit}

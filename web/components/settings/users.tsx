@@ -50,7 +50,7 @@ import {
  * headcount, which is small by construction, and the route returns all of them
  * ordered by creation (§7).
  */
-export default function AdminUsersPage() {
+export default function SettingsUsers() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");

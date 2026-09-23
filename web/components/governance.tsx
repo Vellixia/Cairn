@@ -11,7 +11,7 @@ import { ArrowDownToLine, Check, Archive } from "lucide-react";
 import { toast } from "sonner";
 import { api, type TeamKnowledge } from "@/lib/api";
 import { ConfirmButton } from "@/components/confirm-button";
-import { ApiErrorState, humanize } from "@/components/control-plane";
+import { ApiErrorState } from "@/components/control-plane";
 import {
   EmptyState,
   ListSkeleton,
@@ -31,7 +31,7 @@ import { Card, CardContent } from "@/components/ui/card";
  * this screen would put authorship and ratification in the same pair of hands
  * at the same moment, which is the separation the lifecycle exists to keep.
  */
-export default function TeamPage() {
+export default function Governance() {
   const queryClient = useQueryClient();
   const [acting, setActing] = useState<string | null>(null);
 
@@ -90,7 +90,7 @@ export default function TeamPage() {
   return (
     <div>
       <PageHeader
-        title="Team knowledge"
+        title="Governance"
         subtitle="Server-wide guidance: what has been proposed, what is authoritative, what has been retired"
       />
 

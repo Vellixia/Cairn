@@ -8,27 +8,18 @@
 import type * as Contract from "./generated/server-api-v1";
 export type * from "./generated/server-api-v1";
 
-type Release = Contract.Release;
 type VersionInfo = Contract.VersionInfo;
 type User = Contract.User;
-type ApiToken = Contract.ApiToken;
 type CreatedToken = Contract.CreatedToken;
-type Project = Contract.Project;
 type ProjectOverview = Contract.ProjectOverview;
-type Task = Contract.Task;
-type Session = Contract.Session;
-type Handoff = Contract.Handoff;
-type Memory = Contract.Memory;
 type MemoryPage = Contract.MemoryPage;
 type MemorySearch = Contract.MemorySearch;
 type ActivityQuery = Contract.ActivityQuery;
 type ActivityPage = Contract.ActivityPage;
 type Funnel = Contract.Funnel;
-type MemoryDetail = Contract.MemoryDetail;
 type TraceQuery = Contract.TraceQuery;
 type TracePage = Contract.TracePage;
 type TraceDetail = Contract.TraceDetail;
-type HealthRow = Contract.HealthRow;
 type PageQuery = Contract.PageQuery;
 type PersonalKnowledgePage = Contract.PersonalKnowledgePage;
 type PatternList = Contract.PatternList;
@@ -54,7 +45,6 @@ type CreateMemoryBody = Contract.CreateMemoryBody;
 type CreatePersonalKnowledgeBody = Contract.CreatePersonalKnowledgeBody;
 type ProposeTeamKnowledgeBody = Contract.ProposeTeamKnowledgeBody;
 type PromotePatternBody = Contract.PromotePatternBody;
-type TasksResponse = Contract.TasksResponse;
 type SessionsResponse = Contract.SessionsResponse;
 type HandoffResponse = Contract.HandoffResponse;
 type DeletedResponse = Contract.DeletedResponse;
@@ -184,10 +174,6 @@ export const api = {
       body: JSON.stringify(body),
     }),
   project: (id: string) => request<ProjectOverview>(`/api/projects/${id}`),
-  tasks: (id: string, status?: string) =>
-    request<TasksResponse>(
-      `/api/projects/${id}/tasks${status ? `?status=${status}` : ""}`,
-    ),
   sessions: (id: string) =>
     request<SessionsResponse>(`/api/projects/${id}/sessions`),
   handoff: (sessionId: string) =>

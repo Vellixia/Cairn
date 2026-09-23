@@ -45,7 +45,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export default function TokensPage() {
+export default function SettingsTokens() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");

@@ -11,7 +11,6 @@ export interface CreatedMemory { id: string; applied: "accepted" | "duplicate"; 
 export interface CreatedKnowledge { id: string; owner_user_id: string; }
 export interface TeamProposal { id: string; state: "proposed"; proposed_by_user_id: string; }
 export interface PromotedPattern { pattern_id: string; owner_user_id: string; domain: "personal"; trust: "sanitized"; content_key: string; stored: boolean; }
-export interface TasksResponse { tasks: Task[]; }
 export interface SessionsResponse { sessions: Session[]; }
 export interface HandoffResponse { handoff: Handoff; }
 export interface DeletedResponse { deleted: string; }
@@ -76,8 +75,6 @@ export interface Project {
 export interface ProjectOverview {
   project: Project;
   counts: {
-    tasks: number;
-    open_tasks: number;
     sessions: number;
     memories: number;
   };
@@ -85,18 +82,8 @@ export interface ProjectOverview {
   recent_sessions: Session[];
 }
 
-export interface Task {
-  id: string;
-  title: string;
-  goal: string;
-  acceptance_criteria: string[];
-  status: "todo" | "in_progress" | "done" | "blocked";
-  updated_at: string;
-}
-
 export interface Session {
   id: string;
-  task_id: string | null;
   agent: string;
   branch: string;
   commit_sha?: string | null;

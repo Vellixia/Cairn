@@ -10,15 +10,12 @@ import {
   ChevronsUpDown,
   FolderGit2,
   HeartPulse,
-  KeyRound,
   LayoutDashboard,
-  ListChecks,
   LogOut,
   Monitor,
   Moon,
   Sun,
   Terminal,
-  UserCog,
   Users,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -76,11 +73,6 @@ export function AppSidebar() {
     queryFn: () => api.projects(),
   });
 
-  // Same query key the user menu below uses, so the role costs no extra
-  // request — and comes from the server on this page load rather than from
-  // anything cached at sign-in.
-  const me = useQuery({ queryKey: ["me"], queryFn: () => api.me() });
-
   const active = projects.data?.projects.find((p) => p.id === activeId);
 
   const projectNav = activeId
@@ -98,7 +90,6 @@ export function AppSidebar() {
           icon: Terminal,
           testId: "nav-sessions-replay",
         },
-        { href: `/projects/${activeId}/tasks`, label: "Tasks", icon: ListChecks },
       ]
     : [];
 
@@ -116,24 +107,10 @@ export function AppSidebar() {
    * by the server. Only the ratify and retire actions on that page are
    * administrator work.
    */
-  const isAdmin = me.data?.role === "admin";
   const systemNav = [
-    { href: "/team", label: "Governance", icon: Users, testId: "nav-team" },
-    {
-      href: "/system",
-      label: "System health",
-      icon: HeartPulse,
-      testId: "nav-system",
-      adminOnly: true,
-    },
-    {
-      href: "/admin/users",
-      label: "Accounts",
-      icon: UserCog,
-      testId: "nav-admin-users",
-      adminOnly: true,
-    },
-  ].filter((item) => isAdmin || !item.adminOnly);
+    { href: "/governance", label: "Governance", icon: Users, testId: "nav-governance" },
+    { href: "/settings", label: "Settings", icon: HeartPulse, testId: "nav-settings" },
+  ];
 
   return (
     <Sidebar collapsible="icon">
@@ -172,17 +149,6 @@ export function AppSidebar() {
               >
                 <FolderGit2 />
                 <span>Projects</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                isActive={pathname === "/tokens"}
-                tooltip="API tokens"
-                onClick={closeOnMobile}
-                render={<Link href="/tokens" data-testid="nav-tokens" />}
-              >
-                <KeyRound />
-                <span>API tokens</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
@@ -346,9 +312,8 @@ function UserMenu() {
               ))}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem render={<Link href="/tokens" />}>
-              <KeyRound className="size-4" />
-              API tokens
+            <DropdownMenuItem render={<Link href="/settings" />}>
+              Settings
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem

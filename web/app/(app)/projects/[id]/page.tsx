@@ -6,10 +6,8 @@ import { useQuery } from "@tanstack/react-query";
 import { GitBranch } from "lucide-react";
 import { api } from "@/lib/api";
 import { ApiErrorState } from "@/components/control-plane";
-import { MemoryFunnel } from "@/components/funnel";
 import { ListSkeleton, PageHeader, formatDate } from "@/components/page";
 import { StatusBadge } from "@/components/session";
-import DomainsPage from "./domains/page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function ProjectOverviewPage({
@@ -51,24 +49,12 @@ export default function ProjectOverviewPage({
       {/* The funnel loads on its own request. A project overview that waited for
           both would show nothing until the slower of the two landed, and the
           funnel is the slower one — twelve counts over the whole history. */}
-      <MemoryFunnel projectId={id} />
-
       {overview.error != null && <ApiErrorState error={overview.error} />}
       {overview.isLoading && <ListSkeleton rows={4} />}
 
       {overview.data && (
         <>
           <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <Stat
-              label="Open tasks"
-              value={overview.data.counts.open_tasks}
-              href={`/projects/${id}/tasks`}
-            />
-            <Stat
-              label="Tasks"
-              value={overview.data.counts.tasks}
-              href={`/projects/${id}/tasks`}
-            />
             <Stat
               label="Sessions"
               value={overview.data.counts.sessions}
@@ -172,9 +158,6 @@ export default function ProjectOverviewPage({
                 empty="No agent health reported."
                 rows={health.data?.rows.slice(0, 5).map((row) => `${row.agent} · ${row.capability} · ${row.status}`)}
               />
-            </OverviewPanel>
-            <OverviewPanel id="domains" title="Knowledge domains" testId="overview-domains">
-              <DomainsPage params={Promise.resolve({ id })} />
             </OverviewPanel>
           </div>
         </>

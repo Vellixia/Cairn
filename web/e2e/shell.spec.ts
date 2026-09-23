@@ -50,7 +50,7 @@ test("the sign-in page names the deployment and its version", async ({
 test("a signed-out visitor asking for a page is sent to sign in", async ({
   page,
 }) => {
-  await page.goto("/tokens");
+  await page.goto("/settings");
   await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByTestId("password")).toBeVisible();
 });
@@ -88,7 +88,14 @@ test("an unknown address gets Cairn's own 404, not a framework default", async (
   ).toBeVisible();
 });
 
-test("compact navigation reaches four project workflows and global governance", async ({
+test("removed workflows have no redirect", async ({ page }) => {
+  await page.goto("/projects/not-a-project/tasks");
+  await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
+  await page.goto("/tokens");
+  await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
+});
+
+test("compact navigation reaches project workflows and global governance", async ({
   page,
 }, testInfo) => {
   await signIn(page, fixture);
@@ -101,7 +108,6 @@ test("compact navigation reaches four project workflows and global governance", 
     ["nav-overview", "UI Fixture"],
     ["nav-memory", "Memory"],
     ["nav-sessions-replay", "Sessions & Replay"],
-    ["nav-tasks", "Tasks"],
   ] as const) {
     await openNav(page, testInfo);
     await page.getByTestId(testid).click();
@@ -111,16 +117,16 @@ test("compact navigation reaches four project workflows and global governance", 
   }
 
   await openNav(page, testInfo);
-  await page.getByTestId("nav-team").click();
-  await expect(page.getByRole("heading", { name: "Team knowledge" })).toBeVisible();
+  await page.getByTestId("nav-governance").click();
+  await expect(page.getByRole("heading", { name: "Governance" })).toBeVisible();
   await openNav(page, testInfo);
-  await expect(page.getByTestId("nav-admin-users")).toHaveCount(0);
+  await expect(page.getByTestId("nav-settings")).toBeVisible();
 });
 
-test("administrator sees Accounts in global navigation", async ({ page }, testInfo) => {
+test("administrator sees Settings in global navigation", async ({ page }, testInfo) => {
   await signIn(page, admin);
   await openNav(page, testInfo);
-  await expect(page.getByTestId("nav-admin-users")).toBeVisible();
+  await expect(page.getByTestId("nav-settings")).toBeVisible();
 });
 
 test("the mobile sidebar opens as a sheet", async ({ page }, testInfo) => {
@@ -130,9 +136,9 @@ test("the mobile sidebar opens as a sheet", async ({ page }, testInfo) => {
   );
   await signIn(page, fixture);
 
-  await expect(page.getByTestId("nav-tokens")).toBeHidden();
+  await expect(page.getByTestId("nav-settings")).toBeHidden();
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
-  await expect(page.getByTestId("nav-tokens")).toBeVisible();
+  await expect(page.getByTestId("nav-settings")).toBeVisible();
   await expect(page.getByTestId("nav-projects")).toBeVisible();
 });
 
@@ -140,7 +146,7 @@ test("a token can be created, is shown once, and is revoked behind a confirmatio
   page,
 }, testInfo) => {
   await signIn(page, fixture);
-  await page.goto("/tokens");
+  await page.goto("/settings");
   await expect(page).toHaveTitle(/API tokens · Cairn/);
 
   const name = `e2e-${testInfo.project.name}-${Date.now()}`;

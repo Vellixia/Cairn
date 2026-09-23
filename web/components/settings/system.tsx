@@ -16,7 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
  * A client-side redirect would only hide the link; it would not be the guard,
  * and pretending otherwise is what FR-892 forbids.
  */
-export default function SystemPage() {
+export default function SettingsSystem() {
   const health = useQuery({
     queryKey: ["system-health"],
     queryFn: () => api.systemHealth(),
