@@ -129,7 +129,7 @@ pub struct BatchResponse {
 /// exactly the drift FR-760 forbids for rejection classes. The list is checked
 /// **recursively at any depth**, because a refused name nested inside `content`
 /// is refused for the same reason it is refused at the top.
-const REFUSED_FIELD_NAMES: &[&str] = &[
+pub(crate) const REFUSED_FIELD_NAMES: &[&str] = &[
     "summary",
     "path",
     "command",
@@ -166,7 +166,7 @@ const REFUSED_FIELD_NAMES: &[&str] = &[
 /// `outcome` is refused at top level only — nested, it is a legal field name
 /// on the sync boundary, and this boundary matches that rule rather than
 /// inventing a stricter one that would then disagree with it.
-const REFUSED_AT_TOP_LEVEL: &[&str] = &["outcome"];
+pub(crate) const REFUSED_AT_TOP_LEVEL: &[&str] = &["outcome"];
 
 fn carries_refused_name(value: &Value, top_level: bool) -> bool {
     match value {

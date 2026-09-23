@@ -292,6 +292,14 @@ pub(crate) mod web_operations {
         "TeamTransition"
     );
     operation!(
+        PRIVACY_POLICY,
+        "GET",
+        "/api/privacy-policy",
+        "privacy_policy",
+        "none",
+        "PrivacyPolicy"
+    );
+    operation!(
         SYSTEM_HEALTH,
         "GET",
         "/api/system/health",
@@ -372,6 +380,7 @@ pub(crate) mod web_operations {
         PROMOTE_PATTERN,
         RATIFY_TEAM,
         RETIRE_TEAM,
+        PRIVACY_POLICY,
         SYSTEM_HEALTH,
         CONSOLIDATION_HEALTH,
         ADMIN_USERS,
@@ -609,6 +618,7 @@ pub fn routes() -> Router<AppState> {
         // them would be a second place for the transition rule to live.
         .web_operation(web_operations::RATIFY_TEAM, ratify_team)
         .web_operation(web_operations::RETIRE_TEAM, retire_team)
+        .web_operation(web_operations::PRIVACY_POLICY, privacy_policy)
         // Migration and cutover (`contracts/migration-cutover.md`). The first
         // four are the client's own migration path (§4-§9) and stay reachable
         // whatever `server_authority.mode` says — a store migrating *after*
@@ -1163,6 +1173,20 @@ fn event_ingest_route() -> Router<AppState> {
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+/// Read-only description of privacy rules enforced by this running build.
+async fn privacy_policy(_user: SettledUser) -> Json<Value> {
+    Json(json!({
+        "mutable": false,
+        "safe_event_contract_version": cairn_core::event::CONTRACT_VERSION,
+        "batch_max_events": cairn_core::event::BATCH_MAX_EVENTS,
+        "body_max_bytes": cairn_core::event::BODY_MAX_BYTES,
+        "refused_field_names": crate::events::REFUSED_FIELD_NAMES,
+        "refused_top_level_fields": crate::events::REFUSED_AT_TOP_LEVEL,
+        "screens_all_member_project_identities": true,
+        "stores_raw_observations": false,
+    }))
 }
 
 /// What this deployment runs, and whether a newer release exists.

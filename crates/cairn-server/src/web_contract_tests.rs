@@ -301,6 +301,15 @@ fn every_web_wrapper_has_exact_registry_contract_and_structural_router_binding()
             "retireTeam",
         ),
         (
+            "PRIVACY_POLICY",
+            "GET",
+            "/api/privacy-policy",
+            "privacy_policy",
+            "none",
+            "PrivacyPolicy",
+            "privacyPolicy",
+        ),
+        (
             "SYSTEM_HEALTH",
             "GET",
             "/api/system/health",

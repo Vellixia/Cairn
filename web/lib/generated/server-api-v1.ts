@@ -32,6 +32,16 @@ export interface ReplayEvent { event_id: string; session_id: string; kind: strin
 export interface Analytics { capture: number; consolidation: number; retrieval: number; delivery: number; failures: number; latency: { count: number; average_ms: number }; derived_from_existing_records: true; }
 export interface MemoryMutation { id?: string; applied?: "accepted" | "duplicate"; }
 export interface RelationMutation { from: string; to: string; kind: RelationKind; applied?: "duplicate"; }
+export interface PrivacyPolicy {
+  mutable: false;
+  safe_event_contract_version: number;
+  batch_max_events: number;
+  body_max_bytes: number;
+  refused_field_names: string[];
+  refused_top_level_fields: string[];
+  screens_all_member_project_identities: true;
+  stores_raw_observations: false;
+}
 
 export interface Release {
   tag: string;

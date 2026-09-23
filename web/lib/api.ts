@@ -62,6 +62,7 @@ type RelationMutation = Contract.RelationMutation;
 type KnowledgeType = Contract.KnowledgeType;
 type MemoryScope = Contract.MemoryScope;
 type RelationKind = Contract.RelationKind;
+type PrivacyPolicy = Contract.PrivacyPolicy;
 
 declare global {
   interface Window {
@@ -165,6 +166,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => request<OkResponse>("/api/auth/logout", { method: "POST" }),
+  privacyPolicy: () => request<PrivacyPolicy>("/api/privacy-policy"),
   changePassword: (newPassword: string) => request<ChangedPassword>("/api/auth/password", { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
 
   /** Personal API tokens: the credential `cairnd` carries (D10). */
