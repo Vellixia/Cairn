@@ -4,7 +4,7 @@ import Link from "next/link";
 import { use, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Pin, ShieldCheck } from "lucide-react";
-import { api, type MemoryDetail } from "@/lib/api";
+import { api, type MemoryDetail, type RelationKind } from "@/lib/api";
 import {
   ApiErrorState,
   Field,
@@ -26,7 +26,7 @@ export default function MemoryDetailPage({
   const { id, memoryId } = use(params);
   const [replacement, setReplacement] = useState("");
   const [relatedId, setRelatedId] = useState("");
-  const [relationKind, setRelationKind] = useState("supports");
+  const [relationKind, setRelationKind] = useState<RelationKind>("reinforces");
   const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: ["memory", memoryId],
@@ -37,7 +37,7 @@ export default function MemoryDetailPage({
   const reinforce = useMutation({ mutationFn: () => api.reinforceMemory(memoryId), onSuccess: refresh });
   const pin = useMutation({ mutationFn: () => api.pinMemory(memoryId, !memory?.pinned), onSuccess: refresh });
   const forget = useMutation({ mutationFn: () => api.forgetMemory(memoryId), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["memories", id] }) });
-  const supersede = useMutation({ mutationFn: () => api.supersedeMemory(memoryId, replacement), onSuccess: () => { setReplacement(""); refresh(); } });
+  const supersede = useMutation({ mutationFn: () => api.supersedeMemory(memoryId, memory!.type, memory!.scope, replacement), onSuccess: () => { setReplacement(""); refresh(); } });
   const relate = useMutation({ mutationFn: () => api.relateMemory(id, memoryId, relatedId, relationKind), onSuccess: () => { setRelatedId(""); refresh(); } });
 
   const memory = detail.data?.memory;
@@ -63,7 +63,7 @@ export default function MemoryDetailPage({
         <div className="space-y-4" data-testid="memory-detail">
           <Content memory={memory} />
           <Card><CardContent className="flex flex-wrap gap-2"><Button size="sm" onClick={() => reinforce.mutate()}>Reinforce</Button><Button size="sm" variant="outline" onClick={() => pin.mutate()}>{memory.pinned ? "Unpin" : "Pin"}</Button><Button size="sm" variant="destructive" onClick={() => forget.mutate()}>Forget</Button></CardContent></Card>
-          <Card><CardContent className="space-y-3"><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (replacement.trim()) supersede.mutate(); }}><Input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="Replacement memory" aria-label="Replacement memory" /><Button size="sm" type="submit">Supersede</Button></form><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (relatedId.trim()) relate.mutate(); }}><Input value={relatedId} onChange={(event) => setRelatedId(event.target.value)} placeholder="Related memory ID" aria-label="Related memory ID" /><select value={relationKind} onChange={(event) => setRelationKind(event.target.value)} className="border rounded px-2 text-sm"><option value="supports">supports</option><option value="conflicts_with">conflicts with</option><option value="supersedes">supersedes</option></select><Button size="sm" type="submit">Relate</Button></form></CardContent></Card>
+          <Card><CardContent className="space-y-3"><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (replacement.trim()) supersede.mutate(); }}><Input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="Replacement memory" aria-label="Replacement memory" /><Button size="sm" type="submit">Supersede</Button></form><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (relatedId.trim()) relate.mutate(); }}><Input value={relatedId} onChange={(event) => setRelatedId(event.target.value)} placeholder="Related memory ID" aria-label="Related memory ID" /><select value={relationKind} onChange={(event) => setRelationKind(event.target.value as RelationKind)} className="border rounded px-2 text-sm"><option value="reinforces">reinforces</option><option value="duplicates">duplicates</option><option value="supersedes">supersedes</option><option value="conflicts_with">conflicts with</option><option value="narrows">narrows</option><option value="not_applicable_to">not applicable to</option></select><Button size="sm" type="submit">Relate</Button></form></CardContent></Card>
           <Provenance memory={memory} projectId={id} />
           <Evidence memory={memory} />
           <Verification memory={memory} />

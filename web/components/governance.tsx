@@ -115,7 +115,7 @@ export default function Governance() {
       {feed.data && items.length === 0 && (
         <EmptyState
           title="No team knowledge"
-          description="Proposals are created from the CLI with cairn team propose. This screen reviews them."
+          description="Agent proposals appear here for administrator review."
         />
       )}
 

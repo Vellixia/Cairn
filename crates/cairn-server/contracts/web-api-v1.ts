@@ -1,5 +1,9 @@
 export const API_CONTRACT_VERSION = "v1";
 
+export type KnowledgeType = "fact" | "decision" | "convention" | "failure" | "procedure";
+export type MemoryScope = "project" | "branch" | "session";
+export type RelationKind = "reinforces" | "duplicates" | "supersedes" | "conflicts_with" | "narrows" | "not_applicable_to";
+
 export interface LoginResponse { id: string; }
 export interface OkResponse { ok: boolean; }
 export interface TokensResponse { tokens: ApiToken[]; }
@@ -21,12 +25,12 @@ export interface ChangedPassword { changed: boolean; }
 export interface ProjectMembersResponse { members: ProjectMember[]; }
 export interface ProjectMember { user_id: string; email: string; display_name: string; added_by_user_id: string | null; created_at: string; }
 export interface GraphResponse { seed: string; hops: number; max_hops: number; max_edges: number; truncated: boolean; edges: GraphEdge[]; }
-export interface GraphEdge { from: string; to: string; kind: string; depth: number; }
+export interface GraphEdge { from: string; to: string; kind: RelationKind; depth: number; }
 export interface ReplayResponse { events: ReplayEvent[]; limit: number; read_only: true; content_available: false; }
 export interface ReplayEvent { event_id: string; session_id: string; kind: string; accepted_at: string; }
 export interface Analytics { capture: number; consolidation: number; retrieval: number; delivery: number; failures: number; latency: { count: number; average_ms: number }; derived_from_existing_records: true; }
 export interface MemoryMutation { id?: string; applied?: "accepted" | "duplicate"; }
-export interface RelationMutation { from: string; to: string; kind: string; applied?: "duplicate"; }
+export interface RelationMutation { from: string; to: string; kind: RelationKind; applied?: "duplicate"; }
 
 export interface Release {
   tag: string;
@@ -139,8 +143,8 @@ export interface Handoff {
 
 export interface Memory {
   id: string;
-  type: string;
-  scope: string;
+  type: KnowledgeType;
+  scope: MemoryScope;
   scope_key: string;
   content: string;
   state: string;
@@ -187,9 +191,9 @@ export interface MemorySearch {
   limit?: number;
 }
 export interface CreateProjectBody { name: string; repository_remote?: string; }
-export interface CreateMemoryBody { type: string; scope: string; content: string; scope_key?: string; topic_key?: string; value_key?: string; session_id?: string; command_id?: string; }
-export interface CreatePersonalKnowledgeBody { type: string; content: string; topic_key?: string; value_key?: string; command_id?: string; }
-export interface ProposeTeamKnowledgeBody { type: string; content: string; topic_key?: string; value_key?: string; command_id?: string; }
+export interface CreateMemoryBody { type: KnowledgeType; scope: MemoryScope; content: string; scope_key?: string; topic_key?: string; value_key?: string; session_id?: string; command_id?: string; }
+export interface CreatePersonalKnowledgeBody { type: KnowledgeType; content: string; topic_key?: string; value_key?: string; command_id?: string; }
+export interface ProposeTeamKnowledgeBody { type: KnowledgeType; content: string; topic_key?: string; value_key?: string; command_id?: string; }
 export interface PromotePatternBody { title: string; problem: string; root_cause: string; approach: string; constraints?: string[]; applicability?: string[]; command_id?: string; }
 
 // ---------------------------------------------------------------------------
@@ -279,7 +283,7 @@ export interface ActivityPage {
 
 export interface MemoryRelation {
   direction: "incoming" | "outgoing";
-  kind: string;
+  kind: RelationKind;
   basis: string;
   decided_by_session: string;
   decided_at: string;

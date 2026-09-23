@@ -153,11 +153,11 @@ export default function SettingsTokens() {
               title="No tokens yet"
               description={
                 <>
-                  Create one, then run{" "}
+                  Create one, then pass it securely to{" "}
                   <code className="bg-muted rounded px-1 py-0.5 font-mono text-xs">
-                    cairn auth login --token
+                    cairn setup
                   </code>{" "}
-                  on the machine that should sync.
+                  on the machine that should connect.
                 </>
               }
             />
