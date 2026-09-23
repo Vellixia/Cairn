@@ -436,3 +436,15 @@ fn login_response_bypass_is_rejected() {
     );
     assert_eq!(json!({ "user_id": id }).get("id"), None);
 }
+
+#[test]
+fn integration_health_exposes_server_receipt_time() {
+    let migration = include_str!("../migrations/0007_web_settings.sql");
+    let api = include_str!("api.rs");
+    let contract = include_str!("../contracts/web-api-v1.ts");
+
+    assert!(migration.contains("reported_at TIMESTAMPTZ NOT NULL DEFAULT now()"));
+    assert!(api.contains("reported_at = now()"));
+    assert!(api.contains("\"reported_at\""));
+    assert!(contract.contains("reported_at: string;"));
+}

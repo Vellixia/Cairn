@@ -31,6 +31,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "remove_tasks_and_legacy_authority",
         include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql"),
     ),
+    (
+        7,
+        "web_settings",
+        include_str!("../migrations/0007_web_settings.sql"),
+    ),
 ];
 
 /// The highest migration this build carries.
@@ -38,7 +43,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// Not what the server advertises: a deployment can be held at a lower schema
 /// deliberately, and what it can actually hold is the schema it **applied**.
 /// See [`applied_version`].
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;

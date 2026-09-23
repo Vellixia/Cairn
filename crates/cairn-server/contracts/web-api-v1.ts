@@ -422,6 +422,8 @@ export interface HealthRow {
   evidence_kind: "introspection" | "observation" | null;
   observed_at: string | null;
   degraded: boolean | null;
+  /** Server acceptance time; freshness never trusts the reporter's clock. */
+  reported_at: string;
 }
 
 export interface ApplicabilityFact {

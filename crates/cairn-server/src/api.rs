@@ -941,7 +941,8 @@ async fn report_health(
              DO UPDATE SET status = EXCLUDED.status,
                            evidence_kind = EXCLUDED.evidence_kind,
                            observed_at = EXCLUDED.observed_at,
-                           degraded = EXCLUDED.degraded",
+                           degraded = EXCLUDED.degraded,
+                           reported_at = now()",
         )
         .bind(project_id)
         .bind(user.id)
@@ -997,7 +998,7 @@ async fn read_health(
 async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiResult<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT account_id, writer_id, agent, capability, stage, status, evidence_kind,
-                observed_at, degraded
+                observed_at, degraded, reported_at
            FROM integration_health
           WHERE project_id = $1
           ORDER BY agent, capability, stage, writer_id, account_id",
@@ -1029,6 +1030,9 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
                     .get::<Option<chrono::DateTime<chrono::Utc>>, _>("observed_at")
                     .map(|t| t.to_rfc3339()),
                 "degraded": r.get::<Option<bool>, _>("degraded"),
+                "reported_at": r
+                    .get::<chrono::DateTime<chrono::Utc>, _>("reported_at")
+                    .to_rfc3339(),
             })
         })
         .collect())
@@ -1041,8 +1045,8 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
 /// implementation is not, because a second one would be a second answer to
 /// "which capabilities are working".
 ///
-/// `stale` is deliberately absent from the row. §5 computes it client-side from
-/// `observed_at` against a per-capability freshness window, and a server that
+/// `stale` is deliberately absent from the row. The web view computes it from
+/// server-owned `reported_at`; `observed_at` remains the reporter's claim, and a server that
 /// baked one window in would be asserting that every capability goes stale at
 /// the same rate. What the row owes the view is the observation time and the
 /// machine it came from (FR-857, FR-860); the judgement is the view's.
