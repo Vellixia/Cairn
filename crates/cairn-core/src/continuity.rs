@@ -468,5 +468,4 @@ mod tests {
             CheckpointState::Unresolvable
         );
     }
-
 }

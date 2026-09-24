@@ -843,7 +843,6 @@ pub enum Request {
         #[serde(default)]
         rationale: Option<String>,
     },
-
 }
 
 /// Repository and project state for `cairn status`.
@@ -1626,16 +1625,6 @@ pub const REJECTED_SESSION_FIELDS: &[&str] = &[
     "last_turn_ended_at",
 ];
 
-// `REJECTED_OBSERVATION_FIELDS` used to live here: seven names from Feature
-// 001, presented as if it were the same boundary as the server's live,
-// enforced `FORBIDDEN_OBSERVATION_FIELDS` (`crates/cairn-server/src/sync.rs`,
-// twenty-seven names as of Feature 003). Nothing in the workspace read it —
-// grepping for the identifier turns up only its own declaration and this
-// note — so it was documentation-shaped code that happened to compile, and a
-// twenty-item-short list presented as the boundary is worse than no list at
-// all. The server's list is the single source of truth for what the wire
-// rejects; see `cairn_server::sync::FORBIDDEN_OBSERVATION_FIELDS` (FR-534).
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,7 +1640,7 @@ mod tests {
 
     #[test]
     fn error_envelope_has_no_data_key() {
-        let s = serde_json::to_string(&Envelope::err(WireError::not_found("task"))).unwrap();
+        let s = serde_json::to_string(&Envelope::err(WireError::not_found("record"))).unwrap();
         assert!(!s.contains("\"data\""));
         assert!(s.contains("not_found"));
     }

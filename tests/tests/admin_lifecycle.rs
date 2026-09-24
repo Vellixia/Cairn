@@ -510,7 +510,11 @@ fn a_restart_restores_the_environment_account_from_corrupted_state() {
     let session = server.cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD);
     assert_eq!(
         server
-            .post_with_cookie("/api/auth/password", &json!({ "new_password": changed }), &session)
+            .post_with_cookie(
+                "/api/auth/password",
+                &json!({ "new_password": changed }),
+                &session
+            )
             .1,
         200,
         "web password change refused"
@@ -537,8 +541,12 @@ fn a_restart_restores_the_environment_account_from_corrupted_state() {
         1,
         "a restart did not restore the environment account's authority (FR-539)"
     );
-    assert!(restarted.try_cookie_for_password(ADMIN_EMAIL, changed).is_some());
-    assert!(restarted.try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD).is_none());
+    assert!(restarted
+        .try_cookie_for_password(ADMIN_EMAIL, changed)
+        .is_some());
+    assert!(restarted
+        .try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD)
+        .is_none());
     // Role recovery does not manufacture a forced password change.
     assert_eq!(
         restarted.count(&format!(
@@ -563,11 +571,15 @@ fn restart_preserves_a_password_changed_in_web() {
 
     let restarted = server.restarted_with_admin(ADMIN_EMAIL, ADMIN_PASSWORD);
     assert!(
-        restarted.cookie_for_password(ADMIN_EMAIL, changed).contains("session="),
+        restarted
+            .cookie_for_password(ADMIN_EMAIL, changed)
+            .contains("session="),
         "web-changed password no longer authenticates after restart"
     );
     assert!(
-        restarted.try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD).is_none(),
+        restarted
+            .try_cookie_for_password(ADMIN_EMAIL, ADMIN_PASSWORD)
+            .is_none(),
         "restart restored environment password over web change"
     );
 }

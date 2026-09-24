@@ -92,7 +92,17 @@ fn cwd() -> String {
 }
 
 async fn setup() -> Result<serde_json::Value, WireError> {
-    if let Some(credentials) = headless_credentials()? {
+    let credentials = headless_credentials()?;
+    let web_url = credentials
+        .as_ref()
+        .map(|credentials| {
+            credentials
+                .web_url
+                .clone()
+                .unwrap_or_else(|| credentials.url.clone())
+        })
+        .or_else(|| cairn_core::CairnConfig::load().server_url);
+    if let Some(credentials) = credentials {
         let account_id = authenticated_account(&credentials).await?;
         if let Some(expected) = credentials.account_id {
             if expected != account_id {
@@ -109,7 +119,10 @@ async fn setup() -> Result<serde_json::Value, WireError> {
             )
         })?;
     }
-    let value = client::send(&Request::Init { cwd: cwd() }).await?;
+    let mut value = client::send(&Request::Init { cwd: cwd() }).await?;
+    if let (Some(object), Some(web_url)) = (value.as_object_mut(), web_url) {
+        object.insert("web_url".into(), serde_json::Value::String(web_url));
+    }
     Ok(value)
 }
 
@@ -117,14 +130,16 @@ struct HeadlessCredentials {
     url: String,
     token: String,
     account_id: Option<Uuid>,
+    web_url: Option<String>,
 }
 
 fn headless_credentials() -> Result<Option<HeadlessCredentials>, WireError> {
     let url = std::env::var("CAIRN_SERVER_URL").ok();
     let token = std::env::var("CAIRN_SERVER_TOKEN").ok();
     let account_id = std::env::var("CAIRN_ACCOUNT_ID").ok();
-    if url.is_some() || token.is_some() || account_id.is_some() {
-        return parse_credentials(url, token, account_id);
+    let web_url = std::env::var("CAIRN_WEB_URL").ok();
+    if url.is_some() || token.is_some() || account_id.is_some() || web_url.is_some() {
+        return parse_credentials(url, token, account_id, web_url);
     }
     if std::io::stdin().is_terminal() {
         return Ok(None);
@@ -150,6 +165,10 @@ fn headless_credentials() -> Result<Option<HeadlessCredentials>, WireError> {
             .get("account_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        value
+            .get("web_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
     )
 }
 
@@ -157,6 +176,7 @@ fn parse_credentials(
     url: Option<String>,
     token: Option<String>,
     account_id: Option<String>,
+    web_url: Option<String>,
 ) -> Result<Option<HeadlessCredentials>, WireError> {
     let (Some(url), Some(token)) = (url, token) else {
         return Err(WireError::invalid("setup needs both server URL and token"));
@@ -172,6 +192,7 @@ fn parse_credentials(
         url,
         token,
         account_id,
+        web_url: web_url.filter(|url| !url.trim().is_empty()),
     }))
 }
 
@@ -261,6 +282,20 @@ fn render_setup_success(value: &serde_json::Value, json: bool) -> String {
     } else {
         let name = value["project"]["name"].as_str().unwrap_or("project");
         let mut output = format!("Cairn is tracking {name}.\n");
+        if let Some(web_url) = value.get("web_url").and_then(serde_json::Value::as_str) {
+            output.push_str(&format!("Web: {web_url}\n"));
+        }
+        if let Some(warnings) = value
+            .pointer("/integrations/warnings")
+            .and_then(serde_json::Value::as_array)
+        {
+            for warning in warnings {
+                let agent = warning["agent"].as_str().unwrap_or("agent");
+                let kind = warning["kind"].as_str().unwrap_or("integration");
+                let detail = warning["detail"].as_str().unwrap_or("conflict");
+                output.push_str(&format!("Integration warning ({agent}/{kind}): {detail}\n"));
+            }
+        }
         if let Some(migration) = value.get("legacy_migration") {
             let status = migration["status"].as_str().unwrap_or("unknown");
             output.push_str(&format!("Legacy Task migration: {status}.\n"));
@@ -316,20 +351,23 @@ mod tests {
 
     #[test]
     fn setup_renders_stable_text_and_json_envelopes() {
-        let value = serde_json::json!({ "project": { "name": "demo" }, "legacy_migration": { "status": "warning", "detail": "artifact conflict", "backup": "/tmp/legacy.sqlite", "manifest": "/tmp/legacy.manifest.json", "bundle": "/tmp/removed_feature.json" } });
-        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\nLegacy Task migration: warning.\nDetail: artifact conflict\nbackup: /tmp/legacy.sqlite\nmanifest: /tmp/legacy.manifest.json\nbundle: /tmp/removed_feature.json\n");
+        let value = serde_json::json!({ "project": { "name": "demo" }, "web_url": "https://cairn.example.com", "integrations": { "warnings": [{ "agent": "codex", "kind": "mcp", "detail": "edited by user" }] }, "legacy_migration": { "status": "warning", "detail": "artifact conflict", "backup": "/tmp/legacy.sqlite", "manifest": "/tmp/legacy.manifest.json", "bundle": "/tmp/removed_feature.json" } });
+        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\nWeb: https://cairn.example.com\nIntegration warning (codex/mcp): edited by user\nLegacy Task migration: warning.\nDetail: artifact conflict\nbackup: /tmp/legacy.sqlite\nmanifest: /tmp/legacy.manifest.json\nbundle: /tmp/removed_feature.json\n");
 
-        let json: serde_json::Value = serde_json::from_str(&render_setup_success(&value, true))
-            .expect("setup JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&render_setup_success(&value, true)).expect("setup JSON");
         assert_eq!(json["ok"], true);
         assert_eq!(json["data"], value);
 
         let error = WireError::invalid("bad setup");
-        let json: serde_json::Value = serde_json::from_str(&render_setup_error(&error, true))
-            .expect("setup error JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&render_setup_error(&error, true)).expect("setup error JSON");
         assert_eq!(json["ok"], false);
         assert_eq!(json["error"]["code"], codes::INVALID_REQUEST);
-        assert_eq!(render_setup_error(&error, false), "cairn: invalid_request: bad setup\n");
+        assert_eq!(
+            render_setup_error(&error, false),
+            "cairn: invalid_request: bad setup\n"
+        );
     }
 
     #[test]
@@ -342,8 +380,8 @@ mod tests {
 
     #[test]
     fn headless_credentials_require_complete_pair() {
-        assert!(parse_credentials(Some("https://server".into()), None, None).is_err());
-        assert!(parse_credentials(None, Some("secret".into()), None).is_err());
+        assert!(parse_credentials(Some("https://server".into()), None, None, None).is_err());
+        assert!(parse_credentials(None, Some("secret".into()), None, None).is_err());
     }
 
     #[test]
@@ -353,6 +391,7 @@ mod tests {
             url: "https://server/".into(),
             token: "secret".into(),
             account_id: None,
+            web_url: None,
         };
         let account = Uuid::now_v7();
         let config = dir.path().join("config.json");
@@ -394,6 +433,7 @@ mod tests {
             url: format!("http://{address}"),
             token: "secret".into(),
             account_id: None,
+            web_url: None,
         };
         assert_eq!(authenticated_account(&credentials).await.unwrap(), account);
     }

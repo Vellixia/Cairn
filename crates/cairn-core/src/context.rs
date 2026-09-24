@@ -678,7 +678,6 @@ fn admit_tier_0b(
         },
         "",
     );
-
 }
 
 /// `⚠ 1 conflict · 1 drift · checkpoint diverged` — the kinds and their counts,

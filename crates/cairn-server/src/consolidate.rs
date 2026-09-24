@@ -561,17 +561,18 @@ mod refusal {
     // disagrees with existing knowledge is persisted alongside it rather than
     // refused — but a future resolver that must refuse one has the term
     // waiting, spelled the way the contract spells it.
-    #![allow(dead_code)]
-
     pub const KEY_NORMALIZATION_FAILED: &str = "key_normalization_failed";
     pub const KEY_NOT_DERIVABLE: &str = "key_not_derivable";
     pub const PRIVACY_REFUSED: &str = "privacy_refused";
     pub const UNVERIFIABLE_SOURCE: &str = "unverifiable_source";
+    #[cfg(test)]
     pub const CONFLICTS_WITH_EXISTING: &str = "conflicts_with_existing";
+    #[cfg(test)]
     pub const BOUND_EXCEEDED: &str = "bound_exceeded";
     pub const EXTRACTOR_MALFORMED_OUTPUT: &str = "extractor_malformed_output";
 
     /// Every term, so a test can hold the vocabulary to its stated size.
+    #[cfg(test)]
     pub const ALL: &[&str] = &[
         KEY_NORMALIZATION_FAILED,
         KEY_NOT_DERIVABLE,

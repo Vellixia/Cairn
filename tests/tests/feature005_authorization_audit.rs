@@ -379,8 +379,10 @@ fn the_ingest_route_binds_its_project_from_the_session_and_not_the_body() {
     // from the body would let a caller attribute events to a project they have
     // nothing to do with (FR-769).
     assert!(
-        events.contains("bind_session("),
-        "ingest no longer derives its project from a verified session"
+        events.contains("SELECT project_id, user_id FROM sessions WHERE id = $1")
+            && events.contains("reader.is_member_of(project_id)")
+            && events.contains("owner_user_id == reader.user_id()"),
+        "ingest no longer derives its project and owner from a verified session"
     );
     assert!(
         !events.contains("body.project_id") && !events.contains("\"project_id\""),

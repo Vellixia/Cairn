@@ -2,6 +2,7 @@
 
 use crate::auth::{self, AdminUser, CurrentUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
+use crate::global::{ratify_team, retire_team};
 use crate::AppState;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::handler::Handler;
@@ -12,7 +13,6 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
-use crate::global::{ratify_team, retire_team};
 use std::str::FromStr;
 use uuid::Uuid;
 

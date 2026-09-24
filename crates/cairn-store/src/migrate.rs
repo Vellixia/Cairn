@@ -116,17 +116,44 @@ pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
     // before dropping Tasks so fresh stores contain no dangling foreign key.
     pool.execute("DROP TABLE IF EXISTS sessions").await?;
     for table in [
-        "memory_fts", "personal_fts", "team_fts", "memory_evidence_facts",
-        "memory_evidence", "memory_relations", "evidence_facts", "verification_runs",
-        "continuity_checkpoints", "reusable_patterns", "pattern_applications", "memories",
-        "observations", "handoffs", "outbox", "sync_meta", "sync_deferred", "sync_cursor",
-        "personal_knowledge_applicability", "personal_knowledge_relations", "personal_knowledge",
-        "team_knowledge_applicability", "team_knowledge_relations", "team_knowledge",
-        "project_traits", "cached_patterns", "authority_mode", "migration_state",
-        "retained_local", "legacy_pattern_claims", "tasks", "task_criteria", "task_blockers",
-        "task_changes", "criterion_evidence",
+        "memory_fts",
+        "personal_fts",
+        "team_fts",
+        "memory_evidence_facts",
+        "memory_evidence",
+        "memory_relations",
+        "evidence_facts",
+        "verification_runs",
+        "continuity_checkpoints",
+        "reusable_patterns",
+        "pattern_applications",
+        "memories",
+        "observations",
+        "handoffs",
+        "outbox",
+        "sync_meta",
+        "sync_deferred",
+        "sync_cursor",
+        "personal_knowledge_applicability",
+        "personal_knowledge_relations",
+        "personal_knowledge",
+        "team_knowledge_applicability",
+        "team_knowledge_relations",
+        "team_knowledge",
+        "project_traits",
+        "cached_patterns",
+        "authority_mode",
+        "migration_state",
+        "retained_local",
+        "legacy_pattern_claims",
+        "tasks",
+        "task_criteria",
+        "task_blockers",
+        "task_changes",
+        "criterion_evidence",
     ] {
-        pool.execute(format!("DROP TABLE IF EXISTS {table}").as_str()).await?;
+        pool.execute(format!("DROP TABLE IF EXISTS {table}").as_str())
+            .await?;
     }
     pool.execute(
         "CREATE TABLE sessions (

@@ -707,11 +707,10 @@ async fn gather(
 ) -> ApiResult<Vec<Candidate>> {
     let mut out = Vec::new();
 
-    let session: Option<(String,)> =
-        sqlx::query_as("SELECT branch FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_optional(pool)
-            .await?;
+    let session: Option<(String,)> = sqlx::query_as("SELECT branch FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
     let (branch,) = session.unwrap_or((String::new(),));
 
     // Project knowledge, most specific scope first: session, branch, project.

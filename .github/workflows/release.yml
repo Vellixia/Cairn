@@ -245,8 +245,7 @@ jobs:
 
           Open a new terminal, then inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server.exe\` is only needed if you host shared project memory
           yourself. Most people do not need it.
@@ -262,8 +261,7 @@ jobs:
 
           Then, inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server\` is only needed if you host shared project memory
           yourself. Most people do not need it.

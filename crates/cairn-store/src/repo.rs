@@ -1,7 +1,7 @@
 //! Edge binding and hook/session correlation. Canonical knowledge lives server-side.
 
-use crate::{Result, Store, StoreError, rows, tx};
-use cairn_core::domain::{Project, Session, SessionStatus, new_id};
+use crate::{rows, tx, Result, Store, StoreError};
+use cairn_core::domain::{new_id, Project, Session, SessionStatus};
 use uuid::Uuid;
 
 pub async fn ensure_local_user(store: &Store) -> Result<Uuid> {

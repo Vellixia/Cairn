@@ -1,7 +1,7 @@
 //! Durable typed-spool delivery.
 
-use crate::state::{Daemon, storage_err};
-use cairn_core::wire::{WireError, codes};
+use crate::state::{storage_err, Daemon};
+use cairn_core::wire::{codes, WireError};
 use cairn_store::repo;
 use std::time::Duration;
 use uuid::Uuid;
@@ -506,10 +506,8 @@ mod tests {
         let claimed = cairn_store::spool::claim_events(&daemon.store, account, Uuid::nil(), 8)
             .await
             .unwrap();
-        assert!(
-            claimed
-                .iter()
-                .any(|row| row.event.session_id == unlinked_session.id)
-        );
+        assert!(claimed
+            .iter()
+            .any(|row| row.event.session_id == unlinked_session.id));
     }
 }

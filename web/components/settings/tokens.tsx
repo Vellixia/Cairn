@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { api, type CreatedToken } from "@/lib/api";
+import { api, apiBase, type CreatedToken } from "@/lib/api";
 import { ConfirmButton } from "@/components/confirm-button";
 import { copyText, selectElementText } from "@/lib/clipboard";
 import {
@@ -236,9 +236,15 @@ function RevealedToken({
 }) {
   const [copied, setCopied] = useState(false);
   const codeRef = useRef<HTMLElement>(null);
+  const webUrl = typeof window === "undefined" ? "" : window.location.origin;
+  const setupCredential = JSON.stringify({
+    server_url: apiBase() || webUrl,
+    server_token: token.token,
+    web_url: webUrl,
+  });
 
   async function copy() {
-    if (await copyText(token.token)) {
+    if (await copyText(setupCredential)) {
       setCopied(true);
       toast.success("Token copied to clipboard");
       setTimeout(() => setCopied(false), 2000);
@@ -252,11 +258,11 @@ function RevealedToken({
   return (
     <Alert className="mb-6" data-testid="revealed-token">
       <KeyRound />
-      <AlertTitle>Copy {token.name} now</AlertTitle>
+      <AlertTitle>Copy {token.name} setup credential now</AlertTitle>
       <AlertDescription className="block">
         <p className="mb-3">
-          This is the only time the token is shown. The server stores a hash, so
-          it cannot show it to you again.
+          Pipe this JSON to <code>cairn setup</code>. This is the only time the
+          token is shown; the server stores only its hash.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <code
@@ -265,7 +271,7 @@ function RevealedToken({
             data-testid="token-plaintext"
             className="bg-muted min-w-0 flex-1 overflow-x-auto rounded px-2 py-1.5 font-mono text-xs break-all"
           >
-            {token.token}
+            {setupCredential}
           </code>
           <Button size="sm" variant="outline" onClick={copy}>
             {copied ? <Check /> : <Copy />}

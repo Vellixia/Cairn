@@ -22,6 +22,187 @@ use serde_json::json;
 
 type Reply = Result<serde_json::Value, WireError>;
 
+/// Install or refresh detected integrations during explicit setup.
+///
+/// Instructions stay user-owned: setup never edits `AGENTS.md`, `CLAUDE.md`,
+/// or committed `.claude/settings.json`. Existing Cairn-owned resources are
+/// updated only when inspection still matches their recorded ownership.
+pub async fn setup(d: &Daemon, cwd: &str) -> serde_json::Value {
+    setup_at(d, &cairn_integrate::scope::Env::discover(cwd)).await
+}
+
+async fn setup_at(d: &Daemon, env: &cairn_integrate::scope::Env) -> serde_json::Value {
+    use cairn_integrate::desired::{Choices, DesiredIntegrationState, RecordedResource};
+    use cairn_integrate::model::{
+        ActivationState, AgentId, ArtifactVersion, InstallationScope, ResourceKind, ResourceOwner,
+    };
+    use cairn_integrate::plan::{plan_agent, ChangeAction, Intent, RecordedInstall};
+
+    let mut applied = Vec::new();
+    let mut warnings = Vec::new();
+    for agent in AgentId::ALL
+        .into_iter()
+        .filter(|agent| *agent != AgentId::GenericMcp)
+    {
+        let adapter = cairn_integrate::adapter_for(agent);
+        let detection = adapter.detect(env);
+        if !detection.detected {
+            continue;
+        }
+
+        let records = match rec::bound_resources(&d.store, agent.as_str()).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some(RecordedInstall {
+                        agent,
+                        kind: ResourceKind::parse(&row.resource.kind)?,
+                        owner: ResourceOwner::parse(&row.resource.owner)?,
+                        scope: InstallationScope::parse(&row.resource.scope)?,
+                        location: row.resource.location.into(),
+                        content_hash: row.resource.content_hash,
+                        artifact_schema: row.resource.artifact_schema.map(|v| v as u32),
+                        artifact_revision: row.resource.artifact_revision,
+                        activation: ActivationState::parse(&row.resource.activation)?,
+                        serves: row
+                            .serves
+                            .iter()
+                            .filter_map(|value| AgentId::parse(value))
+                            .collect(),
+                        container_single_line: row.resource.container_single_line,
+                        created_container: row.resource.created_container,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "detail": format!("could not read integration ownership: {error}"),
+                }));
+                continue;
+            }
+        };
+        let recorded = records
+            .iter()
+            .map(|row| RecordedResource {
+                agent: row.agent,
+                kind: row.kind,
+                owner: row.owner,
+                scope: row.scope,
+                activation: row.activation,
+            })
+            .collect::<Vec<_>>();
+        let desired = DesiredIntegrationState::compose(
+            &Choices {
+                agents: vec![agent],
+                only: vec![
+                    ResourceKind::Mcp,
+                    ResourceKind::Lifecycle,
+                    ResourceKind::Skill,
+                ],
+                ..Default::default()
+            },
+            &[agent],
+            &recorded,
+            cairn_integrate::render::Contract::canonical().version(),
+            ArtifactVersion::new(
+                cairn_integrate::revision::embedded_schema(),
+                cairn_integrate::revision::embedded_revision(),
+            ),
+        );
+        let observed = adapter.inspect(env, &records);
+        let plan = plan_agent(Intent::Repair { force: false }, agent, &desired, &observed);
+        if plan.is_blocked() {
+            warnings.extend(plan.blocking.into_iter().map(|blocked| {
+                json!({
+                    "agent": agent.as_str(),
+                    "kind": blocked.kind.as_str(),
+                    "detail": blocked.detail,
+                })
+            }));
+            continue;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = rec::upsert_agent(
+            &d.store,
+            &rec::AgentIntegration {
+                agent: agent.as_str().into(),
+                adapter_version: 1,
+                detected_version: detection.version.clone(),
+                compatibility: "compatible_unverified".into(),
+                level: "mcp_plus".into(),
+                completion_guarantee: "not_demonstrated".into(),
+                connected_at: now.clone(),
+                last_verified_at: None,
+            },
+        )
+        .await;
+
+        for change in plan
+            .changes
+            .into_iter()
+            .filter(|change| matches!(change.action, ChangeAction::Add | ChangeAction::Update))
+        {
+            let materialized = match cairn_integrate::install::materialize_install(
+                env,
+                agent,
+                change.kind,
+                change.scope,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    warnings.push(json!({
+                        "agent": agent.as_str(),
+                        "kind": change.kind.as_str(),
+                        "detail": error.to_string(),
+                    }));
+                    continue;
+                }
+            };
+            if let Err(error) = cairn_integrate::install::commit(&materialized) {
+                warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "detail": error.to_string(),
+                }));
+                continue;
+            }
+            let resource = rec::InstalledResource {
+                id: uuid::Uuid::now_v7(),
+                kind: change.kind.as_str().into(),
+                owner: ResourceOwner::Direct.as_str().into(),
+                scope: change.scope.as_str().into(),
+                location: materialized.location.display().to_string(),
+                content_hash: materialized.content_hash,
+                artifact_schema: materialized
+                    .artifact
+                    .as_ref()
+                    .map(|value| value.schema as i64),
+                artifact_revision: materialized.artifact.map(|value| value.revision),
+                activation: ActivationState::NotApplicable.as_str().into(),
+                installed_at: now.clone(),
+                last_verified_at: Some(now.clone()),
+                container_single_line: materialized.container_single_line,
+                created_container: materialized.created_container,
+            };
+            match rec::bind(&d.store, agent.as_str(), &resource).await {
+                Ok(_) => applied.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "target": resource.location,
+                })),
+                Err(error) => warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "detail": format!("installed but ownership was not recorded: {error}"),
+                })),
+            }
+        }
+    }
+    json!({ "applied": applied, "warnings": warnings })
+}
+
 /// Ingest one canonical lifecycle event.
 ///
 /// Boxed because it dispatches back into the request handler, which is how it
@@ -289,4 +470,43 @@ pub async fn record_evidence(
     .await
     .map_err(storage_err)?;
     Ok(json!({ "recorded": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn setup_installs_owned_resources_is_idempotent_and_blocks_edits() {
+        let d = crate::testsupport::daemon().await;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let env = cairn_integrate::scope::Env::new(&home, &repo);
+
+        let first = setup_at(&d, &env).await;
+        assert_eq!(first["warnings"], json!([]));
+        assert_eq!(first["applied"].as_array().unwrap().len(), 3);
+        assert!(home.join(".claude.json").exists());
+        assert!(repo.join(".claude/settings.local.json").exists());
+        assert!(!repo.join("CLAUDE.md").exists());
+        assert!(!repo.join("AGENTS.md").exists());
+        assert!(!repo.join(".claude/settings.json").exists());
+
+        let second = setup_at(&d, &env).await;
+        assert_eq!(second["warnings"], json!([]));
+        assert_eq!(second["applied"], json!([]));
+
+        let edited = r#"{"mcpServers":{"cairn":{"command":"user-edit"}}}"#;
+        std::fs::write(home.join(".claude.json"), edited).unwrap();
+        let conflict = setup_at(&d, &env).await;
+        assert_eq!(conflict["applied"], json!([]));
+        assert_eq!(conflict["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+            edited
+        );
+    }
 }

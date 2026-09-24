@@ -1,93 +1,74 @@
-# Cairn V1 Architecture
+# V1 architecture
 
-`PRD.md` defines product behavior. This document names current architecture
-foundations and target-V1 mechanisms required for acceptance; target sections do
-not claim unimplemented behavior is shipped.
-
-## Components and ownership
+## Boundary
 
 ```text
-Agent hooks/MCP/CLI ──> cairnd + SQLite edge state ──> Axum API + PostgreSQL
-                                  │                         │
-                                  └── bounded cache          └── canonical truth
-                                                            └── Next.js control plane
+cairn setup
+  -> hidden hook/MCP adapters
+  -> cairnd capture, typed spools, receipts, bounded cache
+  -> cairn-server canonical behavior
+  -> web human interaction
 ```
 
-- `cairn-core` owns domain types, deterministic privacy/redaction, context
-  budgeting, and handoff synthesis.
-- `cairn-git` owns Git CLI access and local repository/worktree state derivation.
-- `cairn-integrate` owns agent adapters, lifecycle normalization, integration
-  configuration, installation, capability evidence, and integration contracts.
-- `cairn-store` owns SQLite edge persistence, FTS lexical search, pending-event
-  spool/outbox, cache metadata, and local operational state.
-- `cairnd` owns local capture, delivery, recovery, cache use, and sync.
-- `cairn` owns CLI, hook runtime, and six-tool MCP protocol.
-- `cairn-server` owns authenticated API, authorization, canonical acceptance,
-  PostgreSQL persistence, and server-side governance.
-- `web/` is a Next.js control plane. It consumes authorized server APIs; it is
-  never an authority.
+PostgreSQL is canonical for project, personal, and team knowledge; evidence and
+relations; accepted safe events; sessions and handoffs; governance; verification and
+supersession; graph traversal; retrieval ranking and decay; bounded analytics; and
+idempotency receipts.
 
-No component adds a second canonical store. No graph service, vector database,
-raw archive, broker, workflow engine, or new process is part of V1.
+SQLite is an edge database only. It stores server/account/project binding, distinct
+capture and command spools, receipts, bounded returned context, hook/session
+correlation, Cairn-owned integration metadata, and migration-manifest metadata. It
+does not own searchable knowledge or a replica of canonical server state.
 
-## Write, sync, and recovery path
+## Delivery invariant
 
-1. Agent-facing capture is bounded, redacted, and fail-soft. It records safe
-   local work or returns without blocking the agent.
-2. For linked projects, local mutation becomes a stable pending event inside one
-   transaction. Local success means queued intent, never canonical acceptance.
-3. Drainer sends event under authenticated server/account/project context.
-   Server authorizes current caller, assigns/validates canonical outcome, and
-   deduplicates retries by stable identity.
-4. Client applies accepted response/pull as cache replacement. It never merges a
-   local assertion into server truth. Interrupted claims become retryable; replay
-   converges to one canonical effect.
-5. Recovery reports pending/failed/blocked state, resumes safe work, and never
-   re-executes accepted events as side effects.
+Each queued payload is immutable and has stable identity. Daemon claims it, sends it,
+and acknowledges it only after server acceptance is recorded. Retrying after a lost
+acknowledgement sends the same identity; server returns the existing receipt and does
+not repeat canonical effect. At-least-once transport therefore produces exactly one
+canonical effect.
 
-## Read and cache path
+Capture and command records remain distinct because their ordering, capacity, and
+rejection rules differ. One delivery loop handles both without a generic command
+router or entity outbox.
 
-Fresh server reads make authorization decisions at server. Client cache may serve
-only an already-authorized bounded context for same server, account, and project.
-Each cache record includes those identities, retrieval time, and staleness state.
-Changing any identity invalidates rows before read. Cache output is labelled; a
-miss reports unavailable durable context rather than elevating local copies.
+Privacy-policy changes may suppress or replace an operation only after prior
+identity's receipt state is resolved.
 
-Retrieval orders applicable project scope before broader domains. Lexical search
-is baseline; optional vector/relation signals are additive, bounded, and returned
-as score explanation fields. No retrieval score alters verification or authority.
+## Retrieval and offline behavior
 
-## Data and safety invariants
+Applicability order is current session, then branch, then project. Verification,
+authority, conflict, supersession, and pinning outrank recency. Decay affects ranking
+only and appears in retrieval explanation.
 
-- Canonical records retain stable identity, scope/domain, ownership, provenance,
-  evidence references, relations, tombstones, and supersession history.
-- Supersession and conflicts are explicit relations/states. Stale and superseded
-  records are historical by default, not erased truth.
-- Raw observations, transcripts, raw tool output, secrets, absolute paths, and
-  vendor payloads do not cross boundary. Deterministic gate is shared by ingress
-  paths and fails closed.
-- Caller identity comes from authentication, not request payload. Server checks
-  membership and domain/ownership authorization for every operation.
-- Export/import uses versioned manifests and is resumable/idempotent. It reports
-  accepted, rejected, and retained records, including pending and local-only
-  state, rather than silently dropping them.
+Offline capture continues up to explicit spool limits. Saturation rejects capture
+rather than silently dropping it. Eligible cached context is finite-age and labelled
+with age and identity; search reports server unavailability. Authentication denial
+invalidates matching cache immediately. Network failure does not imply knowledge of
+revocation.
 
-## Target V1: bounded advanced actions
+## Authorization
 
-Existing foundations are six MCP tools, authorized HTTP domains, typed memory
-relations, and canonical records. V1 acceptance requires graph, replay,
-governance, and decay/analytics/search extensions to use typed actions within
-that surface; it does not add MCP tools. When implemented, graph will read
-existing typed relations through capped PostgreSQL traversal; replay will read
-only accepted safe events; decay will be deterministic ranking input; analytics
-will aggregate existing records; governance transitions will preserve separate
-proposer, ratifier, retirer, ownership, conflict, and supersession checks. None
-may create authority, new durable infrastructure, or unbounded UI surface.
+Every surviving operation has one server application implementation and an explicit
+project, personal, team, account, or administrator authorization boundary. Hooks,
+MCP, and web are thin adapters. Credentials determine actor identity; request bodies
+cannot name account ownership.
 
-## Verification boundary
+## Removed domains
 
-Acceptance tests exercise capture → acceptance → cross-device context, restart
-and outage queue behavior, cache identity invalidation, authorization/privacy,
-bounded retrieval explanations, graph/replay safety, governance transitions, and
-interrupted import recovery. Production-code reduction is measured independently
-of moved code, tests, fixtures, generated output, and dependencies.
+Task domain, task scope, task identifiers on sessions, task retrieval, task evidence,
+task analytics, task sync, local canonical knowledge, full-state pull sync, namespace
+authority, cutover runtime, browser-facing CLI administration, and registration/join
+stubs are not V1 runtime concepts.
+
+Legacy Task records and dependent scoped data are exported as `removed_feature` and
+retained offline. Migration never widens their scope or promotes them into canonical
+knowledge.
+
+## Migration
+
+Migration is setup/import work, not a continuous runtime subsystem. Legacy SQLite is
+backed up with WAL state and left unchanged; a fresh edge database starts immediately.
+Safe pending operations retain identity. Server logical import is bounded, resumable,
+idempotent, and records a disposition per source record. Applied PostgreSQL migrations
+remain immutable history.

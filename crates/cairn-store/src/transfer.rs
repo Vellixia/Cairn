@@ -961,6 +961,20 @@ pub async fn import_snapshot(
 mod tests {
     use super::*;
 
+    async fn legacy_task_store() -> Store {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true)
+            .shared_cache(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        migrate::run_to(&pool, 14).await.unwrap();
+        Store { pool }
+    }
+
     #[tokio::test]
     async fn v13_manifest_upgrades_before_task_export_and_cleanup() {
         let dir = tempfile::tempdir().unwrap();
@@ -1084,7 +1098,7 @@ mod tests {
     }
 
     async fn task_bundle_fixture() -> (Store, tempfile::TempDir, std::path::PathBuf) {
-        let store = Store::open_memory().await.unwrap();
+        let store = legacy_task_store().await;
         sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
             .execute(store.pool()).await.unwrap();
         sqlx::query("INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')")
@@ -1136,7 +1150,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_conserves_criterion_and_task_verification_evidence() {
-        let store = Store::open_memory().await.unwrap();
+        let store = legacy_task_store().await;
         let pool = store.pool();
         for sql in [
             "INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')",
@@ -1185,7 +1199,7 @@ mod tests {
 
     #[tokio::test]
     async fn removed_feature_bundle_conserves_task_records_and_dependencies() {
-        let store = Store::open_memory().await.unwrap();
+        let store = legacy_task_store().await;
         let pool = store.pool();
         sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
             .execute(pool).await.unwrap();

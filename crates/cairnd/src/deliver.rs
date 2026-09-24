@@ -51,7 +51,7 @@
 //! to defer to, so its own store is the only authority there is.
 
 use crate::state::{Daemon, Resolved};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use uuid::Uuid;

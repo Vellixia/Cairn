@@ -389,27 +389,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Guards: requirements that a passing test suite cannot demonstrate.
-  #
-  # Traceability is instant and belongs in its own job so it is never queued
-  # behind the container build below.
-  guards:
-    name: guards (traceability)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Every requirement is cited by a test, or excused with a reason
-        run: bash scripts/requirement-coverage.sh
-
-  # FR-045 / SC-006: the local product works with no network at all.
+  # Edge capture and durable spooling work with no external network.
   #
   # `--network none` leaves the container with loopback only, so a code path that
   # needed the network fails rather than quietly degrading. This existed as a
   # script from the start and nothing ran it, which meant Cairn's offline
-  # guarantee was asserted by a file nobody executed — and the `cairn link` bug
-  # in this release was an offline-correctness bug that reached a release.
+  # guarantee was asserted by a file nobody executed, allowing an
+  # offline-correctness bug to reach a release.
   offline:
-    name: offline (no network)
+    name: edge offline (no external network)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

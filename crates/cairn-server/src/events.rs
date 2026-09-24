@@ -25,17 +25,17 @@
 //! (FR-771). `duplicate` is a success: a retry that gets it has achieved
 //! exactly what it was for.
 
-use crate::AppState;
 use crate::auth::{CurrentUser, ReaderContext, SessionBinding};
 use crate::error::{ApiError, ApiResult};
-use axum::Json;
+use crate::AppState;
 use axum::extract::State;
+use axum::Json;
 use cairn_core::event::{
-    BATCH_MAX_EVENTS, CONTRACT_VERSION, EventContent, EventKind, SafeCanonicalEvent,
+    EventContent, EventKind, SafeCanonicalEvent, BATCH_MAX_EVENTS, CONTRACT_VERSION,
 };
 use cairn_core::eventid;
 use cairn_core::validate::{
-    ProjectIdentity, SafeEventField, validate_repo_file, validate_safe_event_text,
+    validate_repo_file, validate_safe_event_text, ProjectIdentity, SafeEventField,
 };
 use cairn_core::vocabulary::{self, SessionVocabulary};
 use serde::{Deserialize, Serialize};
@@ -122,13 +122,7 @@ pub struct BatchResponse {
     pub results: Vec<EventOutcome>,
 }
 
-/// Every name the synchronization boundary refuses, enforced here too.
-///
-/// FR-777a1 makes this obligation general rather than satisfied by renaming one
-/// field: two boundaries on one server disagreeing about the same name is
-/// exactly the drift FR-760 forbids for rejection classes. The list is checked
-/// **recursively at any depth**, because a refused name nested inside `content`
-/// is refused for the same reason it is refused at the top.
+/// Legacy raw-material names refused recursively at any depth.
 pub(crate) const REFUSED_FIELD_NAMES: &[&str] = &[
     "summary",
     "path",
@@ -141,7 +135,6 @@ pub(crate) const REFUSED_FIELD_NAMES: &[&str] = &[
     "value_digest",
     "fingerprint",
     "relevant_paths",
-    "criteria_snapshot",
     "sanitization_report",
     "origin_ref",
     "alternative_cause",

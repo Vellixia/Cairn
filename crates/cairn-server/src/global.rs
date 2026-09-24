@@ -9,9 +9,7 @@ use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use cairn_core::domain::{
-    RelationBasis, RelationKind, ServerRole, TeamState,
-};
+use cairn_core::domain::{RelationBasis, RelationKind, ServerRole, TeamState};
 use cairn_core::validate::ProjectIdentity;
 use serde::Deserialize;
 use serde_json::{json, Value};

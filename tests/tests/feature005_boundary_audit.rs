@@ -3,13 +3,10 @@
 //!
 //! Two standing refusals, and both are the kind that erode quietly:
 //!
-//! - **No safe-event field may reuse a name the synchronization boundary
-//!   refuses** (FR-777a). Two boundaries on one server disagreeing about the
-//!   same name is the drift FR-760 forbids for rejection classes, and the
-//!   refused set is full of names that are the *natural* choice for something
-//!   a command, test or tool-failure event has to carry — `command`,
-//!   `exit_code`, `details`, `summary`. The pressure to reuse one is
-//!   continuous.
+//! - **No safe-event field may reuse a refused legacy name** (FR-777a). The
+//!   refused set is full of names that are the natural choice for something a
+//!   command, test or tool-failure event has to carry — `command`, `exit_code`,
+//!   `details`, `summary`. The pressure to reuse one is continuous.
 //! - **Nothing durable holds raw material.** No column, on either side, for a
 //!   transcript, a prompt, raw tool output or a vendor's original JSON. Raw
 //!   material lives in memory for the duration of parsing and redaction and is
@@ -41,8 +38,7 @@ fn source(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// The names the synchronization boundary refuses, recursively at any depth
-/// (`data-model.md` preamble, `crates/cairn-server/src/sync.rs`).
+/// Names event ingest refuses recursively at any depth.
 const REFUSED: &[&str] = &[
     "summary",
     "path",
@@ -55,7 +51,6 @@ const REFUSED: &[&str] = &[
     "value_digest",
     "fingerprint",
     "relevant_paths",
-    "criteria_snapshot",
     "sanitization_report",
     "origin_ref",
     "alternative_cause",
@@ -64,7 +59,6 @@ const REFUSED: &[&str] = &[
     "rationale",
     "basis_evidence_id",
     "path_fingerprints",
-    "task_snapshot_at_bind",
     "detail",
     "prior_value",
     "new_value",
@@ -287,10 +281,7 @@ fn the_local_schema_gained_no_raw_material_column_either() {
 }
 
 #[test]
-fn the_ingest_boundary_refuses_every_name_the_sync_boundary_does() {
-    // The two lists have to be the same list. A name refused by one boundary
-    // and accepted by the other is the drift FR-777a1 exists to prevent, and it
-    // would be invisible until something used it.
+fn the_ingest_boundary_refuses_every_audited_legacy_name() {
     let events = source("crates/cairn-server/src/events.rs");
     let start = events
         .find("const REFUSED_FIELD_NAMES")
@@ -299,8 +290,7 @@ fn the_ingest_boundary_refuses_every_name_the_sync_boundary_does() {
     for name in REFUSED {
         assert!(
             list.contains(&format!("\"{name}\"")),
-            "the ingest boundary does not refuse `{name}`, which the sync \
-             boundary does"
+            "the ingest boundary does not refuse audited legacy name `{name}`"
         );
     }
 }

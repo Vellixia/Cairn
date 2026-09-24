@@ -108,7 +108,6 @@ macro_rules! text_enum {
     };
 }
 
-#[allow(unused_imports)]
 pub(crate) use text_enum;
 
 text_enum!(
@@ -1159,9 +1158,7 @@ mod tests {
         // unnoticed changes this number — which is the point of asserting it
         // rather than only the names.
         assert_eq!(OutboxEntityType::ALL.len(), 9);
-        for added in ["memory_relation"] {
-            assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
-        }
+        assert!(OutboxEntityType::from_str("memory_relation").is_ok());
         // Feature 004's four (FR-528). The two relation types are here because
         // both relations tables exist on the server as well as locally, and a
         // relation belongs to neither of the two rows it names — so unlike an

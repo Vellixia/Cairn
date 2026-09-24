@@ -1,8 +1,7 @@
 # Sources
 
-Payload shapes recorded **2026-08-11** from `code.claude.com/docs` (hooks, mcp, skills,
-memory), as cited in `specs/002-agent-integration-platform/research.md` §D30. Values are
-realistic but invented; no payload here came from a real session.
+Payload shapes recorded **2026-08-11** from `code.claude.com/docs` (hooks, MCP, skills,
+memory). Values are realistic but invented; no payload here came from a real session.
 
 Each file records one vendor event, the payload, and what the adapter must make of it:
 `expect` is the canonical event name, or `null` where the adapter must decline. A vendor

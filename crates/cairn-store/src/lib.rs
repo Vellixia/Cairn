@@ -185,17 +185,38 @@ mod tests {
     #[tokio::test]
     async fn fresh_store_has_no_local_knowledge_tables() {
         let store = Store::open_memory().await.unwrap();
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
-        )
-        .fetch_all(store.pool())
-        .await
-        .unwrap();
-        for removed in ["memories", "observations", "handoffs", "outbox", "sync_meta", "sync_cursor", "personal_knowledge", "team_knowledge"] {
-            assert!(!tables.iter().any(|table| table == removed), "fresh edge table: {removed}");
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        for removed in [
+            "memories",
+            "observations",
+            "handoffs",
+            "outbox",
+            "sync_meta",
+            "sync_cursor",
+            "personal_knowledge",
+            "team_knowledge",
+        ] {
+            assert!(
+                !tables.iter().any(|table| table == removed),
+                "fresh edge table: {removed}"
+            );
         }
-        for retained in ["projects", "sessions", "event_spool", "command_spool", "agent_integrations", "removed_feature_manifest"] {
-            assert!(tables.iter().any(|table| table == retained), "missing edge table: {retained}");
+        for retained in [
+            "projects",
+            "sessions",
+            "event_spool",
+            "command_spool",
+            "agent_integrations",
+            "removed_feature_manifest",
+        ] {
+            assert!(
+                tables.iter().any(|table| table == retained),
+                "missing edge table: {retained}"
+            );
         }
     }
 

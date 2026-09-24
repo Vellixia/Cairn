@@ -1,6 +1,6 @@
 //! Request dispatch: the daemon's whole behaviour, one function per verb.
 
-use crate::state::{Daemon, Resolved, ServerCredentials, git_status, storage_err};
+use crate::state::{git_status, storage_err, Daemon, Resolved, ServerCredentials};
 use cairn_core::domain::*;
 use cairn_core::event::{EventContent, EventKind, OpenTrigger, SafeCanonicalEvent};
 use cairn_core::wire::*;
@@ -393,12 +393,11 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             memory_id,
             domain,
         } => match domain {
-            // A team entry's lifecycle only advances through `cairn team
-            // retire`, by an admin (`contracts/global-memory.md` §5b) — never
-            // through this tool.
+            // Team retirement remains an administrator governance operation,
+            // never a memory-tool mutation.
             Some(KnowledgeDomain::Team) => Err(WireError::invalid(
                 "domain: \"team\" cannot be forgotten through cairn_remember; \
-                 use `cairn team retire` (admin only)",
+                 use web Governance (admin only)",
             )),
             Some(KnowledgeDomain::Personal) => {
                 queue_knowledge_command(
@@ -456,11 +455,13 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     d.forget_repo(cwd).await;
     let r = d.resolve(cwd).await?;
     let project = bind_detected_project(d, &r.project).await?;
+    let integrations = crate::integrations::setup(d, cwd).await;
     let legacy_migration = migrate_removed_feature_tasks(d).await;
     Ok(json!({
         "project": ProjectSummary::from(&project),
         "worktree_path": r.worktree(),
         "git_common_dir": r.repo.git_common_dir.display().to_string(),
+        "integrations": integrations,
         "legacy_migration": legacy_migration,
     }))
 }
@@ -485,10 +486,7 @@ async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project,
             "repository has no remote; cannot select a server project",
         )
     })?;
-    let response = crate::sync::client(d)
-        .await?
-        .get("/api/projects")
-        .await?;
+    let response = crate::sync::client(d).await?.get("/api/projects").await?;
     let projects = response
         .get("projects")
         .and_then(serde_json::Value::as_array)
@@ -1426,8 +1424,11 @@ mod tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0_u8; 1024];
             let read = socket.read(&mut request).await.unwrap();
-            assert!(String::from_utf8_lossy(&request[..read]).contains("authorization: Bearer reloaded-token"));
-            let body = format!(r#"{{"projects":[{{"id":"{project_id}"}}]}}"#);
+            assert!(String::from_utf8_lossy(&request[..read])
+                .contains("authorization: Bearer reloaded-token"));
+            let body = format!(
+                r#"{{"projects":[{{"id":"{project_id}","repository_remote":"example.test/reloaded"}}]}}"#
+            );
             socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
         format!("http://{address}")
@@ -1453,20 +1454,18 @@ mod tests {
     #[tokio::test]
     async fn init_reloads_setup_credentials_for_existing_daemon() {
         let repo = fx::Repo::with(cairn_core::CairnConfig::default()).await;
-        assert!(
-            std::process::Command::new("git")
-                .args([
-                    "-C",
-                    &repo.cwd,
-                    "remote",
-                    "add",
-                    "origin",
-                    "https://example.test/reloaded.git"
-                ])
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                &repo.cwd,
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/reloaded.git"
+            ])
+            .status()
+            .unwrap()
+            .success());
         let config_path = cairn_core::paths::config_path();
         let token_path = cairn_core::paths::token_path();
         let old_config = std::fs::read(&config_path).ok();
@@ -1481,23 +1480,38 @@ mod tests {
         config.save().unwrap();
         std::fs::write(&token_path, "reloaded-token").unwrap();
         let value = init(&repo.daemon, &repo.cwd).await.unwrap();
-        assert_eq!(value["project"]["server_project_id"], server_project_id.to_string());
+        assert_eq!(
+            value["project"]["server_project_id"],
+            server_project_id.to_string()
+        );
         assert_eq!(repo.daemon.server.read().await.account_id, Some(account));
         config.server_url = Some(lookup_server(Uuid::now_v7()).await);
         config.save().unwrap();
         let error = init(&repo.daemon, &repo.cwd).await.unwrap_err();
         assert_eq!(error.code, codes::NOT_LINKED);
-        assert_eq!(repo.daemon.resolve(&repo.cwd).await.unwrap().project.server_project_id, Some(server_project_id));
+        assert_eq!(
+            repo.daemon
+                .resolve(&repo.cwd)
+                .await
+                .unwrap()
+                .project
+                .server_project_id,
+            Some(server_project_id)
+        );
         config.server_url = Some(lookup_server(server_project_id).await);
         config.save().unwrap();
         assert!(init(&repo.daemon, &repo.cwd).await.is_ok());
         match old_config {
             Some(value) => std::fs::write(&config_path, value).unwrap(),
-            None => { let _ = std::fs::remove_file(&config_path); }
+            None => {
+                let _ = std::fs::remove_file(&config_path);
+            }
         }
         match old_token {
             Some(value) => std::fs::write(&token_path, value).unwrap(),
-            None => { let _ = std::fs::remove_file(&token_path); }
+            None => {
+                let _ = std::fs::remove_file(&token_path);
+            }
         }
     }
 }

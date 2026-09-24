@@ -650,7 +650,7 @@ fn cached_context_notice() -> String {
 /// now, and the notice says which.
 fn unavailable_context_notice() -> String {
     "_Cairn could not reach the server this turn and has no cached briefing for this \
-     session and account; durable memory (task/branch/project memory, handoffs, \
+     session and account; durable memory (session/branch/project memory, handoffs, \
      patterns, personal notes, team guidance) is unavailable this turn. Only this \
      repository's own state is shown below._\n\n"
         .to_string()

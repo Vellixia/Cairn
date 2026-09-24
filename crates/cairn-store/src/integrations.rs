@@ -658,9 +658,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_state_creates_no_outbox_rows() {
-        // FR-183, SC-120: no outbox entity type, and the enqueue path is never
-        // called for any of this.
+    async fn integration_state_creates_no_delivery_rows() {
         let s = store().await;
         upsert_agent(&s, &agent_row("codex")).await.unwrap();
         bind(
@@ -684,12 +682,26 @@ mod tests {
         .await
         .unwrap();
 
-        let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM outbox")
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'outbox'",
+            )
             .fetch_one(s.pool())
             .await
-            .unwrap()
-            .get("n");
-        assert_eq!(count, 0, "integration state reached the outbox");
+            .unwrap(),
+            0,
+            "generic outbox returned to the thin edge schema",
+        );
+        for table in ["event_spool", "command_spool"] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                    .fetch_one(s.pool())
+                    .await
+                    .unwrap(),
+                0,
+                "integration state reached {table}",
+            );
+        }
     }
 }
 

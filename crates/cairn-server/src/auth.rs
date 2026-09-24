@@ -348,8 +348,8 @@ pub async fn ensure_admin(
         if let Some(id) = sqlx::query_scalar(
             "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
         )
-            .fetch_optional(&mut *tx)
-            .await?
+        .fetch_optional(&mut *tx)
+        .await?
         {
             tx.commit().await?;
             return Ok((id, AdminOutcome::Existing));
@@ -393,10 +393,10 @@ pub async fn ensure_admin(
         None if standing_columns => sqlx::query_scalar(
             "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
         )
-            .fetch_one(&mut *tx)
-            .await
-            .map(|id| (id, AdminOutcome::Existing))
-            .map_err(Into::into),
+        .fetch_one(&mut *tx)
+        .await
+        .map(|id| (id, AdminOutcome::Existing))
+        .map_err(Into::into),
         None => sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
             .bind(&email)
             .fetch_one(&mut *tx)
@@ -566,7 +566,7 @@ pub async fn require_member(pool: &PgPool, project_id: Uuid, user_id: Uuid) -> A
 // FR-846a)
 // ---------------------------------------------------------------------------
 
-use cairn_core::domain::{KnowledgeDomain, Readership, Reference};
+use cairn_core::domain::{KnowledgeDomain, Reference};
 
 // The four items below are the read side of this boundary and have no caller
 // until retrieval lands (US2/US5, T093-T124). They are written here, with the
@@ -586,20 +586,12 @@ use cairn_core::domain::{KnowledgeDomain, Readership, Reference};
 /// noticing a gap in a rank sequence could enumerate a colleague's personal
 /// knowledge without ever reading a word of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Visibility {
     /// The reader may see this reference and resolve it.
     Visible,
     /// The reader may not. The caller must drop it — not blank it, not
     /// placeholder it, not leave a numbered gap where it was.
     Withheld,
-}
-
-impl Visibility {
-    #[allow(dead_code)]
-    pub fn is_visible(&self) -> bool {
-        matches!(self, Visibility::Visible)
-    }
 }
 
 /// What the server knows about the reader, once, so a resolution loop does not
@@ -630,7 +622,6 @@ impl ReaderContext {
         })
     }
 
-    #[allow(dead_code)]
     pub fn user_id(&self) -> Uuid {
         self.user_id
     }
@@ -653,7 +644,6 @@ impl ReaderContext {
 /// **Shared project membership does not widen a personal record.** An
 /// administrator's standing is over team guidance, not over a colleague's
 /// private notes, so `AdminUser` gets no exemption here and is not a parameter.
-#[allow(dead_code)]
 pub async fn reference_visibility(
     pool: &PgPool,
     reader: &ReaderContext,
@@ -715,29 +705,6 @@ pub async fn reference_visibility(
     } else {
         Visibility::Withheld
     })
-}
-
-/// Keep only the references this reader may see, dropping the rest.
-///
-/// Dropping, not marking. The returned list carries no evidence that anything
-/// was removed — no gap, no count, no placeholder — because the existence of a
-/// withheld record is itself the disclosure FR-846a forbids.
-#[allow(dead_code)]
-pub async fn visible_references(
-    pool: &PgPool,
-    reader: &ReaderContext,
-    references: &[Reference],
-) -> ApiResult<Vec<Reference>> {
-    let mut kept = Vec::new();
-    for reference in references {
-        if reference_visibility(pool, reader, *reference)
-            .await?
-            .is_visible()
-        {
-            kept.push(*reference);
-        }
-    }
-    Ok(kept)
 }
 
 /// What a session establishes about the event that names it.
@@ -827,13 +794,6 @@ pub async fn bind_session(
         // it" is not "you own it" (FR-764, Principle XI).
         _ => Ok(Err(SessionBindingError::NotOwned)),
     }
-}
-
-/// The readership a domain declares, so a caller can state it without
-/// re-deriving it.
-#[allow(dead_code)]
-pub fn declared_readership(reference: Reference) -> Readership {
-    reference.readership()
 }
 
 #[cfg(test)]

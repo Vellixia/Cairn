@@ -20,7 +20,7 @@ use cairn_e2e::feature005::{Account, Pg};
 use cairn_e2e::{
     post_file_status_bearer, post_json_bearer, post_json_status_bearer, post_status_bearer,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 macro_rules! pg {

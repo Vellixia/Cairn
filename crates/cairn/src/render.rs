@@ -36,7 +36,11 @@ pub fn briefing(payload: &ContextPayload) -> String {
                 out.push_str(&format!("{}\n", warning.subject));
                 continue;
             }
-            out.push_str(&format!("⚠ {} {}", warning.kind.to_uppercase(), warning.subject));
+            out.push_str(&format!(
+                "⚠ {} {}",
+                warning.kind.to_uppercase(),
+                warning.subject
+            ));
             if !warning.detail.is_empty() {
                 out.push_str(&format!(" — {}", warning.detail));
             }
@@ -65,7 +69,10 @@ pub fn briefing(payload: &ContextPayload) -> String {
             }
         }
         if !handoff.changed_files.is_empty() {
-            out.push_str(&format!("\nChanged files: {}\n", handoff.changed_files.join(", ")));
+            out.push_str(&format!(
+                "\nChanged files: {}\n",
+                handoff.changed_files.join(", ")
+            ));
         }
     }
 
@@ -103,7 +110,10 @@ pub fn briefing(payload: &ContextPayload) -> String {
         payload.estimated_tokens, payload.budget
     ));
     if payload.truncated {
-        out.push_str(&format!("; omitted: {}", payload.omitted_sections.join(", ")));
+        out.push_str(&format!(
+            "; omitted: {}",
+            payload.omitted_sections.join(", ")
+        ));
     }
     out.push('\n');
     out
