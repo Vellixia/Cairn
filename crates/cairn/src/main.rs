@@ -298,7 +298,7 @@ fn render_setup_success(value: &serde_json::Value, json: bool) -> String {
         }
         if let Some(migration) = value.get("legacy_migration") {
             let status = migration["status"].as_str().unwrap_or("unknown");
-            output.push_str(&format!("Legacy Task migration: {status}.\n"));
+            output.push_str(&format!("Legacy migration: {status}.\n"));
             if let Some(detail) = migration["detail"].as_str() {
                 output.push_str(&format!("Detail: {detail}\n"));
             }
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn setup_renders_stable_text_and_json_envelopes() {
         let value = serde_json::json!({ "project": { "name": "demo" }, "web_url": "https://cairn.example.com", "integrations": { "warnings": [{ "agent": "codex", "kind": "mcp", "detail": "edited by user" }] }, "legacy_migration": { "status": "warning", "detail": "artifact conflict", "backup": "/tmp/legacy.sqlite", "manifest": "/tmp/legacy.manifest.json", "bundle": "/tmp/removed_feature.json" } });
-        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\nWeb: https://cairn.example.com\nIntegration warning (codex/mcp): edited by user\nLegacy Task migration: warning.\nDetail: artifact conflict\nbackup: /tmp/legacy.sqlite\nmanifest: /tmp/legacy.manifest.json\nbundle: /tmp/removed_feature.json\n");
+        assert_eq!(render_setup_success(&value, false), "Cairn is tracking demo.\nWeb: https://cairn.example.com\nIntegration warning (codex/mcp): edited by user\nLegacy migration: warning.\nDetail: artifact conflict\nbackup: /tmp/legacy.sqlite\nmanifest: /tmp/legacy.manifest.json\nbundle: /tmp/removed_feature.json\n");
 
         let json: serde_json::Value =
             serde_json::from_str(&render_setup_success(&value, true)).expect("setup JSON");

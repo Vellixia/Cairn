@@ -656,10 +656,7 @@ pub fn routes() -> Router<AppState> {
         .web_operation(web_operations::SESSIONS, project_sessions)
         // Health and the capture funnel. One write path and one read path per
         // report, shared by US5's dashboard and US6's status (T035).
-        .route(
-            "/api/projects/{id}/health",
-            get(read_health).post(report_health),
-        )
+        .route("/api/projects/{id}/health", post(report_health))
         .route("/api/projects/{id}/dispositions", post(report_dispositions))
         // The web control plane's project-scoped reads (T108, T109). Every one
         // of them calls `require_member` before its query, so a non-member is
@@ -1003,34 +1000,8 @@ async fn report_health(
     Ok(Json(json!({ "accepted": accepted })))
 }
 
-/// The matrix as it stands, for one project.
-///
-/// A plain read over what the write side accepted. It does **not** synthesize
-/// missing cells: a matrix with a cell absent is a real state — nothing has
-/// ever reported it — and filling it in here would make "no report arrived"
-/// indistinguishable from "reported as no evidence" (FR-855).
-async fn read_health(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    Path(project_id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, project_id, user.id).await?;
-    let cells = integration_health_rows(&state.pool, project_id).await?;
-    Ok(Json(json!({ "cells": cells })))
-}
-
-/// The matrix rows for one project — the single read both health surfaces use.
-///
-/// Extracted rather than copied because US5's agents screen and US6's status
-/// output ask the *same* question of the same table, and a second query is a
-/// second place for "which columns a matrix cell has" to drift. What kept them
-/// apart was only the envelope key their two audiences already depend on
-/// (`cells` on `/health`, `rows` on `/integration-health`), and an envelope is
-/// not a reason to have two queries.
-///
-/// It synthesizes nothing. A capability with no row has never been reported,
-/// which is a different state from a capability reported as `no_evidence`, and
-/// filling the gap here would erase the distinction FR-855 draws.
+/// Stored installation reports for one project. Missing rows stay missing:
+/// no report and reported `no_evidence` are different states.
 async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiResult<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT account_id, writer_id, agent, capability, stage, status, evidence_kind,
@@ -1075,11 +1046,6 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
 }
 
 /// `GET /api/projects/{id}/integration-health` — the agents screen (FR-887).
-///
-/// Reads through [`integration_health_rows`], which is `read_health`'s own
-/// query: the path is new because `web-control-plane.md` §2 names it, and the
-/// implementation is not, because a second one would be a second answer to
-/// "which capabilities are working".
 ///
 /// `stale` is deliberately absent from the row. The web view computes it from
 /// server-owned `reported_at`; `observed_at` remains the reporter's claim, and a server that

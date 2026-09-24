@@ -36,7 +36,7 @@ async fn setup_at(d: &Daemon, env: &cairn_integrate::scope::Env) -> serde_json::
     use cairn_integrate::model::{
         ActivationState, AgentId, ArtifactVersion, InstallationScope, ResourceKind, ResourceOwner,
     };
-    use cairn_integrate::plan::{plan_agent, ChangeAction, Intent, RecordedInstall};
+    use cairn_integrate::plan::{plan_agent, ChangeAction, RecordedInstall};
 
     let mut applied = Vec::new();
     let mut warnings = Vec::new();
@@ -111,7 +111,7 @@ async fn setup_at(d: &Daemon, env: &cairn_integrate::scope::Env) -> serde_json::
             ),
         );
         let observed = adapter.inspect(env, &records);
-        let plan = plan_agent(Intent::Repair { force: false }, agent, &desired, &observed);
+        let plan = plan_agent(agent, &desired, &observed);
         if plan.is_blocked() {
             warnings.extend(plan.blocking.into_iter().map(|blocked| {
                 json!({

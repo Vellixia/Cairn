@@ -256,8 +256,7 @@ refuses to do, and it refuses it at the migration too. Existing memories stay
 free-form, searchable, briefable and syncable exactly as before.
 
 One documented approximation: `superseded_at` for supersessions that happened
-before this release is taken from `updated_at`. See
-`specs/003-project-intelligence/migration.md` §Step 2(b).
+before this release is taken from `updated_at`.
 
 ### Continuity, verified against live agents
 

@@ -141,7 +141,7 @@ pub async fn bind(store: &Store, agent: &str, resource: &InstalledResource) -> R
     // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
     // connection has written since the read began — the busy timeout does not
     // apply to a lock upgrade. So under concurrent writers this failed outright
-    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // rather than waiting, and surfaced during setup as "database is
     // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
     // reason `tx` exists.
     let mut tx = tx::begin(store, "bind").await?;
@@ -246,7 +246,7 @@ pub async fn unbind(store: &Store, agent: &str, kind: &str) -> Result<Unbound> {
     // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
     // connection has written since the read began — the busy timeout does not
     // apply to a lock upgrade. So under concurrent writers this failed outright
-    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // rather than waiting, and surfaced during setup as "database is
     // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
     // reason `tx` exists.
     let mut tx = tx::begin(store, "unbind").await?;
@@ -355,7 +355,7 @@ pub async fn remove_agent_if_unbound(store: &Store, agent: &str) -> Result<bool>
     // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
     // connection has written since the read began — the busy timeout does not
     // apply to a lock upgrade. So under concurrent writers this failed outright
-    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // rather than waiting, and surfaced during setup as "database is
     // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
     // reason `tx` exists.
     let mut tx = tx::begin(store, "remove_agent_if_unbound").await?;

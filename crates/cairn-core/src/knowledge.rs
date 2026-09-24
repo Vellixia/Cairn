@@ -832,7 +832,7 @@ pub struct SubjectView {
     /// Proposals at a narrower scope that a recorded `narrows` decision says
     /// are exceptions to this subject's answer (FR-333).
     pub narrowed_by: Vec<Uuid>,
-    /// The decisions that produced this outcome, so `cairn memory subject` can
+    /// The decisions that produced this outcome, so the Memory view can
     /// answer "why" (FR-307).
     pub decisions: Vec<Relation>,
 }

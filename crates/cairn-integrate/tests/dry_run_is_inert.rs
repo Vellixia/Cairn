@@ -14,7 +14,7 @@ use cairn_integrate::desired::{Choices, DesiredIntegrationState};
 use cairn_integrate::model::{
     canonical_hash, AgentId, ArtifactVersion, HealthCondition, ResourceKind,
 };
-use cairn_integrate::plan::{plan_agent, Intent};
+use cairn_integrate::plan::plan_agent;
 use cairn_integrate::scope::Env;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -106,17 +106,10 @@ fn dry_run_is_inert() {
 
     for agent in AgentId::ALL {
         let adapter = cairn_integrate::adapter_for(agent);
-        for intent in [
-            Intent::Connect,
-            Intent::Repair { force: false },
-            Intent::Repair { force: true },
-            Intent::Disconnect,
-        ] {
-            let observed = adapter.inspect(&env, &[]);
-            let plan = plan_agent(intent, agent, &desired(agent), &observed);
-            // The plan is computed and discarded; nothing may have moved.
-            let _ = plan.changes.len();
-        }
+        let observed = adapter.inspect(&env, &[]);
+        let plan = plan_agent(agent, &desired(agent), &observed);
+        // The plan is computed and discarded; nothing may have moved.
+        let _ = plan.changes.len();
     }
 
     let after = snapshot(dir.path());
@@ -155,7 +148,6 @@ fn a_dry_run_against_a_broken_configuration_still_writes_nothing() {
     let adapter = cairn_integrate::adapter_for(AgentId::ClaudeCode);
     let observed = adapter.inspect(&env, &[]);
     let plan = plan_agent(
-        Intent::Connect,
         AgentId::ClaudeCode,
         &desired(AgentId::ClaudeCode),
         &observed,
@@ -193,7 +185,6 @@ fn a_plan_for_an_untouched_machine_reports_only_additions() {
     let adapter = cairn_integrate::adapter_for(AgentId::ClaudeCode);
     let observed = adapter.inspect(&env, &[]);
     let plan = plan_agent(
-        Intent::Connect,
         AgentId::ClaudeCode,
         &desired(AgentId::ClaudeCode),
         &observed,

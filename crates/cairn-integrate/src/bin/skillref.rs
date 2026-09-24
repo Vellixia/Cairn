@@ -1,7 +1,7 @@
 //! Print the canonical Skill schema, revision and branch name (D29b).
 //!
 //! A thin wrapper over `cairn_integrate::revision`, so the release workflow,
-//! the released binary and `cairn doctor` cannot disagree about what a
+//! the released binary and setup validation cannot disagree about what a
 //! revision is. The workflow runs this rather than reimplementing the hash in
 //! shell — that is the only mechanism by which CI learns a revision.
 //!

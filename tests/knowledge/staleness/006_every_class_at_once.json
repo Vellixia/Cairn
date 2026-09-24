@@ -1,12 +1,10 @@
 {
-  "description": "A relevant path's content differs from the fingerprint recorded for it, with the commit unmoved.",
+  "description": "Everything moved. All three classes are reported, and the recorded action is still delivered - labelled - because throwing it away loses information while presenting it as the instruction is the failure mode (US6 #2).",
   "input": {
     "extra": {
       "assumed": {
         "branch": "main",
         "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_id": "01a00000-0000-7000-8000-000000000001",
-        "task_state_digest": "d0",
         "path_fingerprints": [
           {
             "path": "src/retry.rs",
@@ -17,11 +15,9 @@
         ]
       },
       "current": {
-        "branch": "main",
-        "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_exists": true,
+        "branch": "feature/retry",
+        "commit": "def456abc123def456abc123def456abc123defa",
         "worktree_exists": true,
-        "task_state_digest": "d0",
         "path_fingerprints": [
           {
             "path": "src/retry.rs",
@@ -37,6 +33,8 @@
     "extra": {
       "state": "diverged",
       "divergences": [
+        "branch",
+        "commit",
         "files"
       ],
       "next_action_is_live": false

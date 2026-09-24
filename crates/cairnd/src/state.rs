@@ -42,7 +42,7 @@ pub struct Daemon {
     ///
     /// Discovery costs two `git` subprocesses, which is far too much to pay on
     /// every captured tool call (SC-007). A checkout's identity does not move
-    /// under a running daemon, and `cairn init` clears the entry.
+    /// under a running daemon, and `cairn setup` clears the entry.
     pub repos: Arc<RwLock<HashMap<String, RepoInstance>>>,
     /// Epoch milliseconds of the last handled request, for the idle timeout.
     pub last_activity: Arc<AtomicI64>,
@@ -55,7 +55,7 @@ pub struct Daemon {
     /// Serializes outbox drains inside this process.
     ///
     /// Claiming rows in the store is what makes concurrent drains *safe*; this
-    /// is what makes them *orderly*. Without it, `cairn sync now` returns as
+    /// is what makes them *orderly*. Without it, a drain returns as
     /// soon as it has delivered its own claim while the background worker still
     /// holds the rest of the queue, and then reports a depth that is accurate
     /// and useless. One in-process mutex — no lease, no lock service (FR-059).
@@ -67,6 +67,8 @@ pub struct Daemon {
     /// door for sign-out, credential change and account change alike
     /// (FR-790a).
     pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
+    /// One-time legacy export performed before this thin edge opened.
+    pub legacy_migration: serde_json::Value,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever
@@ -295,7 +297,7 @@ mod tests {
         assert_eq!(got.remote, seeded.remote);
     }
 
-    /// `cairn init` must be able to invalidate the cache, so a re-registered
+    /// `cairn setup` must be able to invalidate the cache, so a re-registered
     /// checkout is discovered again rather than served from memory.
     #[tokio::test]
     async fn forgetting_a_repository_drops_it_from_the_cache() {

@@ -95,6 +95,7 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         outage_cache: Arc::new(tokio::sync::Mutex::new(
             crate::deliver::OutageCache::default(),
         )),
+        legacy_migration: serde_json::json!({ "status": "not_pending" }),
     }
 }
 

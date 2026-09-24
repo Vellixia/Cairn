@@ -309,3 +309,16 @@ fn the_event_model_carries_no_project_or_account_field() {
         );
     }
 }
+
+#[test]
+fn project_health_has_one_read_surface() {
+    let api = source("crates/cairn-server/src/api.rs");
+    assert!(
+        !api.contains("async fn read_health("),
+        "duplicate GET /health wrapper survived beside integration-health"
+    );
+    assert!(
+        !api.contains("get(read_health).post(report_health)"),
+        "project health route still combines obsolete read wrapper with reporting"
+    );
+}

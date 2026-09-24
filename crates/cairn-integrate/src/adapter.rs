@@ -302,7 +302,7 @@ mod tests {
             method: "manual_ui".into(),
             uri: None,
             instructions: "In CC Switch: …".into(),
-            verify_with: "cairn doctor codex".into(),
+            verify_with: "cairn setup".into(),
             status: "awaiting_user".into(),
         };
         assert!(a.uri.is_none());

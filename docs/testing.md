@@ -17,7 +17,7 @@ cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cd web
 npm run typecheck
-npm run check:api-contract
+npm run api-contract:check
 npm run build
 ```
 

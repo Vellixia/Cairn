@@ -84,7 +84,7 @@ fn one_line(e: &anyhow::Error) -> String {
 /// is wasted work, not a correctness problem, since the loser's process (and
 /// everything this spawned) exits immediately after.
 async fn setup() -> anyhow::Result<Arc<Daemon>> {
-    let (store, user_id) = open_store().await?;
+    let (store, user_id, legacy_migration) = open_store().await?;
     let config = CairnConfig::load();
     let server = ServerCredentials::load(&config);
 
@@ -103,10 +103,11 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         in_flight_captures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
         outage_cache: Arc::new(tokio::sync::Mutex::new(deliver::OutageCache::default())),
+        legacy_migration,
     });
 
     // Automatic delivery. Queued work reaches the server without anyone typing
-    // `cairn sync now` (FR-056, C1).
+    // an agent process remaining alive (FR-056, C1).
     tokio::spawn(sync::run_worker(Arc::clone(&daemon)));
 
     Ok(daemon)
@@ -118,14 +119,22 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
 /// last chance to say why. The line carries the marker the CLI looks for, which
 /// is what turns `cairnd did not start` into `storage_unavailable` with the
 /// real cause attached (see `cairn_core::startup`).
-async fn open_store() -> anyhow::Result<(Store, uuid::Uuid)> {
+async fn open_store() -> anyhow::Result<(Store, uuid::Uuid, serde_json::Value)> {
     let opened = async {
-        let store = Store::open(&cairn_core::paths::db_path()).await?;
+        let artifacts = cairn_core::paths::home()
+            .join("removed_feature")
+            .join("tasks-v1");
+        let (store, report) = cairn_store::transfer::bootstrap_legacy_edge(
+            &cairn_core::paths::legacy_db_path(),
+            &cairn_core::paths::db_path(),
+            &artifacts,
+        )
+        .await?;
         // Part of opening the store as far as a user is concerned: it is the
         // first read and the first write, so a database that is present but
         // unusable fails here rather than at `open`.
         let user_id = repo::ensure_local_user(&store).await?;
-        Ok::<_, anyhow::Error>((store, user_id))
+        Ok::<_, anyhow::Error>((store, user_id, serde_json::to_value(report)?))
     }
     .await;
 
@@ -674,7 +683,7 @@ mod serve_tests {
     ///
     /// A boundary can wait for the captures already in flight (H3), so gating
     /// one would put a stall exactly where a session is being closed; and a
-    /// read has no ordinal to take. Without this, every `cairn status` during a
+    /// read has no ordinal to take. Without this, every health read during a
     /// session would queue behind that session's own tool calls.
     #[tokio::test]
     async fn a_request_that_carries_no_capture_is_not_gated() {

@@ -294,7 +294,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                 },
                 section_total(section).saturating_sub(section_kept(&briefing, section)),
                 OmissionReason::BudgetExhausted,
-                "cairn memory search",
+                "cairn_search",
             );
         }
     }

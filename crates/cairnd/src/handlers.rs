@@ -456,7 +456,7 @@ async fn init(d: &Daemon, cwd: &str) -> Reply {
     let r = d.resolve(cwd).await?;
     let project = bind_detected_project(d, &r.project).await?;
     let integrations = crate::integrations::setup(d, cwd).await;
-    let legacy_migration = migrate_removed_feature_tasks(d).await;
+    let legacy_migration = d.legacy_migration.clone();
     Ok(json!({
         "project": ProjectSummary::from(&project),
         "worktree_path": r.worktree(),
@@ -534,74 +534,6 @@ async fn bind_detected_project(d: &Daemon, project: &Project) -> Result<Project,
     repo::project(&d.store, project.id)
         .await
         .map_err(storage_err)
-}
-
-/// Setup is the sole automatic migration boundary. Failure is a warning: the
-/// already-open store remains usable for safe capture, and no legacy row is
-/// removed until backup, manifest, and removed-feature bundle all verify.
-async fn migrate_removed_feature_tasks(d: &Daemon) -> serde_json::Value {
-    migrate_removed_feature_tasks_at(
-        d,
-        &cairn_core::paths::home()
-            .join("removed_feature")
-            .join("tasks-v1"),
-    )
-    .await
-}
-
-async fn migrate_removed_feature_tasks_at(d: &Daemon, dir: &std::path::Path) -> serde_json::Value {
-    use cairn_store::transfer;
-
-    let pending = match transfer::removed_feature_tasks_pending(&d.store).await {
-        Ok(value) => value,
-        Err(error) => return json!({ "status": "warning", "detail": error.to_string() }),
-    };
-    if !pending {
-        return json!({ "status": "not_pending" });
-    }
-    if let Err(error) = std::fs::create_dir_all(dir) {
-        return json!({ "status": "warning", "detail": error.to_string() });
-    }
-    let snapshot = dir.join("legacy.sqlite");
-    let manifest_path = dir.join("legacy.manifest.json");
-    let bundle_path = dir.join("removed_feature.json");
-    if let Ok(Some((path, _))) =
-        transfer::removed_feature_tasks_exported_pending_cleanup(&d.store).await
-    {
-        let bundle_path = std::path::PathBuf::from(path);
-        return match transfer::cleanup_removed_feature_tasks(&d.store).await {
-            Ok(()) => {
-                json!({ "status": "exported_cleaned", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": "resumed cleanup" })
-            }
-            Err(error) => {
-                json!({ "status": "warning", "backup": snapshot, "manifest": manifest_path, "bundle": bundle_path, "detail": error.to_string() })
-            }
-        };
-    }
-    let result = async {
-        let manifest = transfer::export_snapshot(&d.store, &snapshot).await?;
-        transfer::write_manifest(&manifest, &manifest_path)?;
-        let bundle = transfer::export_removed_feature_tasks(&d.store, &bundle_path).await?;
-        transfer::cleanup_removed_feature_tasks(&d.store).await?;
-        Ok::<_, cairn_store::StoreError>(bundle)
-    }
-    .await;
-    match result {
-        Ok(bundle) => json!({
-            "status": "exported_cleaned",
-            "backup": snapshot,
-            "manifest": manifest_path,
-            "bundle": bundle_path,
-            "records": bundle.records.len(),
-        }),
-        Err(error) => json!({
-            "status": "warning",
-            "backup": snapshot,
-            "manifest": manifest_path,
-            "bundle": bundle_path,
-            "detail": error.to_string(),
-        }),
-    }
 }
 
 // ---------------------------------------------------------------------------

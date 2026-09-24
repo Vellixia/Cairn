@@ -21,8 +21,6 @@ ROOT.mkdir(parents=True, exist_ok=True)
 
 # The FR-422 field set a restored checkpoint must carry.
 REQUIRED = [
-    "task_id",
-    "task_state_digest",
     "branch",
     "commit",
     "relevant_paths",
@@ -69,7 +67,6 @@ for cycle in range(1, 11):
         {
             "cycle": cycle,
             "recorded": {
-                "task_bound": True,
                 "commit": "abc123",
                 "branch": "feature/retry",
                 "relevant_paths": ["src/retry.rs"],
@@ -88,30 +85,6 @@ for cycle in range(1, 11):
 # The two cases that are about what a cycle must *not* do.
 
 write(
-    "a_cycle_with_no_task_bound_omits_the_task_fields",
-    "A session with no task bound has no task state to record, so the task "
-    "fields are absent rather than empty. An empty string for a task digest "
-    "would compare unequal to itself on the next cycle and report a divergence "
-    "that never happened.",
-    {
-        "cycle": 1,
-        "recorded": {
-            "task_bound": False,
-            "commit": "abc123",
-            "branch": "main",
-            "relevant_paths": ["src/main.rs"],
-            "next_action": "read the failing test",
-        },
-    },
-    {
-        "required_fields": ["branch", "commit", "relevant_paths", "next_action"],
-        "absent_fields": ["task_id", "task_state_digest"],
-        "forbidden_fields": FORBIDDEN,
-        "checkpoint_state": "current",
-    },
-)
-
-write(
     "a_cycle_after_the_world_moved_reports_divergence_and_no_live_action",
     "The tenth cycle, taken after the commit moved and a relevant path changed. "
     "Every field is still delivered, the checkpoint is `diverged`, and the "
@@ -121,7 +94,6 @@ write(
     {
         "cycle": 10,
         "recorded": {
-            "task_bound": True,
             "commit": "abc123",
             "branch": "feature/retry",
             "relevant_paths": ["src/retry.rs"],

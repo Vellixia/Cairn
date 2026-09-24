@@ -1,12 +1,10 @@
 {
-  "description": "The worktree the checkpoint was taken in is gone.",
+  "description": "The head moved and a relevant path changed with it. Both are reported: collapsing them would hide which one the agent needs to look at.",
   "input": {
     "extra": {
       "assumed": {
         "branch": "main",
         "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_id": "01a00000-0000-7000-8000-000000000001",
-        "task_state_digest": "d0",
         "path_fingerprints": [
           {
             "path": "src/retry.rs",
@@ -18,16 +16,14 @@
       },
       "current": {
         "branch": "main",
-        "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_exists": true,
-        "worktree_exists": false,
-        "task_state_digest": "d0",
+        "commit": "def456abc123def456abc123def456abc123defa",
+        "worktree_exists": true,
         "path_fingerprints": [
           {
             "path": "src/retry.rs",
             "class": "digest",
             "exists": true,
-            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+            "value": "2222222222222222222222222222222222222222222222222222222222222222"
           }
         ]
       }
@@ -35,7 +31,11 @@
   },
   "expect": {
     "extra": {
-      "state": "unresolvable",
+      "state": "diverged",
+      "divergences": [
+        "commit",
+        "files"
+      ],
       "next_action_is_live": false
     }
   }

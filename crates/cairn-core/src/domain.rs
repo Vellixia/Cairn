@@ -502,9 +502,8 @@ text_enum!(
     CheckpointState, "checkpoint state", {
         Current => "current",
         Diverged => "diverged",
-        /// The assumed task or worktree no longer exists. Every continuity
-        /// field that does not depend on the missing state is still delivered
-        /// (FR-435).
+        /// The assumed worktree no longer exists. Continuity fields that do
+        /// not depend on it are still delivered (FR-435).
         Unresolvable => "unresolvable",
     }
 );

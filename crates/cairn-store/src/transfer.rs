@@ -56,6 +56,16 @@ pub struct ImportReport {
     pub checkpoint: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyEdgeReport {
+    pub status: String,
+    pub pending_operations: u64,
+    pub backup: Option<String>,
+    pub manifest: Option<String>,
+    pub bundle: Option<String>,
+    pub detail: Option<String>,
+}
+
 fn refused(code: &'static str, message: impl Into<String>) -> StoreError {
     StoreError::Refused {
         code,
@@ -378,24 +388,7 @@ async fn removed_feature_task_records(store: &Store) -> Result<Vec<RemovedFeatur
     Ok(records)
 }
 
-/// Write a versioned, offline-only bundle before any operator considers
-/// deleting legacy Task data. This never changes source rows; a failed export
-/// therefore leaves capture and its local spool available.
-pub async fn export_removed_feature_tasks(
-    store: &Store,
-    path: &Path,
-) -> Result<RemovedFeatureBundle> {
-    let state: Option<String> = sqlx::query_scalar(
-        "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
-    )
-    .fetch_optional(store.pool())
-    .await?;
-    if state.as_deref() != Some("retained_pending_export") {
-        return Err(refused(
-            "removed_feature_export_not_pending",
-            "Task export is already recorded",
-        ));
-    }
+async fn write_removed_feature_bundle(store: &Store, path: &Path) -> Result<RemovedFeatureBundle> {
     if std::fs::symlink_metadata(path).is_ok() {
         return Err(refused(
             "removed_feature_bundle_exists",
@@ -426,170 +419,18 @@ pub async fn export_removed_feature_tasks(
     let mut output = options.open(path)?;
     output.write_all(&bytes)?;
     output.sync_all()?;
-    let (_, artifact_sha256) = digest(path)?;
-    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_pending_cleanup', artifact_path = ?, artifact_sha256 = ? WHERE feature = 'tasks'")
-        .bind(path.to_string_lossy().as_ref())
-        .bind(artifact_sha256)
-        .execute(store.pool())
-        .await?;
     Ok(bundle)
 }
 
-/// Whether Task export or its resumable cleanup remains outstanding.
-pub async fn removed_feature_tasks_pending(store: &Store) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
-    )
-    .fetch_optional(store.pool())
-    .await?
-    .as_deref()
-        != Some("exported_cleaned"))
-}
-
-/// Artifact paths are manifest-owned, never reconstructed by a retrying caller.
-pub async fn removed_feature_tasks_exported_pending_cleanup(
-    store: &Store,
-) -> Result<Option<(String, String)>> {
-    sqlx::query_as(
-        "SELECT artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks' AND disposition = 'exported_pending_cleanup'",
-    )
-    .fetch_optional(store.pool())
-    .await
-    .map_err(Into::into)
-}
-
-/// Remove legacy Task schema only after its immutable external bundle exists.
-/// This is deliberately an explicit setup action, never an open-store action.
-pub async fn cleanup_removed_feature_tasks(store: &Store) -> Result<()> {
-    let artifact: Option<(String, String)> = sqlx::query_as(
-        "SELECT artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks' AND disposition = 'exported_pending_cleanup'",
-    )
-    .fetch_optional(store.pool())
-    .await?;
-    let (path, expected_hash) = artifact.ok_or_else(|| {
-        refused(
-            "removed_feature_cleanup_not_pending",
-            "Task bundle export must finish before cleanup",
-        )
-    })?;
-    let path = Path::new(&path);
-    let (_, actual_hash) = digest(path)?;
-    if actual_hash != expected_hash {
-        return Err(refused(
-            "removed_feature_artifact_changed",
-            "Task bundle hash no longer matches manifest",
-        ));
-    }
-    let bundle: RemovedFeatureBundle = serde_json::from_slice(&std::fs::read(path)?)
-        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-    if bundle.version != REMOVED_FEATURE_BUNDLE_VERSION || bundle.feature != "tasks" {
-        return Err(refused(
-            "removed_feature_artifact_invalid",
-            "Task bundle is not a supported removed-feature artifact",
-        ));
-    }
-    let expected = removed_feature_task_records(store).await?;
-    // Identity alone cannot conserve a changed row. Compare the complete
-    // canonical record set immediately before destructive work; inserts,
-    // deletes, payload updates, and duplicate artifact entries all refuse.
-    let keyed = |records: &[RemovedFeatureRecord]| {
-        records
-            .iter()
-            .map(|record| {
-                (
-                    (record.source_table.clone(), record.source_id.clone()),
-                    (record.disposition.clone(), record.payload.clone()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let expected_keyed = keyed(&expected);
-    let exported_keyed = keyed(&bundle.records);
-    if expected.len() != expected_keyed.len()
-        || bundle.records.len() != exported_keyed.len()
-        || expected_keyed != exported_keyed
-    {
-        return Err(refused(
-            "removed_feature_bundle_incomplete",
-            "Task bundle does not conserve every row cleanup deletes",
-        ));
-    }
-    let mut tx = store.pool().begin().await?;
-    for statement in [
-        "CREATE TEMP TABLE task_only_evidence_facts AS SELECT evidence_id FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task') UNION SELECT evidence_id FROM criterion_evidence WHERE criterion_id IN (SELECT id FROM task_criteria) UNION SELECT evidence_id FROM verification_runs WHERE (criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')) AND evidence_id IS NOT NULL",
-        "DELETE FROM verification_runs WHERE criterion_id IN (SELECT id FROM task_criteria) OR memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
-        "DELETE FROM criterion_evidence",
-        "DELETE FROM memory_evidence WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
-        "DELETE FROM memory_evidence_facts WHERE memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
-        "DELETE FROM memory_relations WHERE from_memory_id IN (SELECT id FROM memories WHERE scope = 'task') OR to_memory_id IN (SELECT id FROM memories WHERE scope = 'task')",
-        "DELETE FROM evidence_facts WHERE id IN (SELECT evidence_id FROM task_only_evidence_facts) AND NOT EXISTS (SELECT 1 FROM memory_evidence_facts WHERE evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM verification_runs WHERE evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM memory_relations WHERE basis_evidence_id = evidence_facts.id) AND NOT EXISTS (SELECT 1 FROM pattern_applications WHERE evidence_id = evidence_facts.id)",
-        "DROP TABLE task_only_evidence_facts",
-        "DELETE FROM outbox WHERE entity_type IN ('task', 'task_criterion', 'task_blocker')",
-        "DELETE FROM memories WHERE scope = 'task'",
-        "DROP TABLE IF EXISTS criterion_evidence",
-        "DROP TABLE IF EXISTS task_changes",
-        "DROP TABLE IF EXISTS task_blockers",
-        "DROP TABLE IF EXISTS task_criteria",
-        "DROP INDEX IF EXISTS sessions_task_recent",
-        "ALTER TABLE sessions DROP COLUMN task_id",
-        "ALTER TABLE sessions DROP COLUMN task_snapshot_at_bind",
-        "ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_id",
-        "ALTER TABLE continuity_checkpoints DROP COLUMN assumed_task_state_digest",
-        "ALTER TABLE continuity_checkpoints DROP COLUMN criteria_snapshot",
-        "ALTER TABLE continuity_checkpoints DROP COLUMN open_blockers",
-        "DROP TABLE IF EXISTS tasks",
-        "DROP INDEX IF EXISTS verification_runs_criterion",
-        "CREATE TABLE verification_runs_new (id TEXT PRIMARY KEY, memory_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id), verifier TEXT NOT NULL CHECK (verifier IN ('file_exists', 'file_digest', 'git_ref', 'git_commit', 'configuration', 'schema_version', 'test_outcome', 'command_outcome', 'runtime_state')), evidence_id TEXT, expected_digest TEXT, observed_digest TEXT, result TEXT NOT NULL CHECK (result IN ('verified', 'drifted', 'inconclusive')), detail TEXT, repo_branch TEXT NOT NULL, repo_commit TEXT, checked_at TEXT NOT NULL, triggered_by TEXT NOT NULL CHECK (triggered_by IN ('background_pass', 'on_demand', 'attach')))",
-        "INSERT INTO verification_runs_new (id, memory_id, project_id, verifier, evidence_id, expected_digest, observed_digest, result, detail, repo_branch, repo_commit, checked_at, triggered_by) SELECT id, memory_id, project_id, verifier, evidence_id, expected_digest, observed_digest, result, detail, repo_branch, repo_commit, checked_at, triggered_by FROM verification_runs",
-        "DROP TABLE verification_runs",
-        "ALTER TABLE verification_runs_new RENAME TO verification_runs",
-        "CREATE INDEX verification_runs_memory ON verification_runs (memory_id, checked_at DESC)",
-        "CREATE INDEX verification_runs_result ON verification_runs (project_id, result)",
-        "CREATE TABLE memory_evidence_staged (memory_id TEXT NOT NULL, observation_id TEXT NOT NULL, content_digest TEXT NOT NULL, PRIMARY KEY (memory_id, observation_id))",
-        "INSERT INTO memory_evidence_staged SELECT * FROM memory_evidence",
-        "DROP TABLE memory_evidence",
-        "CREATE TABLE memory_evidence_facts_staged (memory_id TEXT NOT NULL, evidence_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('supports', 'contradicts')), attached_at TEXT NOT NULL, attached_by_session TEXT NOT NULL, PRIMARY KEY (memory_id, evidence_id, role))",
-        "INSERT INTO memory_evidence_facts_staged SELECT * FROM memory_evidence_facts",
-        "DROP TABLE memory_evidence_facts",
-        "CREATE TABLE memories_new (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), type TEXT NOT NULL CHECK (type IN ('fact', 'decision', 'convention', 'failure', 'procedure')), scope TEXT NOT NULL CHECK (scope IN ('project', 'branch', 'session')), scope_key TEXT NOT NULL, content TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'stale', 'superseded')), superseded_by_id TEXT REFERENCES memories(id), origin_session_id TEXT NOT NULL, local_only INTEGER NOT NULL DEFAULT 0 CHECK (local_only IN (0, 1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, topic_key TEXT, value_key TEXT, content_norm_digest TEXT, importance TEXT NOT NULL DEFAULT 'normal', verification TEXT NOT NULL DEFAULT 'unverified', verification_authority TEXT, last_verified_at TEXT, effective_from TEXT, superseded_at TEXT, stale_at TEXT, pinned INTEGER NOT NULL DEFAULT 0, pinned_at TEXT, pinned_by_session TEXT, pin_reason TEXT, reinforcement_count INTEGER NOT NULL DEFAULT 0, distinct_origin_count INTEGER NOT NULL DEFAULT 1)",
-        "INSERT INTO memories_new SELECT * FROM memories",
-        "DROP TABLE memories",
-        "ALTER TABLE memories_new RENAME TO memories",
-        "CREATE INDEX memories_scope ON memories (project_id, scope, scope_key, state)",
-        "CREATE INDEX memories_topic ON memories (project_id, topic_key, state) WHERE topic_key IS NOT NULL",
-        "CREATE INDEX memories_subject ON memories (project_id, scope, scope_key, topic_key) WHERE topic_key IS NOT NULL",
-        "CREATE INDEX memories_verification ON memories (project_id, verification) WHERE verification <> 'unverified'",
-        "CREATE INDEX memories_pinned ON memories (project_id, scope, scope_key) WHERE pinned = 1",
-        "CREATE INDEX memories_temporal ON memories (project_id, effective_from, superseded_at)",
-        "CREATE INDEX memories_content_norm ON memories (project_id, content_norm_digest) WHERE content_norm_digest IS NOT NULL",
-        "CREATE TRIGGER memories_fts_ai AFTER INSERT ON memories BEGIN INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content); END",
-        "CREATE TRIGGER memories_fts_ad AFTER DELETE ON memories BEGIN INSERT INTO memory_fts(memory_fts, rowid, content) VALUES ('delete', old.rowid, old.content); END",
-        "CREATE TRIGGER memories_fts_au AFTER UPDATE ON memories BEGIN INSERT INTO memory_fts(memory_fts, rowid, content) VALUES ('delete', old.rowid, old.content); INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content); END",
-        "INSERT INTO memory_fts(memory_fts) VALUES ('rebuild')",
-        "CREATE TABLE memory_evidence (memory_id TEXT NOT NULL REFERENCES memories(id), observation_id TEXT NOT NULL, content_digest TEXT NOT NULL, PRIMARY KEY (memory_id, observation_id))",
-        "INSERT INTO memory_evidence SELECT * FROM memory_evidence_staged",
-        "DROP TABLE memory_evidence_staged",
-        "CREATE TABLE memory_evidence_facts (memory_id TEXT NOT NULL REFERENCES memories(id), evidence_id TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('supports', 'contradicts')), attached_at TEXT NOT NULL, attached_by_session TEXT NOT NULL, PRIMARY KEY (memory_id, evidence_id, role))",
-        "INSERT INTO memory_evidence_facts SELECT * FROM memory_evidence_facts_staged",
-        "DROP TABLE memory_evidence_facts_staged",
-        "CREATE INDEX memory_evidence_facts_evidence ON memory_evidence_facts (evidence_id)",
-        "CREATE TABLE outbox_new (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), server_project_id TEXT, entity_type TEXT NOT NULL CHECK (entity_type IN ('project', 'session', 'memory', 'handoff', 'memory_relation', 'personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')), entity_id TEXT NOT NULL, operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')), idempotency_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'in_flight', 'delivered', 'failed', 'blocked')), attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, created_at TEXT NOT NULL, delivered_at TEXT, claimed_at TEXT, blocked_reason TEXT, blocked_at_capability TEXT, namespace TEXT NOT NULL, authored_by_user_id TEXT, CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')) = (project_id IS NULL)), CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation', 'team_knowledge', 'team_knowledge_relation')) = (authored_by_user_id IS NOT NULL)))",
-        "INSERT INTO outbox_new SELECT * FROM outbox",
-        "DROP TABLE outbox",
-        "ALTER TABLE outbox_new RENAME TO outbox",
-        "CREATE INDEX outbox_pending ON outbox (state, created_at)",
-        "CREATE INDEX outbox_claimable ON outbox (namespace, state, created_at)",
-    ] {
-        sqlx::query(statement).execute(&mut *tx).await?;
-    }
-    sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_cleaned' WHERE feature = 'tasks'")
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 pub async fn export_snapshot(store: &Store, snapshot: &Path) -> Result<MigrationManifest> {
+    export_snapshot_inner(store, snapshot, true).await
+}
+
+async fn export_snapshot_inner(
+    store: &Store,
+    snapshot: &Path,
+    checkpoint_source: bool,
+) -> Result<MigrationManifest> {
     if std::fs::symlink_metadata(snapshot).is_ok() {
         return Err(refused(
             "snapshot_exists",
@@ -602,7 +443,9 @@ pub async fn export_snapshot(store: &Store, snapshot: &Path) -> Result<Migration
         .ok_or_else(|| refused("unsafe_snapshot_path", "snapshot needs UTF-8 filename"))?
         .to_string();
     relative_filename(&name)?;
-    store.checkpoint().await?;
+    if checkpoint_source {
+        store.checkpoint().await?;
+    }
     sqlx::query(&format!("VACUUM INTO {}", ql(&snapshot.to_string_lossy())))
         .execute(store.pool())
         .await?;
@@ -669,9 +512,16 @@ pub async fn export_snapshot(store: &Store, snapshot: &Path) -> Result<Migration
         )],
     )
     .await?;
+    let snapshot_pool =
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", snapshot.display())).await?;
+    let schema_version =
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+            .fetch_one(&snapshot_pool)
+            .await?;
+    snapshot_pool.close().await;
     Ok(MigrationManifest {
         version: MANIFEST_VERSION,
-        schema_version: migrate::latest_version(),
+        schema_version,
         exported_at: chrono::Utc::now().to_rfc3339(),
         snapshot: name,
         snapshot_size,
@@ -957,501 +807,344 @@ pub async fn import_snapshot(
     }
 }
 
+/// Start V1 on a fresh thin edge database while retaining the pre-V1 database
+/// byte-for-byte. Only immutable pending typed operations and their required
+/// correlation/ownership rows cross into the edge.
+pub async fn bootstrap_legacy_edge(
+    legacy: &Path,
+    edge: &Path,
+    artifacts: &Path,
+) -> Result<(Store, LegacyEdgeReport)> {
+    let edge_store = Store::open(edge).await?;
+    if !legacy.is_file() {
+        return Ok((
+            edge_store,
+            LegacyEdgeReport {
+                status: "not_pending".into(),
+                pending_operations: 0,
+                backup: None,
+                manifest: None,
+                bundle: None,
+                detail: None,
+            },
+        ));
+    }
+
+    let backup = artifacts.join("legacy.sqlite");
+    let manifest_path = artifacts.join("legacy.manifest.json");
+    let bundle_path = artifacts.join("removed_feature.json");
+    let migrated = async {
+        std::fs::create_dir_all(artifacts)?;
+        let existing = [
+            backup.as_path(),
+            manifest_path.as_path(),
+            bundle_path.as_path(),
+        ]
+        .map(Path::is_file);
+        if existing.iter().any(|exists| *exists) {
+            if !existing.iter().all(|exists| *exists) {
+                return Err(refused(
+                    "incomplete_legacy_artifacts",
+                    "legacy migration artifacts are incomplete",
+                ));
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            let (size, hash) = digest(&backup)?;
+            if manifest.snapshot != "legacy.sqlite"
+                || manifest.snapshot_size != size
+                || manifest.snapshot_sha256 != hash
+                || manifest.lanes != inventory(&backup).await?
+            {
+                return Err(refused(
+                    "legacy_artifact_mismatch",
+                    "legacy snapshot no longer matches its manifest",
+                ));
+            }
+            let bundle: RemovedFeatureBundle =
+                serde_json::from_slice(&std::fs::read(&bundle_path)?)
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+            if bundle.version != REMOVED_FEATURE_BUNDLE_VERSION || bundle.feature != "tasks" {
+                return Err(refused(
+                    "removed_feature_artifact_invalid",
+                    "Task bundle is not a supported removed-feature artifact",
+                ));
+            }
+            return Ok::<(u64, bool), StoreError>((
+                import_pending_edge_state(&edge_store, &backup).await?,
+                true,
+            ));
+        }
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(legacy)
+            .read_only(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
+        let source = Store { pool };
+        let mut manifest = export_snapshot_inner(&source, &backup, false).await?;
+        manifest.snapshot = "legacy.sqlite".into();
+        write_manifest(&manifest, &manifest_path)?;
+        write_removed_feature_bundle(&source, &bundle_path).await?;
+        source.close().await;
+        let pending_operations = import_pending_edge_state(&edge_store, &backup).await?;
+        Ok::<(u64, bool), StoreError>((pending_operations, false))
+    }
+    .await;
+
+    let (status, pending_operations, detail) = match migrated {
+        Ok((count, true)) => ("unchanged", count, None),
+        Ok((count, false)) => ("migrated", count, None),
+        Err(error) => ("warning", 0, Some(error.to_string())),
+    };
+    Ok((
+        edge_store,
+        LegacyEdgeReport {
+            status: status.into(),
+            pending_operations,
+            backup: Some(backup.display().to_string()),
+            manifest: Some(manifest_path.display().to_string()),
+            bundle: Some(bundle_path.display().to_string()),
+            detail,
+        },
+    ))
+}
+
+async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64> {
+    let mut connection = store.pool().acquire().await?;
+    sqlx::query(&format!(
+        "ATTACH DATABASE {} AS legacy_snapshot",
+        ql(&snapshot.to_string_lossy())
+    ))
+    .execute(&mut *connection)
+    .await?;
+    let result = async {
+        for table in ["users", "projects"] {
+            copy_common_rows(&mut connection, table, "1 = 1", &[]).await?;
+        }
+        copy_common_rows(
+            &mut connection,
+            "sessions",
+            "source.status = 'active' OR source.id IN (
+                SELECT session_id FROM legacy_snapshot.event_spool WHERE state IN ('pending','in_flight')
+                UNION SELECT session_id FROM legacy_snapshot.command_spool WHERE state IN ('pending','in_flight') AND session_id IS NOT NULL
+            )",
+            &[("previous_session_id", "NULL")],
+        )
+        .await?;
+        for table in [
+            "agent_integrations",
+            "manager_integrations",
+            "installed_resources",
+            "resource_bindings",
+            "capability_evidence",
+            "migration_states",
+            "recovery_artifacts",
+        ] {
+            copy_common_rows(&mut connection, table, "1 = 1", &[]).await?;
+        }
+        copy_common_rows(
+            &mut connection,
+            "session_event_seq",
+            "source.session_id IN (SELECT id FROM main.sessions)",
+            &[],
+        )
+        .await?;
+        copy_common_rows(&mut connection, "command_seq", "1 = 1", &[]).await?;
+        copy_common_rows(
+            &mut connection,
+            "event_spool",
+            "source.state IN ('pending','in_flight')",
+            &[
+                ("state", "'pending'"),
+                ("claimed_at", "NULL"),
+                ("next_attempt_at", "NULL"),
+                ("last_error_kind", "NULL"),
+            ],
+        )
+        .await?;
+        copy_common_rows(
+            &mut connection,
+            "command_spool",
+            "source.state IN ('pending','in_flight')",
+            &[
+                ("state", "'pending'"),
+                ("claimed_at", "NULL"),
+                ("next_attempt_at", "NULL"),
+                ("last_error_kind", "NULL"),
+            ],
+        )
+        .await?;
+        copy_common_rows(
+            &mut connection,
+            "capture_disposition_counts",
+            "1 = 1",
+            &[],
+        )
+        .await?;
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event_spool")
+            .fetch_one(&mut *connection)
+            .await?;
+        let commands: i64 = sqlx::query_scalar("SELECT count(*) FROM command_spool")
+            .fetch_one(&mut *connection)
+            .await?;
+        Ok::<u64, StoreError>((events + commands) as u64)
+    }
+    .await;
+    let detached = sqlx::query("DETACH DATABASE legacy_snapshot")
+        .execute(&mut *connection)
+        .await;
+    match (result, detached) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(value), Ok(_)) => Ok(value),
+    }
+}
+
+async fn copy_common_rows(
+    connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    table: &str,
+    predicate: &str,
+    replacements: &[(&str, &str)],
+) -> Result<()> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM legacy_snapshot.sqlite_master WHERE type='table' AND name=?)",
+    )
+    .bind(table)
+    .fetch_one(&mut **connection)
+    .await?;
+    if exists == 0 {
+        return Ok(());
+    }
+    let target: Vec<String> = sqlx::query(&format!("PRAGMA main.table_info({})", ql(table)))
+        .fetch_all(&mut **connection)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("name"))
+        .collect::<std::result::Result<_, _>>()?;
+    let source: std::collections::BTreeSet<String> =
+        sqlx::query(&format!("PRAGMA legacy_snapshot.table_info({})", ql(table)))
+            .fetch_all(&mut **connection)
+            .await?
+            .into_iter()
+            .map(|row| row.try_get("name"))
+            .collect::<std::result::Result<_, _>>()?;
+    let columns: Vec<_> = target
+        .into_iter()
+        .filter(|column| source.contains(column))
+        .collect();
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let fields = columns
+        .iter()
+        .map(|column| qi(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = columns
+        .iter()
+        .map(|column| {
+            replacements
+                .iter()
+                .find_map(|(name, value)| (*name == column).then_some((*value).to_owned()))
+                .unwrap_or_else(|| format!("source.{}", qi(column)))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    sqlx::query(&format!(
+        "INSERT OR IGNORE INTO main.{} ({fields}) SELECT {values} FROM legacy_snapshot.{} source WHERE {predicate}",
+        qi(table),
+        qi(table)
+    ))
+    .execute(&mut **connection)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn legacy_task_store() -> Store {
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(":memory:")
-            .foreign_keys(true)
-            .shared_cache(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        migrate::run_to(&pool, 14).await.unwrap();
-        Store { pool }
-    }
-
     #[tokio::test]
-    async fn v13_manifest_upgrades_before_task_export_and_cleanup() {
+    async fn legacy_bootstrap_preserves_source_and_moves_only_pending_spool_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("v13.sqlite");
+        let legacy = dir.path().join("cairn.sqlite3");
+        let edge = dir.path().join("edge.sqlite3");
+        let artifacts = dir.path().join("removed_feature");
         let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-        migrate::run_to(&pool, 13).await.unwrap();
-        sqlx::query("UPDATE removed_feature_manifest SET disposition = 'exported_retained' WHERE feature = 'tasks'")
-            .execute(&pool).await.unwrap();
-        pool.close().await;
-
-        let store = Store::open(&path).await.unwrap();
-        let columns: Vec<String> = sqlx::query("PRAGMA table_info(removed_feature_manifest)")
-            .fetch_all(store.pool())
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|row| row.try_get("name").unwrap())
-            .collect();
-        assert!(columns.contains(&"artifact_path".to_owned()));
-        assert!(columns.contains(&"artifact_sha256".to_owned()));
-        let state: String = sqlx::query_scalar(
-            "SELECT disposition FROM removed_feature_manifest WHERE feature = 'tasks'",
-        )
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-        assert_eq!(state, "retained_pending_export");
-
-        let bundle_path = dir.path().join("tasks.removed_feature.json");
-        export_removed_feature_tasks(&store, &bundle_path)
-            .await
-            .unwrap();
-        cleanup_removed_feature_tasks(&store).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn restored_pre_artifact_v13_manifest_upgrades_to_fourteen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("restored-v13.sqlite");
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
+            .filename(&legacy)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
         migrate::run_to(&pool, 12).await.unwrap();
-        sqlx::query("CREATE TABLE removed_feature_manifest (feature TEXT PRIMARY KEY, bundle_version INTEGER NOT NULL, disposition TEXT NOT NULL, created_at TEXT NOT NULL)")
+        sqlx::query("INSERT INTO users VALUES ('u', NULL, 'user', 'now')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (id,name,git_common_dir,linked,created_at,updated_at) VALUES ('p','project','/repo',1,'now','now')")
             .execute(&pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO removed_feature_manifest VALUES ('tasks', 1, 'exported_retained', 'now')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'remove_task_runtime', 'now')")
+        sqlx::query("INSERT INTO tasks (id,project_id,title,goal,status,created_at,updated_at) VALUES ('t','p','task','goal','todo','now','now')")
             .execute(&pool).await.unwrap();
-        pool.close().await;
+        sqlx::query("INSERT INTO sessions (id,project_id,task_id,user_id,agent,branch,worktree_path,agent_session_key,status,started_at,last_event_at,daemon_run_id) VALUES ('s','p','t','u','codex','main','/repo','agent-key','active','now','now','run')")
+            .execute(&pool).await.unwrap();
+        for (id, seq, state) in [("pending", 1, "pending"), ("delivered", 2, "delivered")] {
+            sqlx::query("INSERT INTO event_spool (event_id,session_id,project_id,account_id,session_seq,kind,payload,payload_bytes,boundary_class,state,created_at) VALUES (?, 's','p','account',?,'tool_event','{}',2,0,?,'now')")
+                .bind(id).bind(seq).bind(state).execute(&pool).await.unwrap();
+        }
+        for (id, seq, state) in [
+            ("pending-command", 1, "in_flight"),
+            ("delivered-command", 2, "delivered"),
+        ] {
+            sqlx::query("INSERT INTO command_spool (command_id,scope_kind,scope_key,session_id,project_id,account_id,command_seq,kind,payload,state,created_at) VALUES (?,'session','s','s','p','account',?,'remember','{}',?,'now')")
+                .bind(id).bind(seq).bind(state).execute(&pool).await.unwrap();
+        }
+        let before_db = std::fs::read(&legacy).unwrap();
+        let wal = legacy.with_extension("sqlite3-wal");
+        let before_wal = std::fs::read(&wal).unwrap();
 
-        let store = Store::open(&path).await.unwrap();
-        let columns: Vec<String> = sqlx::query("PRAGMA table_info(removed_feature_manifest)")
+        let (store, report) = bootstrap_legacy_edge(&legacy, &edge, &artifacts)
+            .await
+            .unwrap();
+
+        assert_eq!(report.status, "migrated");
+        assert_eq!(report.pending_operations, 2);
+        assert_eq!(std::fs::read(&legacy).unwrap(), before_db);
+        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+        let ids: Vec<String> = sqlx::query_scalar("SELECT event_id FROM event_spool")
             .fetch_all(store.pool())
             .await
-            .unwrap()
-            .into_iter()
-            .map(|row| row.try_get("name").unwrap())
-            .collect();
-        assert!(columns.contains(&"artifact_path".to_owned()));
-        assert!(columns.contains(&"artifact_sha256".to_owned()));
-        assert_eq!(
-            migrate::latest_version(),
-            sqlx::query_scalar::<_, i64>("SELECT max(version) FROM schema_migrations")
-                .fetch_one(store.pool())
+            .unwrap();
+        assert_eq!(ids, vec!["pending"]);
+        let commands: Vec<(String, String)> =
+            sqlx::query_as("SELECT command_id, state FROM command_spool")
+                .fetch_all(store.pool())
                 .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn artifact_bearing_v13_manifest_preserves_identity_then_exports_and_cleans() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad-e6-v13.sqlite");
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
-        migrate::run_to(&pool, 12).await.unwrap();
-        sqlx::query("CREATE TABLE removed_feature_manifest (feature TEXT PRIMARY KEY, bundle_version INTEGER NOT NULL, disposition TEXT NOT NULL CHECK (disposition IN ('retained_pending_export', 'exported_pending_cleanup', 'exported_cleaned')), created_at TEXT NOT NULL, artifact_path TEXT, artifact_sha256 TEXT)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO removed_feature_manifest (feature, bundle_version, disposition, created_at, artifact_path, artifact_sha256) VALUES ('tasks', 1, 'retained_pending_export', 'now', '/retained/bundle.json', 'retained-hash')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'remove_task_runtime', 'now')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        pool.close().await;
-
-        let store = Store::open(&path).await.unwrap();
-        let retained: (String, String, String) = sqlx::query_as("SELECT disposition, artifact_path, artifact_sha256 FROM removed_feature_manifest WHERE feature = 'tasks'")
+                .unwrap();
+        assert_eq!(commands, vec![("pending-command".into(), "pending".into())]);
+        for removed in ["tasks", "memories", "outbox"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            )
+            .bind(removed)
             .fetch_one(store.pool())
             .await
             .unwrap();
-        assert_eq!(
-            retained,
-            (
-                "retained_pending_export".to_owned(),
-                "/retained/bundle.json".to_owned(),
-                "retained-hash".to_owned(),
-            ),
-        );
+            assert_eq!(exists, 0, "{removed}");
+        }
+        assert!(artifacts.join("legacy.sqlite").is_file());
+        assert!(artifacts.join("legacy.manifest.json").is_file());
+        assert!(artifacts.join("removed_feature.json").is_file());
+        store.close().await;
 
-        let bundle_path = dir.path().join("tasks.removed_feature.json");
-        export_removed_feature_tasks(&store, &bundle_path)
+        let (reopened, repeated) = bootstrap_legacy_edge(&legacy, &edge, &artifacts)
             .await
             .unwrap();
-        cleanup_removed_feature_tasks(&store).await.unwrap();
-    }
-
-    async fn task_bundle_fixture() -> (Store, tempfile::TempDir, std::path::PathBuf) {
-        let store = legacy_task_store().await;
-        sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
-            .execute(store.pool()).await.unwrap();
-        sqlx::query("INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')")
-            .execute(store.pool()).await.unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.removed_feature.json");
-        export_removed_feature_tasks(&store, &path).await.unwrap();
-        (store, dir, path)
-    }
-
-    #[tokio::test]
-    async fn cleanup_refuses_changed_or_added_or_deleted_task_records() {
-        let (store, _dir, _) = task_bundle_fixture().await;
-        sqlx::query("UPDATE tasks SET title = 'changed' WHERE id = 't'")
-            .execute(store.pool())
+        assert_eq!(repeated.status, "unchanged");
+        assert_eq!(repeated.pending_operations, 2);
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event_spool")
+            .fetch_one(reopened.pool())
             .await
             .unwrap();
-        assert!(matches!(
-            cleanup_removed_feature_tasks(&store).await,
-            Err(StoreError::Refused {
-                code: "removed_feature_bundle_incomplete",
-                ..
-            })
-        ));
-
-        let (store, _dir, _) = task_bundle_fixture().await;
-        sqlx::query("INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('added', 'p', 'title', 'goal', 'todo', 'now', 'now')").execute(store.pool()).await.unwrap();
-        assert!(matches!(
-            cleanup_removed_feature_tasks(&store).await,
-            Err(StoreError::Refused {
-                code: "removed_feature_bundle_incomplete",
-                ..
-            })
-        ));
-
-        let (store, _dir, _) = task_bundle_fixture().await;
-        sqlx::query("DELETE FROM tasks WHERE id = 't'")
-            .execute(store.pool())
-            .await
-            .unwrap();
-        assert!(matches!(
-            cleanup_removed_feature_tasks(&store).await,
-            Err(StoreError::Refused {
-                code: "removed_feature_bundle_incomplete",
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn cleanup_conserves_criterion_and_task_verification_evidence() {
-        let store = legacy_task_store().await;
-        let pool = store.pool();
-        for sql in [
-            "INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')",
-            "INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')",
-            "INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, worktree_path, agent_session_key, status, started_at, last_event_at, daemon_run_id) VALUES ('s', 'p', 't', 'u', 'a', 'main', '/p', 'key', 'active', 'now', 'now', 'run')",
-            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('task-memory', 'p', 'fact', 'task', 't', 'task memory', 's', 'now', 'now')",
-            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('live-memory', 'p', 'fact', 'project', 'p', 'live memory', 's', 'now', 'now')",
-            "INSERT INTO task_criteria (id, task_id, ordinal, label, text, state, verification, revision, created_at, updated_at) VALUES ('c', 't', 1, 'AC-1', 'criterion', 'pending', 'unverified', 1, 'now', 'now')",
-            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('criterion-only', 'p', 'observation', 'cairn', 'criterion', 'main', 'now', 's')",
-            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('verification-only', 'p', 'observation', 'cairn', 'verification', 'main', 'now', 's')",
-            "INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('shared', 'p', 'observation', 'cairn', 'shared', 'main', 'now', 's')",
-            "INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'criterion-only', 'now', 's')",
-            "INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'shared', 'now', 's')",
-            "INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('live-memory', 'shared', 'supports', 'now', 's')",
-            "INSERT INTO verification_runs (id, memory_id, project_id, verifier, evidence_id, result, repo_branch, checked_at, triggered_by) VALUES ('verification-only-run', 'task-memory', 'p', 'test_outcome', 'verification-only', 'verified', 'main', 'now', 'attach')",
-            "INSERT INTO verification_runs (id, criterion_id, project_id, verifier, evidence_id, result, repo_branch, checked_at, triggered_by) VALUES ('shared-run', 'c', 'p', 'test_outcome', 'shared', 'verified', 'main', 'now', 'attach')",
-        ] {
-            sqlx::query(sql).execute(pool).await.unwrap();
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.removed_feature.json");
-        export_removed_feature_tasks(&store, &path).await.unwrap();
-        cleanup_removed_feature_tasks(&store).await.unwrap();
-
-        for id in ["criterion-only", "verification-only"] {
-            assert_eq!(
-                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = ?")
-                    .bind(id)
-                    .fetch_one(pool)
-                    .await
-                    .unwrap(),
-                0,
-                "{id} has no live reference",
-            );
-        }
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'shared'")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1,
-            "surviving memory keeps shared evidence",
-        );
-    }
-
-    #[tokio::test]
-    async fn removed_feature_bundle_conserves_task_records_and_dependencies() {
-        let store = legacy_task_store().await;
-        let pool = store.pool();
-        sqlx::query("INSERT INTO projects (id, name, git_common_dir, linked, created_at, updated_at) VALUES ('p', 'p', '/p', 0, 'now', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at) VALUES ('t', 'p', 'title', 'goal', 'todo', 'now', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, worktree_path, agent_session_key, status, started_at, last_event_at, daemon_run_id) VALUES ('s', 'p', 't', 'u', 'a', 'main', '/p', 'key', 'active', 'now', 'now', 'run')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('m', 'p', 'fact', 'task', 't', 'task memory', 's', 'now', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memory_evidence (memory_id, observation_id, content_digest) VALUES ('m', 'o', 'digest')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('e', 'p', 'observation', 'cairn', 'subject', 'main', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO evidence_facts (id, project_id, kind, collector, subject, repo_branch, collected_at, collected_by_session) VALUES ('task-only-e', 'p', 'observation', 'cairn', 'task subject', 'main', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('m', 'e', 'supports', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('m', 'task-only-e', 'supports', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('keep', 'p', 'fact', 'project', 'p', 'surviving memory', 's', 'now', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memory_evidence_facts (memory_id, evidence_id, role, attached_at, attached_by_session) VALUES ('keep', 'e', 'supports', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO memory_relations (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis) VALUES ('m', 'm', 'reinforces', 'p', 's', 'now', 'explicit_agent')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO task_criteria (id, task_id, ordinal, label, text, state, verification, revision, created_at, updated_at) VALUES ('c', 't', 1, 'AC-1', 'criterion', 'pending', 'unverified', 1, 'now', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO task_blockers (id, task_id, description, opened_by_session, opened_at) VALUES ('b', 't', 'blocker', 's', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO task_changes (id, task_id, local_revision, kind, session_id, changed_at) VALUES ('ch', 't', 1, 'title_changed', 's', 'now')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO criterion_evidence (criterion_id, evidence_id, attached_at, attached_by_session) VALUES ('c', 'e', 'now', 's')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO verification_runs (id, criterion_id, project_id, verifier, result, repo_branch, checked_at, triggered_by) VALUES ('vr-c', 'c', 'p', 'test_outcome', 'verified', 'main', 'now', 'attach')")
-            .execute(pool).await.unwrap();
-        sqlx::query("INSERT INTO verification_runs (id, memory_id, project_id, verifier, result, repo_branch, checked_at, triggered_by) VALUES ('vr-m', 'm', 'p', 'test_outcome', 'verified', 'main', 'now', 'attach')")
-            .execute(pool).await.unwrap();
-        for (id, entity_type) in [
-            ("o-task", "task"),
-            ("o-criterion", "task_criterion"),
-            ("o-blocker", "task_blocker"),
-        ] {
-            sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES (?, 'p', ?, 't', 'upsert', ?, '{}', 'now', 'project:p')")
-                .bind(id).bind(entity_type).bind(format!("key-{id}")).execute(pool).await.unwrap();
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.removed_feature.json");
-        let bundle = export_removed_feature_tasks(&store, &path).await.unwrap();
-
-        assert_eq!(bundle.version, REMOVED_FEATURE_BUNDLE_VERSION);
-        assert_eq!(bundle.feature, "tasks");
-        assert_eq!(bundle.dispositions["accepted"], 0);
-        assert_eq!(bundle.dispositions["rejected"], 0);
-        assert_eq!(bundle.dispositions["retained"], bundle.records.len() as u64);
-        for table in [
-            "tasks",
-            "memories",
-            "memory_evidence",
-            "evidence_facts",
-            "memory_evidence_facts",
-            "memory_relations",
-            "task_criteria",
-            "task_blockers",
-            "task_changes",
-            "criterion_evidence",
-            "verification_runs",
-            "outbox",
-        ] {
-            assert!(
-                bundle.records.iter().any(|r| r.source_table == table),
-                "{table}"
-            );
-        }
-        assert!(bundle.records.iter().all(|r| r.disposition == "retained"));
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tasks")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE scope = 'task'")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_evidence")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            serde_json::to_string_pretty(&bundle).unwrap()
-        );
-        cleanup_removed_feature_tasks(&store).await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memories WHERE id = 'm'")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM memory_evidence WHERE memory_id = 'm'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM memory_evidence_facts WHERE memory_id = 'm'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM evidence_facts WHERE id = 'e'")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM evidence_facts WHERE id = 'task-only-e'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_relations")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM verification_runs")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox")
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('bad', 'p', 'fact', 'task', 't', 'bad', 's', 'now', 'now')").execute(pool).await.is_err());
-        assert!(sqlx::query("INSERT INTO outbox (id, project_id, entity_type, entity_id, operation, idempotency_key, payload, created_at, namespace) VALUES ('bad', 'p', 'task', 't', 'upsert', 'bad', '{}', 'now', 'project:p')").execute(pool).await.is_err());
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            0
-        );
-        let indexes: Vec<String> = sqlx::query(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'memories'",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.try_get("name").unwrap())
-        .collect();
-        for name in [
-            "memories_scope",
-            "memories_topic",
-            "memories_subject",
-            "memories_verification",
-            "memories_pinned",
-            "memories_temporal",
-            "memories_content_norm",
-        ] {
-            assert!(indexes.contains(&name.to_owned()), "{name}");
-        }
-        let mut triggers: Vec<String> = sqlx::query(
-            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'memories'",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|row| row.try_get("name").unwrap())
-        .collect();
-        triggers.sort();
-        assert_eq!(
-            triggers,
-            vec!["memories_fts_ad", "memories_fts_ai", "memories_fts_au"]
-        );
-        sqlx::query("INSERT INTO memories (id, project_id, type, scope, scope_key, content, origin_session_id, created_at, updated_at) VALUES ('lex', 'p', 'fact', 'project', 'p', 'needle one', 's', 'now', 'now')")
-            .execute(pool).await.unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'needle'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            1
-        );
-        sqlx::query("UPDATE memories SET content = 'needle two' WHERE id = 'lex'")
-            .execute(pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'two'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            1
-        );
-        sqlx::query("DELETE FROM memories WHERE id = 'lex'")
-            .execute(pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>(
-                "SELECT count(*) FROM memory_fts WHERE memory_fts MATCH 'two'"
-            )
-            .fetch_one(pool)
-            .await
-            .unwrap(),
-            0
-        );
-        assert!(!removed_feature_tasks_pending(&store).await.unwrap());
+        assert_eq!(count, 1);
     }
 }

@@ -84,7 +84,7 @@ pub(crate) fn classify_entry(
             if recorded.is_some() {
                 base(HealthCondition::Missing)
                     .detail("recorded as installed, not found")
-                    .remedy("cairn repair")
+                    .remedy("cairn setup")
             } else {
                 base(HealthCondition::Missing).detail("not installed")
             }
@@ -102,7 +102,7 @@ pub(crate) fn classify_entry(
             } else {
                 base(HealthCondition::Modified)
                     .detail("the entry differs from Cairn's canonical form")
-                    .remedy("cairn repair --force")
+                    .remedy("resolve the edit manually, then run `cairn setup`")
             }
         }
     }
@@ -126,7 +126,7 @@ pub(crate) fn inspect_instructions(
             return Observed::new(ResourceKind::Instructions, HealthCondition::DamagedMarkers)
                 .at(scope, Some(path.to_path_buf()))
                 .detail(detail)
-                .remedy("restore or remove the damaged markers by hand, then re-run doctor");
+                .remedy("restore or remove the damaged markers by hand, then run `cairn setup`");
         }
     };
     let _ = display;
@@ -152,7 +152,7 @@ pub(crate) fn inspect_instructions(
             return base(HealthCondition::Modified)
                 .version(block.schema, block.content.clone())
                 .detail("the managed block was edited by hand")
-                .remedy("cairn repair --force");
+                .remedy("resolve the edit manually, then run `cairn setup`");
         }
         return base(HealthCondition::Outdated)
             .version(block.schema, block.content.clone())
@@ -160,13 +160,13 @@ pub(crate) fn inspect_instructions(
                 "Cairn's managed block is behind this build (schema {}, revision {}→{})",
                 block.schema, block.content, want.revision
             ))
-            .remedy("cairn repair");
+            .remedy("cairn setup");
     }
     if !block.matches_body(&contract.block_body()) {
         return base(HealthCondition::Modified)
             .version(block.schema, block.content.clone())
             .detail("the managed block was edited by hand")
-            .remedy("cairn repair --force");
+            .remedy("resolve the edit manually, then run `cairn setup`");
     }
     let condition = if shared {
         HealthCondition::Shared
@@ -213,7 +213,7 @@ pub(crate) fn inspect_skill(
         return base(HealthCondition::ConflictingOwner)
             .owned_by(ResourceOwner::External)
             .detail("a Skill named `cairn` is installed here that Cairn did not write")
-            .remedy("cairn doctor  # Cairn will neither adopt nor delete it");
+            .remedy("resolve the conflict manually; `cairn setup` will not overwrite it");
     }
 
     let (schema, rev) = (revision::embedded_schema(), revision::embedded_revision());
@@ -224,7 +224,7 @@ pub(crate) fn inspect_skill(
                 "installed Skill is schema {} revision {}; this build carries schema {schema} revision {rev}",
                 installed.schema, installed.computed_revision
             ))
-            .remedy("cairn repair");
+            .remedy("cairn setup");
     }
     let consumers = serves(record, ResourceKind::Skill, path);
     let mut o = base(if consumers.len() > 1 {
