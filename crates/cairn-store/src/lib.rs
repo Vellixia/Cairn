@@ -123,7 +123,7 @@ impl Store {
                 other => StoreError::from(other),
             })?;
 
-        if fresh {
+        if fresh || migrate::fresh_pending(&pool).await? {
             migrate::run_fresh(&pool).await?;
         } else {
             migrate::run(&pool).await?;
@@ -232,6 +232,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, migrate::MIGRATIONS.len() as i64);
+    }
+
+    #[tokio::test]
+    async fn interrupted_fresh_schema_is_pruned_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.sqlite3");
+        let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        migrate::run(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE edge_bootstrap_state (id INTEGER PRIMARY KEY CHECK (id = 1));
+             INSERT INTO edge_bootstrap_state VALUES (1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        for removed in ["tasks", "memories", "edge_bootstrap_state"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            )
+            .bind(removed)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(exists, 0, "{removed}");
+        }
     }
 
     #[tokio::test]

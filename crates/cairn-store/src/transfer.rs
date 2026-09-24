@@ -1,5 +1,9 @@
 //! Versioned, integrity-checked portable-store transfer.
-use crate::{diag, migrate, Result, Store, StoreError};
+use crate::{diag, migrate, spool::CommandKind, Result, Store, StoreError};
+use cairn_core::{
+    event::{SafeCanonicalEvent, CONTRACT_VERSION},
+    eventid,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, Row};
@@ -9,6 +13,7 @@ use std::io::{Read, Seek};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
+use std::str::FromStr;
 
 pub const MANIFEST_VERSION: u32 = 1;
 /// Schema for the one-way, offline export of the removed Task feature.
@@ -60,10 +65,17 @@ pub struct ImportReport {
 pub struct LegacyEdgeReport {
     pub status: String,
     pub pending_operations: u64,
+    pub retained_operations: u64,
     pub backup: Option<String>,
     pub manifest: Option<String>,
     pub bundle: Option<String>,
     pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingImport {
+    pending_operations: u64,
+    retained_operations: u64,
 }
 
 fn refused(code: &'static str, message: impl Into<String>) -> StoreError {
@@ -822,6 +834,7 @@ pub async fn bootstrap_legacy_edge(
             LegacyEdgeReport {
                 status: "not_pending".into(),
                 pending_operations: 0,
+                retained_operations: 0,
                 backup: None,
                 manifest: None,
                 bundle: None,
@@ -834,14 +847,13 @@ pub async fn bootstrap_legacy_edge(
     let manifest_path = artifacts.join("legacy.manifest.json");
     let bundle_path = artifacts.join("removed_feature.json");
     let migrated = async {
-        std::fs::create_dir_all(artifacts)?;
         let existing = [
             backup.as_path(),
             manifest_path.as_path(),
             bundle_path.as_path(),
         ]
         .map(Path::is_file);
-        if existing.iter().any(|exists| *exists) {
+        if artifacts.exists() {
             if !existing.iter().all(|exists| *exists) {
                 return Err(refused(
                     "incomplete_legacy_artifacts",
@@ -869,39 +881,71 @@ pub async fn bootstrap_legacy_edge(
                     "Task bundle is not a supported removed-feature artifact",
                 ));
             }
-            return Ok::<(u64, bool), StoreError>((
+            return Ok::<(PendingImport, bool), StoreError>((
                 import_pending_edge_state(&edge_store, &backup).await?,
                 true,
             ));
         }
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(legacy)
-            .read_only(true);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await?;
-        let source = Store { pool };
-        let mut manifest = export_snapshot_inner(&source, &backup, false).await?;
-        manifest.snapshot = "legacy.sqlite".into();
-        write_manifest(&manifest, &manifest_path)?;
-        write_removed_feature_bundle(&source, &bundle_path).await?;
-        source.close().await;
-        let pending_operations = import_pending_edge_state(&edge_store, &backup).await?;
-        Ok::<(u64, bool), StoreError>((pending_operations, false))
+        let parent = artifacts
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let staging = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            artifacts.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir(&staging)?;
+        let publish = async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(legacy)
+                .read_only(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await?;
+            let source = Store { pool };
+            let staging_backup = staging.join("legacy.sqlite");
+            let mut manifest = export_snapshot_inner(&source, &staging_backup, false).await?;
+            manifest.snapshot = "legacy.sqlite".into();
+            write_manifest(&manifest, &staging.join("legacy.manifest.json"))?;
+            write_removed_feature_bundle(&source, &staging.join("removed_feature.json")).await?;
+            source.close().await;
+            std::fs::rename(&staging, artifacts)?;
+            Ok::<(), StoreError>(())
+        }
+        .await;
+        if publish.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
+        publish?;
+        let imported = import_pending_edge_state(&edge_store, &backup).await?;
+        Ok::<(PendingImport, bool), StoreError>((imported, false))
     }
     .await;
 
-    let (status, pending_operations, detail) = match migrated {
-        Ok((count, true)) => ("unchanged", count, None),
-        Ok((count, false)) => ("migrated", count, None),
-        Err(error) => ("warning", 0, Some(error.to_string())),
+    let (status, pending_operations, retained_operations, detail) = match migrated {
+        Ok((imported, _)) if imported.retained_operations != 0 => (
+            "warning",
+            imported.pending_operations,
+            imported.retained_operations,
+            Some(format!(
+                "{} invalid pending operation(s) retained offline",
+                imported.retained_operations
+            )),
+        ),
+        Ok((imported, true)) => ("unchanged", imported.pending_operations, 0, None),
+        Ok((imported, false)) => ("migrated", imported.pending_operations, 0, None),
+        Err(error) => ("warning", 0, 0, Some(error.to_string())),
     };
     Ok((
         edge_store,
         LegacyEdgeReport {
             status: status.into(),
             pending_operations,
+            retained_operations,
             backup: Some(backup.display().to_string()),
             manifest: Some(manifest_path.display().to_string()),
             bundle: Some(bundle_path.display().to_string()),
@@ -910,7 +954,7 @@ pub async fn bootstrap_legacy_edge(
     ))
 }
 
-async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64> {
+async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<PendingImport> {
     let mut connection = store.pool().acquire().await?;
     sqlx::query(&format!(
         "ATTACH DATABASE {} AS legacy_snapshot",
@@ -919,42 +963,90 @@ async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64
     .execute(&mut *connection)
     .await?;
     let result = async {
-        for table in ["users", "projects"] {
-            copy_common_rows(&mut connection, table, "1 = 1", &[]).await?;
-        }
+        let mut tx = connection.begin().await?;
+        let imported = validate_pending_operations(&mut tx).await?;
         copy_common_rows(
-            &mut connection,
+            &mut tx,
+            "users",
+            "source.id IN (
+                SELECT s.user_id FROM legacy_snapshot.sessions s WHERE s.id IN (
+                    SELECT e.session_id FROM legacy_snapshot.event_spool e JOIN legacy_valid_events v ON v.id = e.event_id
+                    UNION SELECT c.session_id FROM legacy_snapshot.command_spool c JOIN legacy_valid_commands v ON v.id = c.command_id WHERE c.session_id IS NOT NULL
+                )
+            )",
+            &[],
+        )
+        .await?;
+        copy_common_rows(
+            &mut tx,
+            "projects",
+            "source.id IN (
+                SELECT e.project_id FROM legacy_snapshot.event_spool e JOIN legacy_valid_events v ON v.id = e.event_id
+                UNION SELECT c.project_id FROM legacy_snapshot.command_spool c JOIN legacy_valid_commands v ON v.id = c.command_id WHERE c.project_id IS NOT NULL
+            )",
+            &[],
+        )
+        .await?;
+        copy_common_rows(
+            &mut tx,
             "sessions",
-            "source.status = 'active' OR source.id IN (
-                SELECT session_id FROM legacy_snapshot.event_spool WHERE state IN ('pending','in_flight')
-                UNION SELECT session_id FROM legacy_snapshot.command_spool WHERE state IN ('pending','in_flight') AND session_id IS NOT NULL
+            "source.id IN (
+                SELECT e.session_id FROM legacy_snapshot.event_spool e JOIN legacy_valid_events v ON v.id = e.event_id
+                UNION SELECT c.session_id FROM legacy_snapshot.command_spool c JOIN legacy_valid_commands v ON v.id = c.command_id WHERE c.session_id IS NOT NULL
             )",
             &[("previous_session_id", "NULL")],
         )
         .await?;
-        for table in [
+        copy_common_rows(
+            &mut tx,
             "agent_integrations",
-            "manager_integrations",
+            "source.agent IN (
+                SELECT b.agent FROM legacy_snapshot.resource_bindings b
+                JOIN legacy_snapshot.installed_resources r ON r.id = b.resource_id
+                WHERE r.owner = 'direct'
+            )",
+            &[],
+        )
+        .await?;
+        copy_common_rows(
+            &mut tx,
             "installed_resources",
+            "source.owner = 'direct'",
+            &[],
+        )
+        .await?;
+        copy_common_rows(
+            &mut tx,
             "resource_bindings",
-            "capability_evidence",
-            "migration_states",
-            "recovery_artifacts",
-        ] {
-            copy_common_rows(&mut connection, table, "1 = 1", &[]).await?;
-        }
+            "source.resource_id IN (
+                SELECT id FROM legacy_snapshot.installed_resources WHERE owner = 'direct'
+            )",
+            &[],
+        )
+        .await?;
         copy_common_rows(
-            &mut connection,
+            &mut tx,
             "session_event_seq",
-            "source.session_id IN (SELECT id FROM main.sessions)",
+            "source.session_id IN (
+                SELECT e.session_id FROM legacy_snapshot.event_spool e JOIN legacy_valid_events v ON v.id = e.event_id
+            )",
             &[],
         )
         .await?;
-        copy_common_rows(&mut connection, "command_seq", "1 = 1", &[]).await?;
         copy_common_rows(
-            &mut connection,
+            &mut tx,
+            "command_seq",
+            "EXISTS (
+                SELECT 1 FROM legacy_snapshot.command_spool c JOIN legacy_valid_commands v ON v.id = c.command_id
+                WHERE c.scope_kind = source.scope_kind AND c.scope_key = source.scope_key
+            )",
+            &[],
+        )
+        .await?;
+        copy_common_rows(
+            &mut tx,
             "event_spool",
-            "source.state IN ('pending','in_flight')",
+            "source.event_id IN (SELECT id FROM legacy_valid_events)",
             &[
                 ("state", "'pending'"),
                 ("claimed_at", "NULL"),
@@ -964,9 +1056,9 @@ async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64
         )
         .await?;
         copy_common_rows(
-            &mut connection,
+            &mut tx,
             "command_spool",
-            "source.state IN ('pending','in_flight')",
+            "source.command_id IN (SELECT id FROM legacy_valid_commands)",
             &[
                 ("state", "'pending'"),
                 ("claimed_at", "NULL"),
@@ -975,20 +1067,11 @@ async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64
             ],
         )
         .await?;
-        copy_common_rows(
-            &mut connection,
-            "capture_disposition_counts",
-            "1 = 1",
-            &[],
-        )
-        .await?;
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM event_spool")
-            .fetch_one(&mut *connection)
+        sqlx::query("DROP TABLE legacy_valid_events; DROP TABLE legacy_valid_commands")
+            .execute(&mut *tx)
             .await?;
-        let commands: i64 = sqlx::query_scalar("SELECT count(*) FROM command_spool")
-            .fetch_one(&mut *connection)
-            .await?;
-        Ok::<u64, StoreError>((events + commands) as u64)
+        tx.commit().await?;
+        Ok::<PendingImport, StoreError>(imported)
     }
     .await;
     let detached = sqlx::query("DETACH DATABASE legacy_snapshot")
@@ -1001,8 +1084,127 @@ async fn import_pending_edge_state(store: &Store, snapshot: &Path) -> Result<u64
     }
 }
 
+async fn validate_pending_operations(
+    connection: &mut sqlx::SqliteConnection,
+) -> Result<PendingImport> {
+    sqlx::query(
+        "CREATE TEMP TABLE legacy_valid_events (id TEXT PRIMARY KEY);
+         CREATE TEMP TABLE legacy_valid_commands (id TEXT PRIMARY KEY)",
+    )
+    .execute(&mut *connection)
+    .await?;
+    let mut pending_operations = 0;
+    let mut retained_operations = 0;
+    for row in sqlx::query(
+        "SELECT event_id, session_id, project_id, account_id, session_seq, kind,
+                payload, payload_bytes, boundary_class
+           FROM legacy_snapshot.event_spool WHERE state IN ('pending','in_flight')",
+    )
+    .fetch_all(&mut *connection)
+    .await?
+    {
+        let event_id: String = row.try_get("event_id")?;
+        let session_id: String = row.try_get("session_id")?;
+        let project_id: String = row.try_get("project_id")?;
+        let account_id: String = row.try_get("account_id")?;
+        let session_seq: i64 = row.try_get("session_seq")?;
+        let kind: String = row.try_get("kind")?;
+        let payload: String = row.try_get("payload")?;
+        let payload_bytes: i64 = row.try_get("payload_bytes")?;
+        let boundary_class: i64 = row.try_get("boundary_class")?;
+        let valid = (|| {
+            let event_id = uuid::Uuid::parse_str(&event_id).ok()?;
+            let session_id = uuid::Uuid::parse_str(&session_id).ok()?;
+            uuid::Uuid::parse_str(&project_id).ok()?;
+            uuid::Uuid::parse_str(&account_id).ok()?;
+            let session_seq = u64::try_from(session_seq).ok()?;
+            let event = serde_json::from_str::<SafeCanonicalEvent>(&payload).ok()?;
+            event.validate().ok()?;
+            (event.event_id == event_id
+                && event.contract_version == CONTRACT_VERSION
+                && event.session_id == session_id
+                && event.session_seq == session_seq
+                && event.kind.as_str() == kind
+                && event.boundary_class() == boundary_class
+                && payload.len() as i64 == payload_bytes
+                && eventid::event_id(session_id, session_seq) == event_id)
+                .then_some(())
+        })()
+        .is_some();
+        if valid {
+            sqlx::query("INSERT INTO legacy_valid_events VALUES (?)")
+                .bind(event_id)
+                .execute(&mut *connection)
+                .await?;
+            pending_operations += 1;
+        } else {
+            retained_operations += 1;
+        }
+    }
+    for row in sqlx::query(
+        "SELECT command_id, scope_kind, scope_key, session_id, project_id, account_id,
+                command_seq, kind, payload
+           FROM legacy_snapshot.command_spool WHERE state IN ('pending','in_flight')",
+    )
+    .fetch_all(&mut *connection)
+    .await?
+    {
+        let command_id: String = row.try_get("command_id")?;
+        let scope_kind: String = row.try_get("scope_kind")?;
+        let scope_key: String = row.try_get("scope_key")?;
+        let session_id: Option<String> = row.try_get("session_id")?;
+        let project_id: Option<String> = row.try_get("project_id")?;
+        let account_id: String = row.try_get("account_id")?;
+        let command_seq: i64 = row.try_get("command_seq")?;
+        let kind: String = row.try_get("kind")?;
+        let payload: String = row.try_get("payload")?;
+        let valid = (|| {
+            let command_id = uuid::Uuid::parse_str(&command_id).ok()?;
+            let scope_key_id = uuid::Uuid::parse_str(&scope_key).ok()?;
+            uuid::Uuid::parse_str(&account_id).ok()?;
+            project_id
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .ok()?;
+            let session_id = session_id
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .ok()?;
+            let command_seq = u64::try_from(command_seq).ok()?;
+            CommandKind::from_str(&kind).ok()?;
+            serde_json::from_str::<serde_json::Value>(&payload).ok()?;
+            let scope_matches = match scope_kind.as_str() {
+                "session" => session_id == Some(scope_key_id),
+                "store" => session_id.is_none(),
+                _ => false,
+            };
+            (scope_key_id.to_string() == scope_key
+                && scope_matches
+                && eventid::command_id(&scope_kind, &scope_key_id.to_string(), command_seq)
+                    == command_id)
+                .then_some(())
+        })()
+        .is_some();
+        if valid {
+            sqlx::query("INSERT INTO legacy_valid_commands VALUES (?)")
+                .bind(command_id)
+                .execute(&mut *connection)
+                .await?;
+            pending_operations += 1;
+        } else {
+            retained_operations += 1;
+        }
+    }
+    Ok(PendingImport {
+        pending_operations,
+        retained_operations,
+    })
+}
+
 async fn copy_common_rows(
-    connection: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    connection: &mut sqlx::SqliteConnection,
     table: &str,
     predicate: &str,
     replacements: &[(&str, &str)],
@@ -1011,20 +1213,20 @@ async fn copy_common_rows(
         "SELECT EXISTS(SELECT 1 FROM legacy_snapshot.sqlite_master WHERE type='table' AND name=?)",
     )
     .bind(table)
-    .fetch_one(&mut **connection)
+    .fetch_one(&mut *connection)
     .await?;
     if exists == 0 {
         return Ok(());
     }
     let target: Vec<String> = sqlx::query(&format!("PRAGMA main.table_info({})", ql(table)))
-        .fetch_all(&mut **connection)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(|row| row.try_get("name"))
         .collect::<std::result::Result<_, _>>()?;
     let source: std::collections::BTreeSet<String> =
         sqlx::query(&format!("PRAGMA legacy_snapshot.table_info({})", ql(table)))
-            .fetch_all(&mut **connection)
+            .fetch_all(&mut *connection)
             .await?
             .into_iter()
             .map(|row| row.try_get("name"))
@@ -1056,7 +1258,7 @@ async fn copy_common_rows(
         qi(table),
         qi(table)
     ))
-    .execute(&mut **connection)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -1064,6 +1266,9 @@ async fn copy_common_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::event::{EventAgent, EventKind};
+    use cairn_core::eventid;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn legacy_bootstrap_preserves_source_and_moves_only_pending_spool_rows() {
@@ -1077,27 +1282,72 @@ mod tests {
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
         let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
         migrate::run_to(&pool, 12).await.unwrap();
-        sqlx::query("INSERT INTO users VALUES ('u', NULL, 'user', 'now')")
+        let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let project_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let session_id = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let account_id = Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap();
+        let ignored_user = Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap();
+        let ignored_project = Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap();
+        let ignored_session = Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap();
+        sqlx::query("INSERT INTO users VALUES (?, NULL, 'user', 'now'), (?, NULL, 'user', 'now')")
+            .bind(user_id.to_string())
+            .bind(ignored_user.to_string())
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO projects (id,name,git_common_dir,linked,created_at,updated_at) VALUES ('p','project','/repo',1,'now','now')")
+        sqlx::query("INSERT INTO projects (id,name,git_common_dir,linked,created_at,updated_at) VALUES (?,'project','/repo',1,'now','now'), (?,'ignored','/ignored',1,'now','now')")
+            .bind(project_id.to_string()).bind(ignored_project.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,project_id,title,goal,status,created_at,updated_at) VALUES ('t',?,'task','goal','todo','now','now')")
+            .bind(project_id.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions (id,project_id,task_id,user_id,agent,branch,worktree_path,agent_session_key,status,started_at,last_event_at,daemon_run_id) VALUES (?,?, 't',?,'codex','main','/repo','agent-key','active','now','now','run'), (?,?,NULL,?,'codex','main','/ignored','ignored-key','active','now','now','run')")
+            .bind(session_id.to_string()).bind(project_id.to_string()).bind(user_id.to_string())
+            .bind(ignored_session.to_string()).bind(ignored_project.to_string()).bind(ignored_user.to_string())
             .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO tasks (id,project_id,title,goal,status,created_at,updated_at) VALUES ('t','p','task','goal','todo','now','now')")
-            .execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO sessions (id,project_id,task_id,user_id,agent,branch,worktree_path,agent_session_key,status,started_at,last_event_at,daemon_run_id) VALUES ('s','p','t','u','codex','main','/repo','agent-key','active','now','now','run')")
-            .execute(&pool).await.unwrap();
-        for (id, seq, state) in [("pending", 1, "pending"), ("delivered", 2, "delivered")] {
-            sqlx::query("INSERT INTO event_spool (event_id,session_id,project_id,account_id,session_seq,kind,payload,payload_bytes,boundary_class,state,created_at) VALUES (?, 's','p','account',?,'tool_event','{}',2,0,?,'now')")
-                .bind(id).bind(seq).bind(state).execute(&pool).await.unwrap();
+        let pending_event = SafeCanonicalEvent {
+            event_id: eventid::event_id(session_id, 1),
+            contract_version: CONTRACT_VERSION,
+            kind: EventKind::AgentQuiesced,
+            agent: EventAgent::Codex,
+            vendor_event: None,
+            session_id,
+            session_seq: 1,
+            occurred_at: chrono::Utc::now(),
+            content: None,
+        };
+        let delivered_event = SafeCanonicalEvent {
+            event_id: eventid::event_id(session_id, 2),
+            session_seq: 2,
+            ..pending_event.clone()
+        };
+        for (event, state) in [(&pending_event, "pending"), (&delivered_event, "delivered")] {
+            let payload = serde_json::to_string(event).unwrap();
+            sqlx::query("INSERT INTO event_spool (event_id,session_id,project_id,account_id,session_seq,kind,payload,payload_bytes,boundary_class,state,created_at) VALUES (?,?,?,?,?,?,?,?,?,?, 'now')")
+                .bind(event.event_id.to_string()).bind(session_id.to_string()).bind(project_id.to_string())
+                .bind(account_id.to_string()).bind(event.session_seq as i64).bind(event.kind.as_str())
+                .bind(&payload).bind(payload.len() as i64).bind(event.boundary_class()).bind(state)
+                .execute(&pool).await.unwrap();
         }
-        for (id, seq, state) in [
-            ("pending-command", 1, "in_flight"),
-            ("delivered-command", 2, "delivered"),
-        ] {
-            sqlx::query("INSERT INTO command_spool (command_id,scope_kind,scope_key,session_id,project_id,account_id,command_seq,kind,payload,state,created_at) VALUES (?,'session','s','s','p','account',?,'remember','{}',?,'now')")
-                .bind(id).bind(seq).bind(state).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO event_spool (event_id,session_id,project_id,account_id,session_seq,kind,payload,payload_bytes,boundary_class,state,created_at) VALUES (?,?,?,?,3,'agent_quiesced','{}',2,0,'pending','now')")
+            .bind(eventid::event_id(ignored_session, 3).to_string()).bind(ignored_session.to_string())
+            .bind(ignored_project.to_string()).bind(account_id.to_string()).execute(&pool).await.unwrap();
+        for (seq, state) in [(1_u64, "in_flight"), (2, "delivered")] {
+            sqlx::query("INSERT INTO command_spool (command_id,scope_kind,scope_key,session_id,project_id,account_id,command_seq,kind,payload,state,created_at) VALUES (?,'session',?,?,?,?,?,'remember','{}',?,'now')")
+                .bind(eventid::command_id("session", &session_id.to_string(), seq).to_string())
+                .bind(session_id.to_string()).bind(session_id.to_string()).bind(project_id.to_string())
+                .bind(account_id.to_string()).bind(seq as i64).bind(state).execute(&pool).await.unwrap();
         }
+        sqlx::query("INSERT INTO command_spool (command_id,scope_kind,scope_key,session_id,project_id,account_id,command_seq,kind,payload,state,created_at) VALUES (?,'session',?,?,?,?,4,'remember','{}','pending','now')")
+            .bind("00000000-0000-0000-0000-000000000099")
+            .bind(ignored_session.to_string()).bind(ignored_session.to_string()).bind(ignored_project.to_string())
+            .bind(account_id.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_integrations (agent,adapter_version,compatibility,level,completion_guarantee,connected_at) VALUES ('codex',1,'supported','full','automatic','now'), ('claude_code',1,'supported','full','automatic','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO installed_resources (id,kind,owner,scope,location,activation,installed_at) VALUES ('00000000-0000-0000-0000-000000000021','hook','direct','user','/owned','active','now'), ('00000000-0000-0000-0000-000000000022','hook','manager','user','/manager','active','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO resource_bindings VALUES ('codex','hook','00000000-0000-0000-0000-000000000021','now'), ('claude_code','hook','00000000-0000-0000-0000-000000000022','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO manager_integrations (manager,compatibility,target_apps,connected_at) VALUES ('manager','supported','[]','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO capability_evidence (agent,capability,evidence,established_at) VALUES ('codex','capture','observation','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO migration_states (id,agent,kind,source_owner,source_scope,source_location,target_owner,target_scope,target_location,phase,overlap_permitted,started_at) VALUES ('00000000-0000-0000-0000-000000000023','codex','hook','direct','user','/old','manager','user','/new','copy',0,'now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO recovery_artifacts VALUES ('00000000-0000-0000-0000-000000000024','codex','hook','/source','/artifact','hash','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO capture_disposition_counts VALUES (?, 'codex','agent_quiesced','captured','2026-09-24',1)").bind(project_id.to_string()).execute(&pool).await.unwrap();
         let before_db = std::fs::read(&legacy).unwrap();
         let wal = legacy.with_extension("sqlite3-wal");
         let before_wal = std::fs::read(&wal).unwrap();
@@ -1106,21 +1356,54 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(report.status, "migrated");
+        assert_eq!(report.status, "warning");
         assert_eq!(report.pending_operations, 2);
+        assert_eq!(report.retained_operations, 2);
         assert_eq!(std::fs::read(&legacy).unwrap(), before_db);
         assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
         let ids: Vec<String> = sqlx::query_scalar("SELECT event_id FROM event_spool")
             .fetch_all(store.pool())
             .await
             .unwrap();
-        assert_eq!(ids, vec!["pending"]);
+        assert_eq!(ids, vec![pending_event.event_id.to_string()]);
         let commands: Vec<(String, String)> =
             sqlx::query_as("SELECT command_id, state FROM command_spool")
                 .fetch_all(store.pool())
                 .await
                 .unwrap();
-        assert_eq!(commands, vec![("pending-command".into(), "pending".into())]);
+        assert_eq!(
+            commands,
+            vec![(
+                eventid::command_id("session", &session_id.to_string(), 1).to_string(),
+                "pending".into()
+            )]
+        );
+        for table in ["users", "projects", "sessions"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "{table}");
+        }
+        for table in [
+            "manager_integrations",
+            "capability_evidence",
+            "migration_states",
+            "recovery_artifacts",
+            "capture_disposition_counts",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+        let ownership: (String, String, String) = sqlx::query_as("SELECT a.agent, r.owner, r.location FROM agent_integrations a JOIN resource_bindings b USING (agent) JOIN installed_resources r ON r.id = b.resource_id")
+            .fetch_one(store.pool()).await.unwrap();
+        assert_eq!(
+            ownership,
+            ("codex".into(), "direct".into(), "/owned".into())
+        );
         for removed in ["tasks", "memories", "outbox"] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
@@ -1139,12 +1422,39 @@ mod tests {
         let (reopened, repeated) = bootstrap_legacy_edge(&legacy, &edge, &artifacts)
             .await
             .unwrap();
-        assert_eq!(repeated.status, "unchanged");
+        assert_eq!(repeated.status, "warning");
         assert_eq!(repeated.pending_operations, 2);
+        assert_eq!(repeated.retained_operations, 2);
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event_spool")
             .fetch_one(reopened.pool())
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_legacy_export_never_publishes_partial_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("cairn.sqlite3");
+        let edge = dir.path().join("edge.sqlite3");
+        let artifacts = dir.path().join("removed_feature");
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", legacy.display()))
+            .await
+            .unwrap();
+        migrate::run_to(&pool, 12).await.unwrap();
+        sqlx::query("INSERT INTO projects (id,name,git_common_dir,linked,created_at,updated_at) VALUES ('p','project','/repo',1,'now','now')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tasks (id,project_id,title,goal,status,created_at,updated_at) VALUES ('t','p',X'80','goal','todo','now','now')").execute(&pool).await.unwrap();
+
+        let (store, report) = bootstrap_legacy_edge(&legacy, &edge, &artifacts)
+            .await
+            .unwrap();
+
+        assert_eq!(report.status, "warning");
+        assert!(!artifacts.exists());
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(version, migrate::latest_version());
     }
 }

@@ -106,15 +106,36 @@ pub async fn run(pool: &SqlitePool) -> Result<i64, MigrateError> {
     run_to(pool, latest_version()).await
 }
 
+pub async fn fresh_pending(pool: &SqlitePool) -> Result<bool, MigrateError> {
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT NOT EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'
+         ) OR EXISTS(
+             SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'edge_bootstrap_state'
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(pending != 0)
+}
+
 /// Fresh V1 edge databases retain only binding/correlation, typed spools,
 /// integration ownership, and removed-feature metadata. Applied migrations
 /// remain immutable for legacy databases; this path is selected only before a
 /// database exists.
 pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
+    pool.execute(
+        "CREATE TABLE IF NOT EXISTS edge_bootstrap_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1)
+         );
+         INSERT OR IGNORE INTO edge_bootstrap_state VALUES (1)",
+    )
+    .await?;
     run(pool).await?;
+    let mut tx = pool.begin().await?;
     // `sessions.task_id` was part of the legacy table. Rebuild correlation
     // before dropping Tasks so fresh stores contain no dangling foreign key.
-    pool.execute("DROP TABLE IF EXISTS sessions").await?;
+    tx.execute("DROP TABLE IF EXISTS sessions").await?;
     for table in [
         "memory_fts",
         "personal_fts",
@@ -152,10 +173,10 @@ pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
         "task_changes",
         "criterion_evidence",
     ] {
-        pool.execute(format!("DROP TABLE IF EXISTS {table}").as_str())
+        tx.execute(format!("DROP TABLE IF EXISTS {table}").as_str())
             .await?;
     }
-    pool.execute(
+    tx.execute(
         "CREATE TABLE sessions (
             id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
             user_id TEXT NOT NULL, agent TEXT NOT NULL, branch TEXT NOT NULL,
@@ -172,6 +193,8 @@ pub async fn run_fresh(pool: &SqlitePool) -> Result<i64, MigrateError> {
         CREATE INDEX sessions_branch_recent ON sessions(project_id, branch, ended_at DESC);",
     )
     .await?;
+    tx.execute("DROP TABLE edge_bootstrap_state").await?;
+    tx.commit().await?;
     Ok(latest_version())
 }
 
