@@ -64,6 +64,9 @@ jobs:
       # wall clock and buys the server the suite actually needs.
       - run: cargo build --workspace --release
 
+      # Cached test executables can predate the checked-out end-to-end sources.
+      - run: cargo clean -p cairn-e2e
+
       # `CAIRN_SERVER_BIN` is the only binary this job overrides, and the
       # reason is argon2. Every account the suite creates is a hash and every
       # sign-in is a verify; the comment on the web end-to-end job below puts
@@ -117,6 +120,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
+      - run: cargo clean -p cairn-e2e
       - run: cargo test --workspace --all-targets
 
       - name: Working tree is clean and free of conflict markers
@@ -158,6 +162,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
+      - run: cargo clean -p cairn-e2e
 
       # A tight timeout here, not just the job-level one: a hang should fail
       # fast enough to leave time for the diagnostics step below to actually
