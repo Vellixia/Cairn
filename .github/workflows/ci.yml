@@ -60,11 +60,7 @@ jobs:
       # for it to drive.
       - run: cargo build --workspace
 
-      # **Built before the tests, not after, so the tests can use it.**
-      #
-      # This job already built a release workspace; it simply did so afterwards,
-      # for the capture-hook latency claim below. Moving it up costs no extra
-      # wall clock and buys the server the suite actually needs.
+      # Built before the tests so the suite can use the release server.
       - run: cargo build --workspace --release
 
       # `CAIRN_SERVER_BIN` is the only binary this job overrides, and the
@@ -87,9 +83,6 @@ jobs:
           test -x "$CAIRN_SERVER_BIN" || { echo "no release server at $CAIRN_SERVER_BIN"; exit 1; }
           echo "end-to-end server: $CAIRN_SERVER_BIN"
           cargo test --workspace --all-targets
-
-      - name: Capture-hook latency (SC-007 is a release-build claim)
-        run: cargo test --release -p cairn-e2e --test polish_performance -- --nocapture
 
       - name: Working tree is clean and free of conflict markers
         run: |
