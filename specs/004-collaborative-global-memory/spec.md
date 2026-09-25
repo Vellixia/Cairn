@@ -4,7 +4,7 @@
 
 **Created**: 2026-08-21
 
-**Status**: Draft
+**Status**: Shipped per `0.1.0-alpha.7` changelog; task-ledger reconciliation pending. The 200 tasks in `tasks.md` remain unchecked, so this release statement is not task-level completion evidence.
 
 **Input**: Cairn extends its project-scoped memory with two new domains that follow the
 *person*, not the project: personal knowledge that follows one user across every project

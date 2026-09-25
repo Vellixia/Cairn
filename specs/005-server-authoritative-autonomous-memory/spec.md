@@ -10,13 +10,14 @@ than one being assumed from the other.
 
 **Created**: 2026-08-29
 
-**Status**: Implemented — awaiting independent review
+**Status**: Shipped per `0.1.0-alpha.7` changelog; implementation complete. The independent external AI review recorded in `tests/feature005/acceptance-results.md` passed on 2026-09-06 for the supplied record forms. Broader accuracy across varied repository work is unmeasured.
 
-Every task in `tasks.md` is closed and every acceptance gate named in the Success Criteria
-has a passing test, including the repaired SC-701a proof on durable knowledge. What is not
-done is the part that is deliberately not automatable: SC-701's two `by_review` accuracy
-criteria are judged by an independent reviewer, and the state above says so rather than
-calling the feature finished.
+Every task in `tasks.md` is closed and every automated acceptance gate named in the Success
+Criteria has a passing test, including the repaired SC-701a proof on durable knowledge.
+SC-701's two `by_review` accuracy criteria were judged PASS by an independent external AI
+reviewer, as recorded in `tests/feature005/acceptance-results.md`. That record covers a
+specific tested commit and thirty trials using one fixture scenario per agent. It does not
+establish accuracy across varied real repository work or claim human review.
 
 **Input**: Cairn becomes a server-authoritative autonomous memory system for AI coding
 agents. It captures useful work richly and vendor-natively, transforms it through a local

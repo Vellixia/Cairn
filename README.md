@@ -361,6 +361,8 @@ another's to decide anything.
 
 ## Layout
 
+Product direction: [PRD](docs/PRD.md) and [roadmap/checklist](docs/ROADMAP.md). They describe the published alpha.8 release; this `main` checkout still has alpha.7 source. Detailed 001–005 contracts in `specs/` are historical.
+
 | Path | What |
 |---|---|
 | `crates/cairn-core` | Domain types, redaction, budgeting, context and handoff synthesis |
