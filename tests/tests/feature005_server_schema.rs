@@ -21,7 +21,7 @@
 //! Every test skips, loudly, without `CAIRN_TEST_DATABASE_URL`. A vacuous pass
 //! here would be a schema nobody checked.
 
-use cairn_e2e::feature005::{Pg, SERVER_SCHEMA_V3, SERVER_SCHEMA_V5};
+use cairn_e2e::feature005::{Pg, SERVER_SCHEMA_V3, SERVER_SCHEMA_V8};
 use cairn_e2e::Server;
 
 macro_rules! pg {
@@ -36,8 +36,8 @@ macro_rules! pg {
     };
 }
 
-/// Every table v4 introduces.
-const V4_TABLES: &[&str] = &[
+/// Every table v4 introduces and the current runtime still owns.
+const SURVIVING_V4_TABLES: &[&str] = &[
     "safe_events",
     "consolidation_session",
     "consolidation_work",
@@ -53,7 +53,6 @@ const V4_TABLES: &[&str] = &[
     "integration_health",
     "delivered_context",
     "capture_dispositions",
-    "server_authority",
 ];
 
 // ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ fn v3_migrates_to_v4_and_keeps_what_v3_held() {
         old.count("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"),
         SERVER_SCHEMA_V3
     );
-    for table in V4_TABLES {
+    for table in SURVIVING_V4_TABLES {
         assert_eq!(
             old.count(&format!(
                 "SELECT count(*) FROM information_schema.tables
@@ -108,11 +107,11 @@ fn v3_migrates_to_v4_and_keeps_what_v3_held() {
 
     let new = old.upgraded();
 
-    // Up to the latest, which is now v5 — v4's tables are still what this test
-    // is about, and v5 adds one column and a trigger on top of them.
+    // Up to the latest. This test still checks v4's surviving tables and v5's
+    // team revision while later migrations remove obsolete runtime state.
     assert_eq!(
         new.count("SELECT COALESCE(MAX(version), 0) FROM schema_migrations"),
-        SERVER_SCHEMA_V5
+        SERVER_SCHEMA_V8
     );
     assert!(
         new.count(
@@ -121,7 +120,7 @@ fn v3_migrates_to_v4_and_keeps_what_v3_held() {
         ) == 1,
         "v5 did not add team_knowledge.revision"
     );
-    for table in V4_TABLES {
+    for table in SURVIVING_V4_TABLES {
         assert_eq!(
             new.count(&format!(
                 "SELECT count(*) FROM information_schema.tables
@@ -144,37 +143,6 @@ fn v3_migrates_to_v4_and_keeps_what_v3_held() {
         )),
         1,
         "the migration invented a provenance for a row written before Cairn tracked one"
-    );
-}
-
-#[test]
-fn the_migration_initializes_server_authority_before_its_own_cutover() {
-    let pg = pg!();
-    assert_eq!(
-        pg.server.count("SELECT count(*) FROM server_authority"),
-        1,
-        "server_authority is a single-row table"
-    );
-    assert_eq!(
-        pg.server
-            .text("SELECT mode FROM server_authority WHERE id = 1"),
-        "pre_cutover",
-        "a fresh deployment was initialized as if a migration had already \
-         established canonical possession"
-    );
-    assert_eq!(
-        pg.server
-            .count("SELECT count(*) FROM server_authority WHERE cutover_at IS NULL"),
-        1
-    );
-
-    pg.refuses(
-        "a second server_authority row",
-        "INSERT INTO server_authority (id, mode) VALUES (2, 'pre_cutover')",
-    );
-    pg.refuses(
-        "an unknown authority mode",
-        "UPDATE server_authority SET mode = 'whenever_i_feel_like_it' WHERE id = 1",
     );
 }
 
