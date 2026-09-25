@@ -263,7 +263,7 @@ fn every_pattern_query_is_bound_to_the_owning_account() {
     // **Every server source file, not just `commands.rs`.** The rule is about
     // where a pattern can be read from, and a pattern can be read from anywhere
     // that writes SQL — retrieval builds candidates from it, the reference
-    // authorization check resolves one, and the changes feed pages over it. An
+    // authorization check resolves one, and management routes list it. An
     // audit scoped to the module where the routes happen to live today would
     // pass on the day one of them moves.
     let sources: Vec<String> = std::fs::read_dir(
@@ -304,8 +304,8 @@ fn every_pattern_query_is_bound_to_the_owning_account() {
     }
     assert!(
         found >= 5,
-        "the audit found {found} pattern statements; promotion, the list, the \
-         changes feed, retrieval's candidate query and the reference \
+        "the audit found {found} pattern statements; promotion, listing, \
+         retrieval's candidate query and the reference \
          authorization check are at least five, so the scan is matching nothing"
     );
 }

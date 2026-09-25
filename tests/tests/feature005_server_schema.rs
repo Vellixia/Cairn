@@ -1055,7 +1055,7 @@ fn the_disposition_and_health_vocabularies_are_closed() {
 /// file is: there are four writers of `team_knowledge` today and one of them
 /// (`POST /api/team`) enumerates its columns, so "every write assigns a
 /// revision" maintained by remembering is one forgotten statement away from a
-/// lifecycle change the pull feed can never deliver. A trigger makes it
+/// lifecycle change downstream readers can never observe. A trigger makes it
 /// unrepresentable.
 ///
 /// **Falsified by** dropping `team_knowledge_revision_bump`, which leaves the
@@ -1132,102 +1132,7 @@ fn every_write_to_a_team_row_advances_its_revision() {
     );
 }
 
-/// **The divergence bug.** A retirement whose `changed_at` did not advance is
-/// still delivered by the pull feed (FR-456, FR-457, FR-465).
-///
-/// # What went wrong, and why it was silent
-///
-/// `GET /api/sync/changes/team` paged on
-/// `GREATEST(created_at, ratified_at, retired_at, superseded_at)`. Every one of
-/// those columns is stamped with PostgreSQL `now()`, which is **transaction
-/// start** time, not statement time — so a retirement whose transaction opened
-/// before an earlier-committing ratification writes a `retired_at` *older* than
-/// that `ratified_at`, and the `GREATEST` reads the same value after the
-/// retirement as before it. Measured against this repository's own PostgreSQL,
-/// with no lock contention required, as a one-second inversion:
-///
-/// ```text
-/// S2 opens its transaction   14:41:43.252792  -> writes retired_at  = 43.252792
-/// S1 ratifies (own tx)       14:41:44.048009  -> writes ratified_at = 44.048009
-/// final row: state = 'retired', retired_at < ratified_at = true,
-///            GREATEST(...) = 44.048009 — the ratification's value
-/// ```
-///
-/// A device whose cursor already stood at that value therefore **never saw the
-/// row again**. Guidance an administrator withdrew server-wide kept being
-/// served on every other machine, indefinitely, and nothing later contradicted
-/// it — because the feed was keyed by the value that failed to move. That is a
-/// silent divergence, not a delay.
-///
-/// The two timestamps are written directly here rather than raced, so the test
-/// reproduces the *shape* the race produces on every run instead of once in
-/// however many.
-///
-/// **Falsified by** ordering and paging `team_changes` on `(changed_at, id)`
-/// again: the second page comes back empty and the retirement is never
-/// delivered.
-#[test]
-fn the_pull_feed_delivers_a_retirement_whose_changed_at_did_not_advance() {
-    let pg = pg!();
-    let (id, _) = seed_team_row(&pg, "secrets never enter the repository");
-
-    // The later of the two timestamps, on the ratification.
-    let ratified_at = "2026-09-10T14:41:44.048009Z";
-    // The earlier one, on the retirement that comes after it.
-    let retired_at = "2026-09-10T14:41:43.252792Z";
-
-    pg.server.execute(&format!(
-        "UPDATE team_knowledge
-            SET state = 'authoritative', ratified_by_user_id = '{}',
-                ratified_at = '{ratified_at}'
-          WHERE id = '{id}'",
-        pg.owner.id
-    ));
-
-    // Drain this account's feed, exactly as a device does, and keep the cursor.
-    let (state, cursor) = drain_team_feed(&pg, &pg.owner.token, &id);
-    assert_eq!(
-        state.as_deref(),
-        Some("authoritative"),
-        "the ratification was not delivered, so this test would be measuring \
-         the wrong thing"
-    );
-
-    // The retirement, at the *earlier* timestamp.
-    pg.server.execute(&format!(
-        "UPDATE team_knowledge
-            SET state = 'retired', retired_by_user_id = '{}',
-                retired_at = '{retired_at}'
-          WHERE id = '{id}'",
-        pg.owner.id
-    ));
-
-    // The premise: the old ordering key did not move.
-    assert_eq!(
-        pg.server.count(&format!(
-            "SELECT count(*) FROM team_knowledge
-              WHERE id = '{id}'
-                AND GREATEST(created_at, ratified_at, retired_at, superseded_at)
-                    = ratified_at
-                AND retired_at < ratified_at"
-        )),
-        1,
-        "the fixture did not reproduce the inversion, so a pass here would \
-         prove nothing"
-    );
-
-    // And the row is still delivered, from the cursor the device holds.
-    let (state, _) = resume_team_feed(&pg, &pg.owner.token, &cursor, &id);
-    assert_eq!(
-        state.as_deref(),
-        Some("retired"),
-        "a retirement whose `changed_at` did not advance was never delivered: \
-         every other device keeps serving guidance an administrator withdrew \
-         (FR-456, FR-465)"
-    );
-}
-
-/// The monotonic revision reaches the wire on both team readers, alongside
+/// The monotonic revision reaches the team reader, alongside
 /// `changed_at` and never instead of it (FR-457).
 ///
 /// `changed_at` stays because a mirror below local schema 12 has nothing else
@@ -1239,7 +1144,7 @@ fn the_pull_feed_delivers_a_retirement_whose_changed_at_did_not_advance() {
 /// leaves every device on the timestamp fallback and unable to order two pages
 /// that share one `changed_at`.
 #[test]
-fn both_team_readers_put_the_revision_on_the_wire_beside_changed_at() {
+fn team_reader_puts_the_revision_on_the_wire_beside_changed_at() {
     let pg = pg!();
     let (id, _) = seed_team_row(&pg, "we review before merge");
     pg.server.execute(&format!(
@@ -1252,27 +1157,15 @@ fn both_team_readers_put_the_revision_on_the_wire_beside_changed_at() {
         "SELECT revision FROM team_knowledge WHERE id = '{id}'"
     ));
 
-    for (path, array) in [
-        ("/api/sync/changes/team", "team"),
-        ("/api/team/knowledge", "items"),
-    ] {
-        let body = pg.server.get_json(path, &pg.owner.token);
-        let row = body[array]
-            .as_array()
-            .unwrap_or_else(|| panic!("{path} returned no `{array}` array: {body}"))
-            .iter()
-            .find(|r| r["id"].as_str() == Some(&id.to_string()))
-            .unwrap_or_else(|| panic!("{path} did not carry the row: {body}"));
-        assert_eq!(
-            row["revision"].as_i64(),
-            Some(expected),
-            "{path} did not carry the revision: {row}"
-        );
-        assert!(
-            row["changed_at"].as_str().is_some(),
-            "{path} dropped `changed_at`, which an older mirror still needs: {row}"
-        );
-    }
+    let body = pg.server.get_json("/api/team/knowledge", &pg.owner.token);
+    let row = body["items"]
+        .as_array()
+        .expect("team knowledge items")
+        .iter()
+        .find(|r| r["id"].as_str() == Some(&id.to_string()))
+        .expect("seeded team row");
+    assert_eq!(row["revision"].as_i64(), Some(expected));
+    assert!(row["changed_at"].as_str().is_some());
 }
 
 /// One proposed `team_knowledge` row, owned by the fixture's owner so every
@@ -1418,69 +1311,4 @@ fn seed_team_row(pg: &Pg, content: &str) -> (uuid::Uuid, String) {
         pg.owner.id
     ));
     (id, writer)
-}
-
-/// Walk `GET /api/sync/changes/team` to the end, the way a device's pull loop
-/// does, and report the last state seen for `id` and the cursor to resume from.
-///
-/// The cursor is opaque here on purpose: the point of these tests is that a
-/// device stores whatever the server hands back and echoes it, so a test that
-/// constructed one itself would stop testing the encoding.
-fn drain_team_feed(pg: &Pg, token: &str, id: &uuid::Uuid) -> (Option<String>, String) {
-    let mut cursor = String::new();
-    let mut state = None;
-    // Bounded: a feed that never reports an empty page is itself the failure,
-    // and a test that looped forever would report it as a hang.
-    for _ in 0..20 {
-        let (seen, next, count) = team_page(pg, token, &cursor, id);
-        if let Some(s) = seen {
-            state = Some(s);
-        }
-        cursor = next;
-        if count == 0 {
-            return (state, cursor);
-        }
-    }
-    panic!("the team feed never reported an empty page");
-}
-
-/// One resumption from a stored cursor: what the very next pull delivers.
-fn resume_team_feed(
-    pg: &Pg,
-    token: &str,
-    cursor: &str,
-    id: &uuid::Uuid,
-) -> (Option<String>, String) {
-    let (seen, next, _) = team_page(pg, token, cursor, id);
-    (seen, next)
-}
-
-fn team_page(
-    pg: &Pg,
-    token: &str,
-    cursor: &str,
-    id: &uuid::Uuid,
-) -> (Option<String>, String, usize) {
-    let path = if cursor.is_empty() {
-        "/api/sync/changes/team".to_string()
-    } else {
-        format!("/api/sync/changes/team?since={}", urlencode(cursor))
-    };
-    let body = pg.server.get_json(&path, token);
-    let rows = body["team"].as_array().cloned().unwrap_or_default();
-    let seen = rows
-        .iter()
-        .find(|r| r["id"].as_str() == Some(&id.to_string()))
-        .and_then(|r| r["state"].as_str().map(str::to_string));
-    let next = body["cursor"].as_str().unwrap_or_default().to_string();
-    (seen, next, rows.len())
-}
-
-/// The two characters a cursor can contain that a query string cannot carry
-/// raw. Small on purpose: a general encoder here would be a second
-/// implementation of `cairnd::sync::urlencode` that could drift from it.
-fn urlencode(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('+', "%2B")
-        .replace(':', "%3A")
 }

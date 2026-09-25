@@ -922,30 +922,3 @@ fn the_body_limit_is_the_one_the_contract_states() {
     // here so the route and the contract cannot drift apart silently.
     assert_eq!(cairn_core::event::BODY_MAX_BYTES, 1024 * 1024);
 }
-
-#[test]
-fn the_body_limit_belongs_to_this_route_and_not_to_the_server() {
-    let pg = pg!();
-    // Axum's `DefaultBodyLimit` is a layer, so putting it on the main router
-    // would silently retighten every other endpoint from the 2 MB default to
-    // 1 MiB — including `/api/sync/batch`, a different boundary with its own
-    // bounds and no requirement asking for this one.
-    let big = {
-        let mut body = String::from("{\"items\": []");
-        while body.len() < 1024 * 1024 + 4096 {
-            body.push(' ');
-        }
-        body.push('}');
-        body.into_bytes()
-    };
-    assert!(big.len() > 1024 * 1024 && big.len() < 2 * 1024 * 1024);
-
-    let ingest =
-        post_file_status_bearer(&pg.server.base, "/api/events/batch", &big, &pg.owner.token);
-    let sync = post_file_status_bearer(&pg.server.base, "/api/sync/batch", &big, &pg.owner.token);
-    assert_eq!(ingest, 413, "the ingest route did not apply its own limit");
-    assert_ne!(
-        sync, 413,
-        "the ingest route's body limit leaked onto /api/sync/batch"
-    );
-}
