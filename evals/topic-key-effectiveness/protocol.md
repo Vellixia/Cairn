@@ -1,8 +1,7 @@
 # Protocol — topic-key effectiveness
 
 **Informational. Not a gate.** Nothing here can fail a build, and there is no
-threshold. See [contracts/evaluation.md](../../specs/003-project-intelligence/contracts/evaluation.md)
-§Topic-key effectiveness for why.
+threshold. The evaluation is observational and does not gate correctness.
 
 The question this answers is a **product** question: when an agent is told to
 give a durable fact a topic key and a value key, does it? And do two agents,
@@ -49,15 +48,15 @@ seen Cairn's context has been influenced by it and is no longer measuring what
 an agent does unprompted.
 
 ```
-1. Create an empty repository and `cairn init`.
-2. `cairn connect <agent> --yes` — the native integration, not generic MCP.
+1. Create an empty repository and run `cairn setup`.
+2. Confirm setup installed the agent's native integration.
 3. For each corpus item:
      a. Start a *fresh* agent session.
      b. Give it the item's prompt verbatim.
      c. Let it work and record whatever it records.
      d. End the session.
-4. `cairn --json memory search --limit 500 > raw/<agent>.json`
-5. `cairn --json status` — record the adoption metric it reports.
+4. Export the project through Settings and retain the eligible memory records in `raw/<agent>.json`.
+5. Record topic/value-key adoption from that export.
 6. Repeat from 1 with a clean repository for the next agent.
 ```
 

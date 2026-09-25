@@ -4,7 +4,6 @@
     "extra": {
       "cycle": 8,
       "recorded": {
-        "task_bound": true,
         "commit": "abc123",
         "branch": "feature/retry",
         "relevant_paths": [
@@ -17,8 +16,6 @@
   "expect": {
     "extra": {
       "required_fields": [
-        "task_id",
-        "task_state_digest",
         "branch",
         "commit",
         "relevant_paths",

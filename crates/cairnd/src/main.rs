@@ -5,23 +5,14 @@
 //! linked.
 
 mod arrival;
-mod briefing;
 mod capture;
-mod continuity;
 mod deliver;
-mod drift;
 mod handlers;
-mod handoffs;
 mod integrations;
-mod migrate005;
-mod patterns;
-mod promote;
-mod recover;
 mod state;
 mod sync;
 #[cfg(test)]
 mod testsupport;
-mod verify;
 
 use cairn_core::domain::new_id;
 use cairn_core::wire::{Envelope, Request, WireError};
@@ -93,7 +84,7 @@ fn one_line(e: &anyhow::Error) -> String {
 /// is wasted work, not a correctness problem, since the loser's process (and
 /// everything this spawned) exits immediately after.
 async fn setup() -> anyhow::Result<Arc<Daemon>> {
-    let (store, user_id) = open_store().await?;
+    let (store, user_id, legacy_migration) = open_store().await?;
     let config = CairnConfig::load();
     let server = ServerCredentials::load(&config);
 
@@ -102,7 +93,6 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         lifecycle_kinds: Arc::new(RwLock::new(Default::default())),
         run_id: new_id(),
         config: Arc::new(RwLock::new(config)),
-        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),
@@ -113,80 +103,12 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         in_flight_captures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
         outage_cache: Arc::new(tokio::sync::Mutex::new(deliver::OutageCache::default())),
-        last_observed_instance: Arc::new(RwLock::new(None)),
+        legacy_migration,
     });
 
-    let reconciled = recover::reconcile_previous_runs(&daemon).await;
-    if reconciled > 0 {
-        tracing::info!(reconciled, "reconciled sessions from a previous run");
-    }
-    let stale = recover::reconcile_stale_memory(&daemon).await;
-    if stale > 0 {
-        tracing::info!(stale, "memory marked stale");
-    }
-    // Queued work a previous run claimed but never delivered is ours again.
-    // The backstop for the process dying between the seal and the synthesis —
-    // not the only retry path, which is the point of D22 (FR-240).
-    let owed = recover::sweep_pending_handoffs(&daemon, std::time::Duration::ZERO).await;
-    if owed > 0 {
-        tracing::info!(owed, "produced handoffs owed by a previous run");
-    }
-
-    let released = recover::release_abandoned_claims(&daemon).await;
-    if released > 0 {
-        tracing::info!(released, "released outbox claims from a previous run");
-    }
-
     // Automatic delivery. Queued work reaches the server without anyone typing
-    // `cairn sync now` (FR-056, C1).
+    // an agent process remaining alive (FR-056, C1).
     tokio::spawn(sync::run_worker(Arc::clone(&daemon)));
-
-    // Sessions nobody is driving any more. Start-time reconciliation only sees
-    // previous runs, so a long-lived daemon needs this to notice one that went
-    // quiet under its own run.
-    {
-        let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
-            // The first tick fires immediately; that is wanted, since a daemon
-            // may be starting after a long absence.
-            loop {
-                ticks.tick().await;
-                let reaped = recover::reap_idle_sessions(
-                    &daemon,
-                    recover::IDLE_SESSION_TIMEOUT,
-                    recover::SUPERSEDED_SESSION_TIMEOUT,
-                )
-                .await;
-                // The same tick sweeps any boundary still owing a handoff, so
-                // progress does not depend on a restart (FR-240, D22).
-                let swept =
-                    recover::sweep_pending_handoffs(&daemon, recover::HANDOFF_SWEEP_AFTER).await;
-                if swept > 0 {
-                    tracing::info!(swept, "produced handoffs owed by sealed boundaries");
-                }
-                if reaped > 0 {
-                    tracing::info!(reaped, "closed idle sessions");
-                }
-
-                // The bounded verification pass joins the tick that already
-                // does the periodic work, rather than introducing a scheduler
-                // (FR-472). It is capped three ways and yields rather than
-                // overrunning; whatever it does not finish is picked up next
-                // tick. Nothing here ever runs on the session-open path.
-                let report = verify::sweep_projects(&daemon).await;
-                if report.runs_recorded > 0 || report.yielded {
-                    tracing::info!(
-                        facts = report.facts_examined,
-                        runs = report.runs_recorded,
-                        updated = report.memories_updated,
-                        yielded = report.yielded,
-                        "bounded verification pass"
-                    );
-                }
-            }
-        });
-    }
 
     Ok(daemon)
 }
@@ -197,14 +119,22 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
 /// last chance to say why. The line carries the marker the CLI looks for, which
 /// is what turns `cairnd did not start` into `storage_unavailable` with the
 /// real cause attached (see `cairn_core::startup`).
-async fn open_store() -> anyhow::Result<(Store, uuid::Uuid)> {
+async fn open_store() -> anyhow::Result<(Store, uuid::Uuid, serde_json::Value)> {
     let opened = async {
-        let store = Store::open(&cairn_core::paths::db_path()).await?;
+        let artifacts = cairn_core::paths::home()
+            .join("removed_feature")
+            .join("tasks-v1");
+        let (store, report) = cairn_store::transfer::bootstrap_legacy_edge(
+            &cairn_core::paths::legacy_db_path(),
+            &cairn_core::paths::db_path(),
+            &artifacts,
+        )
+        .await?;
         // Part of opening the store as far as a user is concerned: it is the
         // first read and the first write, so a database that is present but
         // unusable fails here rather than at `open`.
         let user_id = repo::ensure_local_user(&store).await?;
-        Ok::<_, anyhow::Error>((store, user_id))
+        Ok::<_, anyhow::Error>((store, user_id, serde_json::to_value(report)?))
     }
     .await;
 
@@ -539,7 +469,7 @@ async fn supervise(
 /// R1–R8 match.
 fn orders_by_arrival(request: &Request) -> bool {
     match request {
-        Request::Observe { .. } | Request::CaptureEvents { .. } => true,
+        Request::CaptureEvents { .. } => true,
         Request::CanonicalEvent { event, capture, .. } => {
             capture.is_some() && !event.event.is_boundary_class()
         }
@@ -573,7 +503,6 @@ where
                 // than a bare `Observe`, and one that is not counted is one a
                 // boundary will not wait for (D22 phase two).
                 let is_capture = match &request {
-                    Request::Observe { .. } => true,
                     Request::CanonicalEvent { event, .. } => !event.event.is_boundary_class(),
                     _ => false,
                 };
@@ -754,26 +683,19 @@ mod serve_tests {
     ///
     /// A boundary can wait for the captures already in flight (H3), so gating
     /// one would put a stall exactly where a session is being closed; and a
-    /// read has no ordinal to take. Without this, every `cairn status` during a
+    /// read has no ordinal to take. Without this, every health read during a
     /// session would queue behind that session's own tool calls.
     #[tokio::test]
     async fn a_request_that_carries_no_capture_is_not_gated() {
         let r = repo().await;
-        let cwd = r.cwd.clone();
+        let _cwd = r.cwd.clone();
         let daemon = Arc::new(r.daemon);
         let arrivals = arrival::Arrivals::new();
         // Never retired, standing in for a capture still being written.
         let _ahead = arrivals.take();
         let behind = arrivals.take();
 
-        let answered = connection(
-            daemon,
-            behind,
-            &Request::Status {
-                cwd,
-                spool_reason: false,
-            },
-        );
+        let answered = connection(daemon, behind, &Request::DaemonStatus);
         // Well inside the gate's bound, so "was not gated" and "was gated and
         // gave up" cannot both pass this.
         let reply = tokio::time::timeout(Duration::from_secs(2), answered)

@@ -364,7 +364,7 @@ fn inspect_hooks(
         return Observed::new(ResourceKind::Lifecycle, HealthCondition::Duplicated)
             .at(scope, Some(path.to_path_buf()))
             .detail("more than one Cairn registration for a single event")
-            .remedy("cairn repair claude-code");
+            .remedy("cairn setup");
     }
     if present == 0 {
         return Observed::new(ResourceKind::Lifecycle, HealthCondition::Missing)
@@ -378,7 +378,7 @@ fn inspect_hooks(
                 "{present} of {} Cairn hook registrations present",
                 EVENTS.len()
             ))
-            .remedy("cairn repair claude-code");
+            .remedy("cairn setup");
     }
     base
 }

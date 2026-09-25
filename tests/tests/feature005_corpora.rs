@@ -35,7 +35,7 @@ fn workspace(relative: &str) -> std::path::PathBuf {
 fn every_corpus_entry_is_complete_enough_to_hold_someone_to() {
     let m = manifest();
     let corpora = m["corpora"].as_object().expect("corpora");
-    assert!(corpora.len() >= 10, "the manifest lost entries");
+    assert!(!corpora.is_empty(), "the manifest has no surviving corpus");
 
     for (name, entry) in corpora {
         assert!(
@@ -150,28 +150,4 @@ fn the_privacy_corpus_covers_every_class_the_manifest_lists() {
         entry["minimum_classes"].as_u64().unwrap() as usize,
         "the validator has a class count the manifest does not know about"
     );
-}
-
-#[test]
-fn a_corpus_owed_by_a_later_task_names_a_task_that_still_exists() {
-    let m = manifest();
-    let tasks = std::fs::read_to_string(workspace(
-        "specs/005-server-authoritative-autonomous-memory/tasks.md",
-    ))
-    .expect("read tasks.md");
-    for (name, entry) in m["corpora"].as_object().expect("corpora") {
-        let Some(owed) = entry["owed_by"].as_str() else {
-            continue;
-        };
-        // The first task id in the range, which is enough to catch an entry
-        // pointing at work that no longer exists.
-        let first = owed
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .find(|t| t.starts_with('T') && t.len() == 4)
-            .unwrap_or_else(|| panic!("{name} owed_by {owed:?} names no task"));
-        assert!(
-            tasks.contains(first),
-            "{name} is owed by {first}, which is not in tasks.md"
-        );
-    }
 }

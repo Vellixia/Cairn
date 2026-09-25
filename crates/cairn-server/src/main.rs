@@ -13,9 +13,11 @@ mod events;
 mod extract;
 mod global;
 mod retrieve;
-mod sync;
+mod transfer;
 mod verifysummary;
 mod version;
+#[cfg(test)]
+mod web_contract_tests;
 
 use axum::http::{header, Method};
 use axum::Router;
@@ -148,12 +150,7 @@ enum Command {
 enum UserCommand {
     /// Create an account.
     ///
-    /// This exists because `POST /api/auth/register` was removed: it was an
-    /// unauthenticated route that let anyone who could reach the server create
-    /// an account, which was the first step of a complete compromise chain.
-    /// Creating accounts is an operator act, so it happens here — locally,
-    /// against the database, by whoever already controls the host. That is the
-    /// same trust boundary `--admin-email` already sits on.
+    /// Account creation is an operator act, local to database host control.
     Add {
         /// Email address. Lowercased and trimmed.
         #[arg(long)]

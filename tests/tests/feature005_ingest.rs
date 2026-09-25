@@ -75,6 +75,20 @@ fn batch(events: Vec<Value>) -> Value {
     json!({ "contract_version": 1, "events": events })
 }
 
+fn fresh_session_batch(project: Uuid, session: Uuid, events: Vec<Value>) -> Value {
+    json!({
+        "contract_version": 1,
+        "sessions": [{
+            "id": session,
+            "project_id": project,
+            "agent": "claude_code",
+            "branch": "main",
+            "commit_sha": "0123456789abcdef",
+        }],
+        "events": events,
+    })
+}
+
 fn post(pg: &Pg, who: &Account, body: &Value) -> (Value, u16) {
     post_json_status_bearer(&pg.server.base, "/api/events/batch", body, &who.token)
 }
@@ -158,6 +172,35 @@ fn an_accepted_event_is_persisted_and_enqueued_in_one_transaction() {
 }
 
 #[test]
+fn an_accepted_session_close_closes_the_canonical_session() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    let close = event(
+        session,
+        1,
+        "session_closed",
+        json!({ "SessionClose": { "close_reason": "clear" } }),
+    );
+
+    let (body, status) = post(&pg, &pg.owner, &batch(vec![close]));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(statuses(&body), vec!["accepted"]);
+    assert_eq!(
+        pg.server.text(&format!(
+            "SELECT status || ':' || end_reason FROM sessions WHERE id = '{session}'"
+        )),
+        "completed:clear"
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM sessions
+              WHERE id = '{session}' AND ended_at = '2026-09-02T10:00:00Z'"
+        )),
+        1
+    );
+}
+
+#[test]
 fn redelivering_an_event_is_a_duplicate_and_a_duplicate_is_a_success() {
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
@@ -189,6 +232,41 @@ fn redelivering_an_event_is_a_duplicate_and_a_duplicate_is_a_success() {
     assert_eq!(
         pg.server.count(&format!(
             "SELECT count(*) FROM consolidation_work WHERE event_id = '{id}'"
+        )),
+        1
+    );
+}
+
+#[test]
+fn fresh_session_and_redelivery_have_one_canonical_effect() {
+    let pg = pg!();
+    let session = Uuid::now_v7();
+    let body = fresh_session_batch(pg.project, session, vec![file_event(session, 1, "a.rs")]);
+
+    let (first, status) = post(&pg, &pg.owner, &body);
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(statuses(&first), vec!["accepted"]);
+
+    let (again, status) = post(&pg, &pg.owner, &body);
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(statuses(&again), vec!["duplicate"]);
+
+    let event_id = event_id(session, 1);
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM sessions WHERE id = '{session}'"
+        )),
+        1
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM safe_events WHERE event_id = '{event_id}'"
+        )),
+        1
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_work WHERE event_id = '{event_id}'"
         )),
         1
     );
@@ -843,31 +921,4 @@ fn the_body_limit_is_the_one_the_contract_states() {
     // Stated as a number so SC-743 has something to fail against, and asserted
     // here so the route and the contract cannot drift apart silently.
     assert_eq!(cairn_core::event::BODY_MAX_BYTES, 1024 * 1024);
-}
-
-#[test]
-fn the_body_limit_belongs_to_this_route_and_not_to_the_server() {
-    let pg = pg!();
-    // Axum's `DefaultBodyLimit` is a layer, so putting it on the main router
-    // would silently retighten every other endpoint from the 2 MB default to
-    // 1 MiB — including `/api/sync/batch`, a different boundary with its own
-    // bounds and no requirement asking for this one.
-    let big = {
-        let mut body = String::from("{\"items\": []");
-        while body.len() < 1024 * 1024 + 4096 {
-            body.push(' ');
-        }
-        body.push('}');
-        body.into_bytes()
-    };
-    assert!(big.len() > 1024 * 1024 && big.len() < 2 * 1024 * 1024);
-
-    let ingest =
-        post_file_status_bearer(&pg.server.base, "/api/events/batch", &big, &pg.owner.token);
-    let sync = post_file_status_bearer(&pg.server.base, "/api/sync/batch", &big, &pg.owner.token);
-    assert_eq!(ingest, 413, "the ingest route did not apply its own limit");
-    assert_ne!(
-        sync, 413,
-        "the ingest route's body limit leaked onto /api/sync/batch"
-    );
 }

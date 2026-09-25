@@ -1,7 +1,7 @@
 # A Feature 001 installation, as it was left on disk
 
 Used by the `quickstart.md` US2 walkthrough: copy these into a repository, run
-`cairn connect claude-code`, and nothing should be duplicated, relocated, or
+`cairn setup`, and nothing should be duplicated, relocated, or
 disturbed.
 
 What each part is here to prove:

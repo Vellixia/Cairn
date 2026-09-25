@@ -6,27 +6,23 @@ consulted a timestamp to choose a winner, the twin would produce a different
 answer — so a byte-identical result across the pair is what proves no clock
 decides anything (FR-411, SC-304).
 
-Three groups:
+Two groups:
 
   * `merge/` — two-store offline scenarios over canonical knowledge;
   * `merge/symmetric_relation/` — the same conflict detected independently on
-    both stores, which must converge to exactly **one** durable relation (D78);
-  * `merge/task_divergence/` — different criteria changed offline on each, which
-    must both survive and leave the two machines computing an identical
-    `task_state_digest` (SC-330).
+    both stores, which must converge to exactly **one** durable relation (D78).
 """
 import json, pathlib, sys
 
 ROOT = pathlib.Path(sys.argv[1]) / "merge"
 SYMMETRIC = ROOT / "symmetric_relation"
-TASKS = ROOT / "task_divergence"
-for d in (ROOT, SYMMETRIC, TASKS):
+for d in (ROOT, SYMMETRIC):
     d.mkdir(parents=True, exist_ok=True)
 
 EARLY = "2026-01-01T00:00:00Z"
 LATE = "2026-06-01T00:00:00Z"
 
-_n = {"merge": 0, "sym": 0, "task": 0}
+_n = {"merge": 0, "sym": 0}
 
 
 def write(directory, key, slug, description, extra, expect):
@@ -181,56 +177,6 @@ twin(
     {"relations": 1, "reconciliation": "conflicted"},
 )
 
-# ---------------------------------------------------------------------------
-# Different criteria changed offline on each machine.
-# ---------------------------------------------------------------------------
-
-twin(
-    TASKS, "task", "different_criteria_both_land",
-    "A holds AC-1 and moves it to satisfied; B holds AC-2 and moves it to "
-    "satisfied. Both machines end with both changes, because criteria upsert by "
-    "stable id and different criteria are different rows. The two local "
-    "counters differ and are never compared; both machines compute the same "
-    "task_state_digest (FR-490, FR-493, SC-330).",
-    {
-        "task": {"criteria": ["one", "two"]},
-        "store_a": {"criterion_changes": [{"label": "AC-1", "state": "satisfied"}]},
-        "store_b": {"criterion_changes": [{"label": "AC-2", "state": "satisfied"}]},
-    },
-    {
-        "criteria_satisfied": ["AC-1", "AC-2"],
-        "digests_match": True,
-        "counters_compared": False,
-    },
-)
-
-twin(
-    TASKS, "task", "a_blocker_opened_on_one_machine",
-    "B opens a blocker offline while A satisfies a criterion. Both arrive, and "
-    "readiness on both machines reflects both - an open blocker is decisive "
-    "wherever it was opened.",
-    {
-        "task": {"criteria": ["one"]},
-        "store_a": {"criterion_changes": [{"label": "AC-1", "state": "satisfied"}]},
-        "store_b": {"blockers": ["staging credentials expired"]},
-    },
-    {"digests_match": True, "readiness": "not_ready"},
-)
-
-twin(
-    TASKS, "task", "the_same_criterion_changed_on_both",
-    "Both machines move the same criterion. One value ends up current - that is "
-    "what work state is - and neither assertion is lost: both are in each "
-    "machine's local change log, and the digests agree once the rows converge.",
-    {
-        "task": {"criteria": ["one"]},
-        "store_a": {"criterion_changes": [{"label": "AC-1", "state": "satisfied"}]},
-        "store_b": {"criterion_changes": [{"label": "AC-1", "state": "blocked"}]},
-    },
-    {"digests_match": True, "assertions_lost": 0},
-)
-
 print(
-    f"wrote {_n['merge']} merge cases, {_n['sym']} symmetric-relation cases, "
-    f"{_n['task']} task-divergence cases"
+    f"wrote {_n['merge']} merge cases and {_n['sym']} symmetric-relation cases"
 )

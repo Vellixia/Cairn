@@ -413,7 +413,7 @@ pub fn normalize_content(content: &str) -> String {
 /// Whether a single working context would select both memories.
 ///
 /// This is the precondition for conflict, and it is why the two cases people
-/// expect to be conflicts are not: a project-scoped answer and a task-scoped
+/// expect to be conflicts are not: a project-scoped answer and a session-scoped
 /// one are never simultaneously applicable, and neither are two branches
 /// (D48).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,8 +432,7 @@ pub enum ScopeOverlap {
 
 /// Classify two scopes for the purposes of conflict and narrowing.
 ///
-/// Precedence is Feature 001's [`MemoryScope::bucket`], unchanged: task 0,
-/// branch 1, project 2, session 3.
+/// Precedence is [`MemoryScope::bucket`]: session 0, branch 1, project 2.
 pub fn scope_overlap(
     a_scope: MemoryScope,
     a_key: &str,
@@ -448,7 +447,7 @@ pub fn scope_overlap(
         };
     }
     if a_scope.bucket() == b_scope.bucket() {
-        // Unreachable with Feature 001's four scopes, which have distinct
+        // Unreachable with the three scopes, which have distinct
         // buckets. Stated rather than assumed, so adding a scope that shares a
         // rank has to decide this deliberately.
         return ScopeOverlap::Disjoint;
@@ -833,7 +832,7 @@ pub struct SubjectView {
     /// Proposals at a narrower scope that a recorded `narrows` decision says
     /// are exceptions to this subject's answer (FR-333).
     pub narrowed_by: Vec<Uuid>,
-    /// The decisions that produced this outcome, so `cairn memory subject` can
+    /// The decisions that produced this outcome, so the Memory view can
     /// answer "why" (FR-307).
     pub decisions: Vec<Relation>,
 }
@@ -1531,12 +1530,9 @@ mod tests {
         let cases: &[(MemoryScope, &str, MemoryScope, &str, ScopeOverlap)] = &[
             (Project, "P", Project, "P", Simultaneous),
             (Branch, "main", Branch, "main", Simultaneous),
-            (Task, "T1", Task, "T1", Simultaneous),
             (Session, "S1", Session, "S1", Simultaneous),
-            (Project, "P", Task, "T1", ScopeException),
             (Project, "P", Branch, "main", ScopeException),
             (Branch, "main", Branch, "feature/x", Disjoint),
-            (Task, "T1", Task, "T2", Disjoint),
         ];
         for (a, ak, b, bk, expected) in cases {
             assert_eq!(
@@ -1553,10 +1549,8 @@ mod tests {
     #[test]
     fn a_narrower_scope_wins_by_feature_001_precedence() {
         use MemoryScope::*;
-        assert_eq!(narrower_scope(Project, Task), Task);
-        assert_eq!(narrower_scope(Branch, Task), Task);
         assert_eq!(narrower_scope(Project, Branch), Branch);
-        assert_eq!(narrower_scope(Project, Session), Project);
+        assert_eq!(narrower_scope(Project, Session), Session);
     }
 
     // -- symmetric normalization -------------------------------------------
@@ -1990,28 +1984,6 @@ mod proposal_tests {
             (relations[0].from, relations[0].to),
             (existing.id, proposal.id)
         );
-    }
-
-    #[test]
-    fn a_scope_exception_is_never_a_conflict() {
-        // Scenario B: project PostgreSQL, task SQLite fixture.
-        let project = keyed(
-            1,
-            "infra.db",
-            "postgresql",
-            "The production database is PostgreSQL.",
-        );
-        let mut task = keyed(
-            2,
-            "infra.db",
-            "sqlite",
-            "This integration fixture uses SQLite.",
-        );
-        task.scope = MemoryScope::Task;
-        task.scope_key = "T1".into();
-        let (outcome, relations) = classify_proposal(&task, &[project], MAX);
-        assert_eq!(outcome, ProposalOutcome::Created);
-        assert!(relations.is_empty());
     }
 
     #[test]

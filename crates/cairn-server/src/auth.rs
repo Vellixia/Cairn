@@ -289,28 +289,26 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdminOutcome {
     Created,
-    Updated,
+    Promoted,
+    Existing,
 }
 
 impl AdminOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             AdminOutcome::Created => "created",
-            AdminOutcome::Updated => "updated",
+            AdminOutcome::Promoted => "promoted",
+            AdminOutcome::Existing => "existing",
         }
     }
 }
 
 /// Define the operator's account from the environment.
 ///
-/// A fresh deployment has no users, and `/api/auth/register` is the only route
-/// that makes one — which leaves nobody able to sign in and open registration
-/// to whoever reaches the server first. Naming the account in the environment
-/// closes both gaps.
+/// Fresh deployment has no users. Environment names first account.
 ///
-/// The environment is the source of truth, so this re-applies the password on
-/// every start: rotating it means editing the variable and restarting. Running
-/// twice with an unchanged password is still a write, but not a change.
+/// Environment credentials bootstrap a deployment with no administrator. Once
+/// one exists, web-managed password and role changes remain authoritative.
 pub async fn ensure_admin(
     pool: &PgPool,
     email: &str,
@@ -328,23 +326,6 @@ pub async fn ensure_admin(
         anyhow::bail!("CAIRN_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LEN} characters");
     }
 
-    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
-
-    // `xmax = 0` distinguishes the inserted row from the updated one: an INSERT
-    // leaves no deleting transaction behind, an UPDATE does. It is the only way
-    // to tell the two apart from a single upsert.
-    // `role` and `status` are restored, not merely set on insert (FR-539).
-    //
-    // This is the break-glass path, and it only works if it restores *authority*
-    // as well as the password. An operator who demoted or disabled the last
-    // administrator has no supported API left to recover through; without these
-    // two assignments a restart would hand them a working password on an account
-    // that still cannot administer anything.
-    //
-    // `must_change_password` is deliberately forced false (FR-540). The
-    // environment re-establishes this password on every start, so a forced
-    // change would be reverted by the next restart — an unbreakable loop rather
-    // than a security measure.
     // Below schema 3 there are no standing columns to restore — and nothing that
     // could have demoted or disabled the account either, so the seed reduces to
     // what it always was. Selecting them unconditionally made a held-back
@@ -359,41 +340,72 @@ pub async fn ensure_admin(
     .fetch_one(pool)
     .await?;
 
+    let mut tx = pool.begin().await?;
+    if standing_columns {
+        sqlx::query("SELECT pg_advisory_xact_lock(4770040003)")
+            .execute(&mut *tx)
+            .await?;
+        if let Some(id) = sqlx::query_scalar(
+            "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok((id, AdminOutcome::Existing));
+        }
+        if let Some(id) = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            sqlx::query("UPDATE users SET role = 'admin', status = 'active' WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok((id, AdminOutcome::Promoted));
+        }
+    }
+
+    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
     let sql = if standing_columns {
-        "INSERT INTO users (id, email, display_name, password_hash,
-                            role, status, must_change_password)
+        "INSERT INTO users (id, email, display_name, password_hash, role, status, must_change_password)
          VALUES ($1, $2, $3, $4, 'admin', 'active', false)
-         ON CONFLICT (email) DO UPDATE
-             SET password_hash        = EXCLUDED.password_hash,
-                 display_name         = EXCLUDED.display_name,
-                 role                 = 'admin',
-                 status               = 'active',
-                 must_change_password = false
-         RETURNING id, (xmax = 0) AS inserted"
+         ON CONFLICT (email) DO NOTHING
+         RETURNING id"
     } else {
         "INSERT INTO users (id, email, display_name, password_hash)
          VALUES ($1, $2, $3, $4)
-         ON CONFLICT (email) DO UPDATE
-             SET password_hash = EXCLUDED.password_hash,
-                 display_name  = EXCLUDED.display_name
-         RETURNING id, (xmax = 0) AS inserted"
+         ON CONFLICT (email) DO NOTHING
+         RETURNING id"
     };
-    let (id, inserted): (Uuid, bool) = sqlx::query_as(sql)
+    let id: Option<Uuid> = sqlx::query_scalar(sql)
         .bind(Uuid::now_v7())
         .bind(&email)
         .bind(display_name)
         .bind(&hash)
-        .fetch_one(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-    Ok((
-        id,
-        if inserted {
-            AdminOutcome::Created
-        } else {
-            AdminOutcome::Updated
-        },
-    ))
+    let result = match id {
+        Some(id) => Ok((id, AdminOutcome::Created)),
+        None if standing_columns => sqlx::query_scalar(
+            "SELECT id FROM users WHERE role = 'admin' AND status = 'active' LIMIT 1",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map(|id| (id, AdminOutcome::Existing))
+        .map_err(Into::into),
+        None => sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&mut *tx)
+            .await
+            .map(|id| (id, AdminOutcome::Existing))
+            .map_err(Into::into),
+    };
+    tx.commit().await?;
+    result
 }
 
 /// Create an account. The only way one comes into existence, besides
@@ -554,7 +566,7 @@ pub async fn require_member(pool: &PgPool, project_id: Uuid, user_id: Uuid) -> A
 // FR-846a)
 // ---------------------------------------------------------------------------
 
-use cairn_core::domain::{KnowledgeDomain, Readership, Reference};
+use cairn_core::domain::{KnowledgeDomain, Reference};
 
 // The four items below are the read side of this boundary and have no caller
 // until retrieval lands (US2/US5, T093-T124). They are written here, with the
@@ -574,20 +586,12 @@ use cairn_core::domain::{KnowledgeDomain, Readership, Reference};
 /// noticing a gap in a rank sequence could enumerate a colleague's personal
 /// knowledge without ever reading a word of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Visibility {
     /// The reader may see this reference and resolve it.
     Visible,
     /// The reader may not. The caller must drop it — not blank it, not
     /// placeholder it, not leave a numbered gap where it was.
     Withheld,
-}
-
-impl Visibility {
-    #[allow(dead_code)]
-    pub fn is_visible(&self) -> bool {
-        matches!(self, Visibility::Visible)
-    }
 }
 
 /// What the server knows about the reader, once, so a resolution loop does not
@@ -618,7 +622,6 @@ impl ReaderContext {
         })
     }
 
-    #[allow(dead_code)]
     pub fn user_id(&self) -> Uuid {
         self.user_id
     }
@@ -641,7 +644,6 @@ impl ReaderContext {
 /// **Shared project membership does not widen a personal record.** An
 /// administrator's standing is over team guidance, not over a colleague's
 /// private notes, so `AdminUser` gets no exemption here and is not a parameter.
-#[allow(dead_code)]
 pub async fn reference_visibility(
     pool: &PgPool,
     reader: &ReaderContext,
@@ -703,29 +705,6 @@ pub async fn reference_visibility(
     } else {
         Visibility::Withheld
     })
-}
-
-/// Keep only the references this reader may see, dropping the rest.
-///
-/// Dropping, not marking. The returned list carries no evidence that anything
-/// was removed — no gap, no count, no placeholder — because the existence of a
-/// withheld record is itself the disclosure FR-846a forbids.
-#[allow(dead_code)]
-pub async fn visible_references(
-    pool: &PgPool,
-    reader: &ReaderContext,
-    references: &[Reference],
-) -> ApiResult<Vec<Reference>> {
-    let mut kept = Vec::new();
-    for reference in references {
-        if reference_visibility(pool, reader, *reference)
-            .await?
-            .is_visible()
-        {
-            kept.push(*reference);
-        }
-    }
-    Ok(kept)
 }
 
 /// What a session establishes about the event that names it.
@@ -815,13 +794,6 @@ pub async fn bind_session(
         // it" is not "you own it" (FR-764, Principle XI).
         _ => Ok(Err(SessionBindingError::NotOwned)),
     }
-}
-
-/// The readership a domain declares, so a caller can state it without
-/// re-deriving it.
-#[allow(dead_code)]
-pub fn declared_readership(reference: Reference) -> Readership {
-    reference.readership()
 }
 
 #[cfg(test)]

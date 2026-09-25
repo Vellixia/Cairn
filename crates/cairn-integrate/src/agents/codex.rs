@@ -429,7 +429,7 @@ fn inspect_hooks(
     if duplicated {
         return at(HealthCondition::Duplicated)
             .detail("more than one Cairn registration for a single event")
-            .remedy("cairn repair codex");
+            .remedy("cairn setup");
     }
     if present == 0 {
         return at(HealthCondition::Missing).detail("no Cairn hook registrations in this file");
@@ -440,7 +440,7 @@ fn inspect_hooks(
                 "{present} of {} Cairn hook registrations present",
                 EVENTS.len()
             ))
-            .remedy("cairn repair codex");
+            .remedy("cairn setup");
     }
     // `[features] hooks = false` outranks trust: nothing runs however trusted
     // it is, so naming trust as the blocker points the developer at the wrong
@@ -454,8 +454,8 @@ fn inspect_hooks(
         let mut o = at(HealthCondition::InstalledNotActivated)
             .detail("Codex has hooks disabled outright: `[features] hooks = false`")
             .remedy(
-                "set `hooks = true` under `[features]` in `~/.codex/config.toml`, then re-run \
-                 `cairn doctor codex`",
+                "set `hooks = true` under `[features]` in `~/.codex/config.toml`, then run \
+                 `cairn setup`",
             );
         o.activation = activation;
         return o;
@@ -468,7 +468,7 @@ fn inspect_hooks(
                 }
                 _ => "Codex will not run these handlers until you trust them",
             })
-            .remedy(format!("{TRUST_REMEDY}, then re-run `cairn doctor codex`"));
+            .remedy(format!("{TRUST_REMEDY}, then run `cairn setup`"));
         o.activation = activation;
         return o;
     }

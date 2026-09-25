@@ -1,10 +1,4 @@
-//! The change-plan engine (FR-151, FR-158–FR-162).
-//!
-//! One engine, four entry points. Doctor is this engine with no plan applied;
-//! preview is this engine plus a computed plan; connect, repair and migrate are
-//! this engine plus a plan that is then applied and re-inspected. That is what
-//! FR-151's fixed sequence — inspect, compute, validate, apply, verify — means
-//! in code, and it is why a bug in classification is fixed once.
+//! Setup's integration change plan.
 //!
 //! Computing a plan performs **zero writes**, including no temporary files
 //! (SC-118).
@@ -50,7 +44,6 @@ pub struct RecordedInstall {
 pub enum ChangeAction {
     Add,
     Update,
-    Remove,
     Unchanged,
     Conflict,
 }
@@ -60,16 +53,12 @@ impl ChangeAction {
         match self {
             ChangeAction::Add => "add",
             ChangeAction::Update => "update",
-            ChangeAction::Remove => "remove",
             ChangeAction::Unchanged => "unchanged",
             ChangeAction::Conflict => "conflict",
         }
     }
     pub fn writes(self) -> bool {
-        matches!(
-            self,
-            ChangeAction::Add | ChangeAction::Update | ChangeAction::Remove
-        )
+        matches!(self, ChangeAction::Add | ChangeAction::Update)
     }
 }
 
@@ -134,18 +123,6 @@ impl IntegrationChangePlan {
     }
 }
 
-/// What the operation is trying to do. The classification differs, the engine
-/// does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
-    /// Install or update to the desired state.
-    Connect,
-    /// Restore only what Cairn owns and is unambiguous.
-    Repair { force: bool },
-    /// Remove this agent's dependency on its resources.
-    Disconnect,
-}
-
 /// Compute the plan for one agent from desired state and observation.
 ///
 /// The rules, in one place:
@@ -156,10 +133,9 @@ pub enum Intent {
 /// - A resource that is present and behind this build is `update`.
 /// - A resource under an owner other than the record says, or shadowed by a
 ///   higher-precedence location, is `conflict` and blocks (FR-146, D38).
-/// - A resource a developer hand-edited is `conflict` under a default repair
-///   and `update` only under `--force` (FR-177, FR-221).
+/// - A resource a developer hand-edited is `conflict`; setup never overwrites
+///   it (FR-177, FR-221).
 pub fn plan_agent(
-    intent: Intent,
     agent: AgentId,
     desired: &DesiredIntegrationState,
     observed: &[Observed],
@@ -173,44 +149,7 @@ pub fn plan_agent(
         let seen = observed.iter().find(|o| o.kind == wanted.kind);
         let target = seen.and_then(|o| o.location.clone()).map(display_path);
 
-        let change = match (intent, seen.map(|o| o.condition)) {
-            // Disconnect: remove what Cairn owns directly; never a
-            // manager-owned resource (FR-149).
-            (Intent::Disconnect, Some(_)) => {
-                let owner = seen.map(|o| o.owner).unwrap_or(ResourceOwner::Direct);
-                if owner == ResourceOwner::Manager {
-                    plan.blocking.push(manager_blocking(agent, wanted.kind));
-                    PlannedChange {
-                        action: ChangeAction::Conflict,
-                        agent,
-                        kind: wanted.kind,
-                        owner,
-                        scope: wanted.scope,
-                        target,
-                        detail: "owned by an integration manager; Cairn does not remove it".into(),
-                    }
-                } else {
-                    PlannedChange {
-                        action: ChangeAction::Remove,
-                        agent,
-                        kind: wanted.kind,
-                        owner,
-                        scope: wanted.scope,
-                        target,
-                        detail: describe_removal(seen),
-                    }
-                }
-            }
-            (Intent::Disconnect, None) => PlannedChange {
-                action: ChangeAction::Unchanged,
-                agent,
-                kind: wanted.kind,
-                owner: wanted.owner,
-                scope: wanted.scope,
-                target,
-                detail: "not installed".into(),
-            },
-
+        let change = match seen.map(|o| o.condition) {
             // Asking a manager to distribute something Cairn already owns
             // directly would leave the developer with two copies of the same
             // resource and no way to tell which one is live. Both owners are
@@ -258,7 +197,7 @@ pub fn plan_agent(
                 detail: "distributed by the manager; Cairn verifies but does not write it".into(),
             },
 
-            (_, None) | (_, Some(HealthCondition::Missing)) => PlannedChange {
+            None | Some(HealthCondition::Missing) => PlannedChange {
                 action: ChangeAction::Add,
                 agent,
                 kind: wanted.kind,
@@ -271,54 +210,40 @@ pub fn plan_agent(
                 },
             },
 
-            (_, Some(HealthCondition::Healthy)) | (_, Some(HealthCondition::Shared)) => {
-                PlannedChange {
-                    action: ChangeAction::Unchanged,
-                    agent,
-                    kind: wanted.kind,
-                    owner: wanted.owner,
-                    scope: wanted.scope,
-                    target,
-                    detail: match &wanted.desired_version {
-                        Some(v) => format!("already at {v}"),
-                        None => "already installed".into(),
-                    },
-                }
-            }
+            Some(HealthCondition::Healthy) | Some(HealthCondition::Shared) => PlannedChange {
+                action: ChangeAction::Unchanged,
+                agent,
+                kind: wanted.kind,
+                owner: wanted.owner,
+                scope: wanted.scope,
+                target,
+                detail: match &wanted.desired_version {
+                    Some(v) => format!("already at {v}"),
+                    None => "already installed".into(),
+                },
+            },
 
-            (_, Some(HealthCondition::Outdated)) | (_, Some(HealthCondition::Duplicated)) => {
-                PlannedChange {
-                    action: ChangeAction::Update,
-                    agent,
-                    kind: wanted.kind,
-                    owner: wanted.owner,
-                    scope: wanted.scope,
-                    target,
-                    detail: seen
-                        .and_then(|o| o.detail.clone())
-                        .unwrap_or_else(|| "bring to the current version".into()),
-                }
-            }
-
-            (Intent::Repair { force: true }, Some(HealthCondition::Modified)) => PlannedChange {
+            Some(HealthCondition::Outdated) | Some(HealthCondition::Duplicated) => PlannedChange {
                 action: ChangeAction::Update,
                 agent,
                 kind: wanted.kind,
                 owner: wanted.owner,
                 scope: wanted.scope,
                 target,
-                detail: "restore Cairn's canonical content inside the ownership boundary".into(),
+                detail: seen
+                    .and_then(|o| o.detail.clone())
+                    .unwrap_or_else(|| "bring to the current version".into()),
             },
 
-            (_, Some(HealthCondition::Modified)) => {
+            Some(HealthCondition::Modified) => {
                 plan.blocking.push(Blocking {
                     agent,
                     kind: wanted.kind,
                     condition: HealthCondition::Modified,
                     detail: "a Cairn-managed resource was edited by hand".into(),
                     manual_sequence: vec![
-                        format!("cairn doctor {agent}          # see exactly what differs"),
-                        format!("cairn repair {agent} --force  # restore Cairn's version"),
+                        "resolve the edited resource manually; Cairn will not overwrite it".into(),
+                        "cairn setup".into(),
                     ],
                 });
                 PlannedChange {
@@ -328,18 +253,18 @@ pub fn plan_agent(
                     owner: wanted.owner,
                     scope: wanted.scope,
                     target,
-                    detail: "edited by hand; a default repair changes nothing".into(),
+                    detail: "edited by hand; setup changes nothing".into(),
                 }
             }
 
-            (_, Some(HealthCondition::InstalledNotActivated)) => {
+            Some(HealthCondition::InstalledNotActivated) => {
                 plan.post_apply_actions.push(PostApplyAction {
                     kind: "activation".into(),
                     agent,
                     instruction: seen
                         .and_then(|o| o.remedy.clone())
                         .unwrap_or_else(|| "activate the handlers inside the agent".into()),
-                    verify_with: format!("cairn doctor {agent}"),
+                    verify_with: "cairn setup".into(),
                 });
                 PlannedChange {
                     action: ChangeAction::Unchanged,
@@ -352,15 +277,15 @@ pub fn plan_agent(
                 }
             }
 
-            (_, Some(HealthCondition::Migrating)) => {
+            Some(HealthCondition::Migrating) => {
                 plan.blocking.push(Blocking {
                     agent,
                     kind: wanted.kind,
                     condition: HealthCondition::Migrating,
                     detail: "an ownership migration for this resource is in progress".into(),
                     manual_sequence: vec![
-                        format!("cairn integration migrate {agent} {} --resume", wanted.kind),
-                        format!("cairn integration migrate {agent} {} --abort", wanted.kind),
+                        "resolve the incomplete ownership change manually".into(),
+                        "cairn setup".into(),
                     ],
                 });
                 PlannedChange {
@@ -374,7 +299,7 @@ pub fn plan_agent(
                 }
             }
 
-            (_, Some(condition)) => {
+            Some(condition) => {
                 // conflicting_owner, malformed_config, damaged_markers,
                 // manager_action_required, unknown — every one of them needs a
                 // human decision, and repair explains rather than guessing
@@ -420,28 +345,6 @@ fn untouched_for(agent: AgentId) -> Vec<String> {
     v
 }
 
-fn describe_removal(seen: Option<&Observed>) -> String {
-    match seen.map(|o| o.condition) {
-        Some(HealthCondition::Shared) => {
-            "unbind this agent; the resource stays for the agents still using it".into()
-        }
-        _ => "remove Cairn's own resource".into(),
-    }
-}
-
-fn manager_blocking(agent: AgentId, kind: ResourceKind) -> Blocking {
-    Blocking {
-        agent,
-        kind,
-        condition: HealthCondition::ManagerActionRequired,
-        detail: "an integration manager owns this resource".into(),
-        manual_sequence: vec![
-            "withdraw it inside the manager's own interface".into(),
-            format!("cairn doctor {agent}"),
-        ],
-    }
-}
-
 fn manual_sequence_for(
     agent: AgentId,
     kind: ResourceKind,
@@ -449,23 +352,23 @@ fn manual_sequence_for(
 ) -> Vec<String> {
     match condition {
         HealthCondition::ConflictingOwner => vec![
-            format!("cairn doctor {agent}   # see both owners"),
-            format!("cairn integration migrate {agent} {kind} --to direct   # or --to the manager"),
+            format!("choose one owner for {agent} {kind} and remove the conflicting copy"),
+            "cairn setup".into(),
         ],
         HealthCondition::MalformedConfig => vec![
             "fix the configuration file by hand; Cairn will not rewrite a file it cannot parse"
                 .into(),
-            format!("cairn doctor {agent}"),
+            "cairn setup".into(),
         ],
         HealthCondition::DamagedMarkers => vec![
             "restore or remove the damaged cairn:managed markers by hand".into(),
-            format!("cairn repair {agent}"),
+            "cairn setup".into(),
         ],
         HealthCondition::ManagerActionRequired => vec![
             "complete the step inside the manager".into(),
-            format!("cairn doctor {agent}"),
+            "cairn setup".into(),
         ],
-        _ => vec![format!("cairn doctor {agent}")],
+        _ => vec!["cairn setup".into()],
     }
 }
 
@@ -494,7 +397,7 @@ mod tests {
 
     #[test]
     fn an_absent_resource_is_an_add() {
-        let plan = plan_agent(Intent::Connect, AgentId::ClaudeCode, &desired(), &[]);
+        let plan = plan_agent(AgentId::ClaudeCode, &desired(), &[]);
         assert!(plan.changes.iter().all(|c| c.action == ChangeAction::Add));
         assert!(!plan.is_noop());
     }
@@ -506,7 +409,7 @@ mod tests {
             .iter()
             .map(|k| Observed::new(*k, HealthCondition::Healthy))
             .collect();
-        let plan = plan_agent(Intent::Connect, AgentId::ClaudeCode, &desired(), &observed);
+        let plan = plan_agent(AgentId::ClaudeCode, &desired(), &observed);
         assert!(plan.is_noop());
         assert!(plan
             .changes
@@ -515,59 +418,32 @@ mod tests {
     }
 
     #[test]
-    fn a_hand_edit_blocks_a_default_repair_and_is_updated_only_under_force() {
+    fn a_hand_edit_blocks_setup() {
         // FR-177, FR-221, SC-130.
         let observed = vec![Observed::new(
             ResourceKind::Instructions,
             HealthCondition::Modified,
         )];
-        let default = plan_agent(
-            Intent::Repair { force: false },
-            AgentId::ClaudeCode,
-            &desired(),
-            &observed,
-        );
-        assert!(default.is_blocked());
+        let plan = plan_agent(AgentId::ClaudeCode, &desired(), &observed);
+        assert!(plan.is_blocked());
         assert_eq!(
-            default
-                .changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
+            plan.changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
                 .unwrap()
                 .action,
             ChangeAction::Conflict
         );
-
-        let forced = plan_agent(
-            Intent::Repair { force: true },
-            AgentId::ClaudeCode,
-            &desired(),
-            &observed,
-        );
-        assert_eq!(
-            forced
-                .changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
-                .unwrap()
-                .action,
-            ChangeAction::Update
-        );
     }
 
     #[test]
-    fn a_damaged_marker_blocks_even_under_force() {
-        // FR-221: forcing past one would mean guessing which text was Cairn's.
+    fn a_damaged_marker_blocks_setup() {
         let observed = vec![Observed::new(
             ResourceKind::Instructions,
             HealthCondition::DamagedMarkers,
         )];
-        let forced = plan_agent(
-            Intent::Repair { force: true },
-            AgentId::ClaudeCode,
-            &desired(),
-            &observed,
-        );
-        assert!(forced.is_blocked());
+        let plan = plan_agent(AgentId::ClaudeCode, &desired(), &observed);
+        assert!(plan.is_blocked());
         assert_eq!(
-            forced
-                .changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
+            plan.changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
                 .unwrap()
                 .action,
             ChangeAction::Conflict
@@ -584,12 +460,7 @@ mod tests {
             HealthCondition::Modified,
         ] {
             let observed = vec![Observed::new(ResourceKind::Instructions, condition)];
-            let plan = plan_agent(
-                Intent::Repair { force: false },
-                AgentId::ClaudeCode,
-                &desired(),
-                &observed,
-            );
+            let plan = plan_agent(AgentId::ClaudeCode, &desired(), &observed);
             assert!(plan.is_blocked(), "{condition} did not block");
             assert!(plan.blocking.iter().all(|b| !b.manual_sequence.is_empty()));
         }
@@ -598,7 +469,7 @@ mod tests {
     #[test]
     fn every_plan_names_its_blast_radius() {
         // FR-161: `untouched` is mandatory.
-        let plan = plan_agent(Intent::Connect, AgentId::ClaudeCode, &desired(), &[]);
+        let plan = plan_agent(AgentId::ClaudeCode, &desired(), &[]);
         assert!(!plan.untouched.is_empty());
         assert!(plan
             .untouched
@@ -631,12 +502,7 @@ mod tests {
         // no way to tell which one is live.
         let observed = vec![Observed::new(ResourceKind::Mcp, HealthCondition::Healthy)
             .owned_by(ResourceOwner::Direct)];
-        let plan = plan_agent(
-            Intent::Connect,
-            AgentId::ClaudeCode,
-            &via_manager(),
-            &observed,
-        );
+        let plan = plan_agent(AgentId::ClaudeCode, &via_manager(), &observed);
 
         assert!(plan.is_blocked(), "a second owner was accepted silently");
         let mcp = plan
@@ -660,61 +526,20 @@ mod tests {
         assert!(blocking
             .manual_sequence
             .iter()
-            .any(|s| s.contains("migrate")));
+            .any(|s| s.contains("choose one owner")));
     }
 
     #[test]
     fn a_manager_owned_resource_cairn_does_not_hold_is_verified_not_written() {
         // The other half: with nothing of Cairn's own in place, the manager
         // owns it and Cairn writes nothing (FR-234).
-        let plan = plan_agent(Intent::Connect, AgentId::ClaudeCode, &via_manager(), &[]);
+        let plan = plan_agent(AgentId::ClaudeCode, &via_manager(), &[]);
         let mcp = plan
             .changes_for(AgentId::ClaudeCode, ResourceKind::Mcp)
             .expect("an mcp change");
         assert_eq!(mcp.action, ChangeAction::Unchanged);
         assert_eq!(mcp.owner, ResourceOwner::Manager);
         assert!(!mcp.action.writes());
-    }
-
-    #[test]
-    fn disconnect_never_removes_a_manager_owned_resource() {
-        // FR-149, FR-233.
-        let observed = vec![Observed::new(ResourceKind::Mcp, HealthCondition::Healthy)
-            .owned_by(ResourceOwner::Manager)];
-        let plan = plan_agent(
-            Intent::Disconnect,
-            AgentId::ClaudeCode,
-            &desired(),
-            &observed,
-        );
-        let mcp = plan
-            .changes_for(AgentId::ClaudeCode, ResourceKind::Mcp)
-            .unwrap();
-        assert_eq!(mcp.action, ChangeAction::Conflict);
-        assert!(plan
-            .blocking
-            .iter()
-            .any(|b| b.condition == HealthCondition::ManagerActionRequired));
-    }
-
-    #[test]
-    fn disconnecting_a_shared_resource_unbinds_rather_than_deleting() {
-        // FR-243: the wording is part of the contract the developer reads.
-        let observed = vec![Observed::new(
-            ResourceKind::Instructions,
-            HealthCondition::Shared,
-        )];
-        let plan = plan_agent(
-            Intent::Disconnect,
-            AgentId::ClaudeCode,
-            &desired(),
-            &observed,
-        );
-        let c = plan
-            .changes_for(AgentId::ClaudeCode, ResourceKind::Instructions)
-            .unwrap();
-        assert_eq!(c.action, ChangeAction::Remove);
-        assert!(c.detail.contains("unbind"));
     }
 
     #[test]
@@ -725,7 +550,7 @@ mod tests {
             HealthCondition::InstalledNotActivated,
         )
         .remedy("run `codex hooks trust`")];
-        let plan = plan_agent(Intent::Connect, AgentId::Codex, &desired_codex(), &observed);
+        let plan = plan_agent(AgentId::Codex, &desired_codex(), &observed);
         assert_eq!(
             plan.changes_for(AgentId::Codex, ResourceKind::Lifecycle)
                 .unwrap()
