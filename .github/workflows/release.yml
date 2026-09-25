@@ -58,6 +58,7 @@ jobs:
       # The end-to-end suite drives the real binaries, and `cargo test` does not
       # build another package's binaries.
       - run: cargo build --workspace
+      - run: cargo clean -p cairn-e2e
 
       - name: Test
         env:
