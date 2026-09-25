@@ -1,6 +1,6 @@
 //! Safe-event ingest (`contracts/safe-events.md` §7, FR-765–FR-780).
 //!
-//! A boundary of its own, deliberately not `/api/sync/batch`. The sync boundary
+//! A boundary of its own, deliberately not entity synchronization. That boundary
 //! carries whole entities a client already decided to store; this one carries
 //! typed observations the server decides what to do with. Sharing a route would
 //! mean one validation order for two different questions.
@@ -25,7 +25,7 @@
 //! (FR-771). `duplicate` is a success: a retry that gets it has achieved
 //! exactly what it was for.
 
-use crate::auth::{bind_session, CurrentUser, ReaderContext, SessionBinding, SessionBindingError};
+use crate::auth::{CurrentUser, ReaderContext, SessionBinding};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::State;
@@ -40,7 +40,7 @@ use cairn_core::validate::{
 use cairn_core::vocabulary::{self, SessionVocabulary};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 /// The batch a client posts.
@@ -52,7 +52,22 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct EventBatch {
     pub contract_version: u16,
+    #[serde(default)]
+    pub sessions: Vec<SessionRegistration>,
     pub events: Vec<Value>,
+}
+
+/// Minimal authenticated session registration for fresh edge spools. A client
+/// cannot choose an owner: `user_id` is always the bearer-token account.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRegistration {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub agent: String,
+    pub branch: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
 }
 
 /// What happened to one event.
@@ -107,14 +122,8 @@ pub struct BatchResponse {
     pub results: Vec<EventOutcome>,
 }
 
-/// Every name the synchronization boundary refuses, enforced here too.
-///
-/// FR-777a1 makes this obligation general rather than satisfied by renaming one
-/// field: two boundaries on one server disagreeing about the same name is
-/// exactly the drift FR-760 forbids for rejection classes. The list is checked
-/// **recursively at any depth**, because a refused name nested inside `content`
-/// is refused for the same reason it is refused at the top.
-const REFUSED_FIELD_NAMES: &[&str] = &[
+/// Legacy raw-material names refused recursively at any depth.
+pub(crate) const REFUSED_FIELD_NAMES: &[&str] = &[
     "summary",
     "path",
     "command",
@@ -126,7 +135,6 @@ const REFUSED_FIELD_NAMES: &[&str] = &[
     "value_digest",
     "fingerprint",
     "relevant_paths",
-    "criteria_snapshot",
     "sanitization_report",
     "origin_ref",
     "alternative_cause",
@@ -135,7 +143,6 @@ const REFUSED_FIELD_NAMES: &[&str] = &[
     "rationale",
     "basis_evidence_id",
     "path_fingerprints",
-    "task_snapshot_at_bind",
     "detail",
     "prior_value",
     "new_value",
@@ -152,7 +159,7 @@ const REFUSED_FIELD_NAMES: &[&str] = &[
 /// `outcome` is refused at top level only — nested, it is a legal field name
 /// on the sync boundary, and this boundary matches that rule rather than
 /// inventing a stricter one that would then disagree with it.
-const REFUSED_AT_TOP_LEVEL: &[&str] = &["outcome"];
+pub(crate) const REFUSED_AT_TOP_LEVEL: &[&str] = &["outcome"];
 
 fn carries_refused_name(value: &Value, top_level: bool) -> bool {
     match value {
@@ -187,6 +194,25 @@ pub async fn ingest_batch(
     }
 
     let reader = ReaderContext::load(&state.pool, &user).await?;
+    let mut tx = state.pool.begin().await?;
+    for session in &batch.sessions {
+        if !reader.is_member_of(session.project_id) {
+            return Err(ApiError::forbidden("not a project member"));
+        }
+        sqlx::query(
+            "INSERT INTO sessions (id, project_id, user_id, agent, branch, commit_sha, status, started_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'active', now())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(session.id)
+        .bind(session.project_id)
+        .bind(user.id)
+        .bind(&session.agent)
+        .bind(&session.branch)
+        .bind(&session.commit_sha)
+        .execute(&mut *tx)
+        .await?;
+    }
     let mut results = Vec::with_capacity(batch.events.len());
 
     // Events are validated in the order they arrive, and the client is required
@@ -194,16 +220,17 @@ pub async fn ingest_batch(
     // vocabulary token is validated before one that cites it. Sorting here
     // instead would hide a client that had them out of order.
     for raw in &batch.events {
-        match ingest_one(&state.pool, &reader, raw).await {
+        match ingest_one(&mut tx, &reader, raw).await {
             Ok(outcome) => results.push(outcome),
             // The one failure that is not per-item: a non-member must not learn
             // whether the session exists.
             Err(IngestFailure::Unresolvable) => {
-                return Err(ApiError::forbidden("no session you can write to was named"))
+                return Err(ApiError::forbidden("no session you can write to was named"));
             }
             Err(IngestFailure::Database(e)) => return Err(e),
         }
     }
+    tx.commit().await?;
     Ok(Json(BatchResponse { results }))
 }
 
@@ -234,7 +261,7 @@ impl From<sqlx::Error> for IngestFailure {
 /// a reordering would either check something twice or check it against a value
 /// that had not been established yet.
 async fn ingest_one(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     reader: &ReaderContext,
     raw: &Value,
 ) -> Result<EventOutcome, IngestFailure> {
@@ -296,12 +323,24 @@ async fn ingest_one(
     }
 
     // 6 — session binding. The project is derived, never asserted.
-    let binding = match bind_session(pool, reader, event.session_id).await? {
-        Ok(binding) => binding,
-        Err(SessionBindingError::Unresolvable) => return Err(IngestFailure::Unresolvable),
-        Err(SessionBindingError::NotOwned) => {
-            return Ok(EventOutcome::rejected(claimed_id, "session_not_found"))
+    let row: Option<(Uuid, Option<Uuid>)> =
+        sqlx::query_as("SELECT project_id, user_id FROM sessions WHERE id = $1")
+            .bind(event.session_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    let binding = match row {
+        Some((project_id, Some(owner_user_id)))
+            if reader.is_member_of(project_id) && owner_user_id == reader.user_id() =>
+        {
+            SessionBinding {
+                project_id,
+                owner_user_id,
+            }
         }
+        Some((project_id, _)) if reader.is_member_of(project_id) => {
+            return Ok(EventOutcome::rejected(claimed_id, "session_not_found"));
+        }
+        _ => return Err(IngestFailure::Unresolvable),
     };
 
     // 8 — content screening, before 7, and deliberately: `repo_file` segments
@@ -314,13 +353,13 @@ async fn ingest_one(
     }
 
     // 7 — vocabulary justification, for the two semantic signals.
-    if let Some(reason) = justify_tokens(pool, &event, &binding).await? {
+    if let Some(reason) = justify_tokens(tx, &event, &binding).await? {
         return Ok(EventOutcome::rejected(claimed_id, reason));
     }
 
     // 9 and 10 — insert and enqueue, in one transaction, so an accepted event
     // is always eventually consolidated and a rolled-back one never is.
-    persist(pool, &event, &binding).await
+    persist(tx, &event, &binding).await
 }
 
 fn repo_file_reason(class: &str) -> &'static str {
@@ -417,7 +456,7 @@ fn screen_event_text(event: &SafeCanonicalEvent) -> Option<&'static str> {
 /// established project keys, and the refusal is permanent — the decision is
 /// destroyed rather than deferred (`contracts/extraction.md` §13.3).
 async fn justify_tokens(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     event: &SafeCanonicalEvent,
     binding: &SessionBinding,
 ) -> Result<Option<&'static str>, IngestFailure> {
@@ -435,7 +474,7 @@ async fn justify_tokens(
         _ => return Ok(None),
     };
 
-    let vocabulary = session_vocabulary(pool, event, binding).await?;
+    let vocabulary = session_vocabulary(tx, event, binding).await?;
     if !vocabulary.justifies(subject) || !vocabulary.justifies(object) {
         return Ok(Some("token_not_in_vocabulary"));
     }
@@ -443,7 +482,7 @@ async fn justify_tokens(
 }
 
 async fn session_vocabulary(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     event: &SafeCanonicalEvent,
     binding: &SessionBinding,
 ) -> Result<SessionVocabulary, IngestFailure> {
@@ -454,7 +493,7 @@ async fn session_vocabulary(
     )
     .bind(event.session_id)
     .bind(event.session_seq as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     let established: Vec<String> = sqlx::query_scalar(
@@ -465,7 +504,7 @@ async fn session_vocabulary(
           WHERE project_id = $1 AND value_key IS NOT NULL AND deleted_at IS NULL",
     )
     .bind(binding.project_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     let parsed: Vec<(EventKind, Option<EventContent>)> = rows
@@ -498,12 +537,10 @@ async fn session_vocabulary(
 /// session already marked `done`: a session that produces more events after
 /// consolidation finished has more work, and leaving it `done` would strand it.
 async fn persist(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     event: &SafeCanonicalEvent,
     binding: &SessionBinding,
 ) -> Result<EventOutcome, IngestFailure> {
-    let mut tx = pool.begin().await?;
-
     let content = event
         .content
         .as_ref()
@@ -547,14 +584,29 @@ async fn persist(
     .bind(i32::from(event.contract_version))
     .bind(&content)
     .bind(event.occurred_at)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     if inserted.rows_affected() == 0 {
         // A redelivery. Nothing to enqueue — the original insert already did —
         // and the transaction commits so a concurrent writer is not blocked.
-        tx.commit().await?;
         return Ok(EventOutcome::duplicate(event.event_id));
+    }
+
+    if let (EventKind::SessionClosed, Some(EventContent::SessionClose { close_reason })) =
+        (event.kind, &event.content)
+    {
+        sqlx::query(
+            "UPDATE sessions
+                SET status = 'completed', ended_at = COALESCE(ended_at, $2),
+                    end_reason = COALESCE(end_reason, $3)
+              WHERE id = $1 AND status = 'active'",
+        )
+        .bind(event.session_id)
+        .bind(event.occurred_at)
+        .bind(close_reason)
+        .execute(&mut **tx)
+        .await?;
     }
 
     // The conflict action is spelled out because all three obvious choices are
@@ -595,7 +647,7 @@ async fn persist(
     )
     .bind(binding.project_id)
     .bind(event.session_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query(
@@ -607,10 +659,9 @@ async fn persist(
     .bind(binding.project_id)
     .bind(event.session_id)
     .bind(event.session_seq as i64)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(EventOutcome::accepted(event.event_id))
 }
 

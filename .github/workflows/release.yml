@@ -54,6 +54,7 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clean -p cairn-server -p cairn-e2e
 
       # The end-to-end suite drives the real binaries, and `cargo test` does not
       # build another package's binaries.
@@ -245,8 +246,7 @@ jobs:
 
           Open a new terminal, then inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server.exe\` is only needed if you host shared project memory
           yourself. Most people do not need it.
@@ -262,8 +262,7 @@ jobs:
 
           Then, inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server\` is only needed if you host shared project memory
           yourself. Most people do not need it.

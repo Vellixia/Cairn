@@ -201,96 +201,45 @@ export async function seed(): Promise<Seeded> {
   });
   const projectId = project.id as string;
 
-  const taskId = uuid();
   const sessionId = uuid();
-  const handoffId = uuid();
-  const memoryId = uuid();
   const memoryContent = "Errors are returned, never logged and swallowed";
 
-  await json("/api/sync/batch", {
+  await json("/api/events/batch", {
     method: "POST",
     headers: auth,
     body: JSON.stringify({
-      project_id: projectId,
-      items: [
-        {
-          idempotency_key: `t-${taskId}`,
-          entity_type: "task",
-          entity_id: taskId,
-          operation: "upsert",
-          payload: {
-            title: "Add rate limiting",
-            goal: "Requests over the limit get 429",
-            acceptance_criteria: ["429 returned above threshold"],
-            status: "in_progress",
-          },
-        },
-        {
-          idempotency_key: `s-${sessionId}`,
-          entity_type: "session",
-          entity_id: sessionId,
-          operation: "upsert",
-          payload: {
-            task_id: taskId,
-            agent: "claude-code",
-            branch: "main",
-            commit_sha: "abc1234",
-            status: "completed",
-            started_at: new Date().toISOString(),
-            ended_at: new Date().toISOString(),
-            end_reason: "clear",
-          },
-        },
-        {
-          idempotency_key: `h-${handoffId}`,
-          entity_type: "handoff",
-          entity_id: handoffId,
-          operation: "upsert",
-          payload: {
-            session_id: sessionId,
-            trigger: "session_end",
-            goal: "Requests over the limit get 429",
-            progress: "1 file changed, 1 test command run, 1 failure open",
-            completed_work: ["Changed 1 file(s): src/limiter.rs"],
-            remaining_work: ["Open failure: Test failed: cargo test"],
-            changed_files: ["src/limiter.rs"],
-            decisions: ["Chose a token bucket"],
-            failures: ["Test failed: cargo test"],
-            // `runner`, not `command`. The server's wire check screens field
-            // *names* recursively, so a `command` key anywhere inside a handoff
-            // payload is refused outright (FR-532) — this seed's handoff never
-            // landed, and the session page then had no handoff to render at all.
-            tests_executed: [{ runner: "cargo test", outcome: "failed" }],
-            repository_state: {
-              branch: "main",
-              commit_sha: "abc1234",
-              staged: 0,
-              unstaged: 1,
-              untracked: 0,
-            },
-            next_step: "Fix the open failure: Test failed: cargo test",
-            evidence: { observation_ids: [uuid()], evidence_count: 1 },
-          },
-        },
-        {
-          idempotency_key: `m-${memoryId}`,
-          entity_type: "memory",
-          entity_id: memoryId,
-          operation: "upsert",
-          payload: {
-            type: "convention",
-            scope: "project",
-            scope_key: projectId,
-            content: memoryContent,
-            state: "active",
-            provenance: {
-              session_id: sessionId,
-              observation_ids: [],
-              evidence_count: 0,
-            },
-          },
-        },
-      ],
+      contract_version: 1,
+      sessions: [{
+        id: sessionId,
+        project_id: projectId,
+        agent: "claude_code",
+        branch: "main",
+        commit_sha: "abc1234",
+      }],
+      events: [event(sessionId, 1, "session_closed", {
+        SessionClose: { close_reason: "clear" },
+      })],
+    }),
+  });
+
+  await json("/api/commands", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      command_id: uuid(), kind: "remember", project_id: projectId, session_id: sessionId,
+      payload: {
+        type: "convention", scope: "project", content: memoryContent,
+        topic_key: "errors.returned", value_key: "never_swallowed",
+      },
+    }),
+  });
+
+  await json("/api/commands", {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      command_id: uuid(), kind: "handoff_generate", project_id: projectId, session_id: sessionId,
+      payload: { trigger: "session_end" },
     }),
   });
 
@@ -316,7 +265,6 @@ export async function seed(): Promise<Seeded> {
 // What it buys: every fact the browser tests read was produced by the pipeline
 // under test, so a chain that renders is a chain that exists.
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 /** `cairn_core::eventid::CAIRN_EVENT_NS`. */
@@ -431,7 +379,7 @@ async function account(label: string): Promise<Account> {
 }
 
 /**
- * Bring an administrator into existence, out of band.
+ * Sign in as the deployment's environment-defined administrator.
  *
  * **There is no route that can do this, and that is deliberate.** Account
  * creation is operator-only (`cairn-server users add`), and that subcommand
@@ -441,89 +389,41 @@ async function account(label: string): Promise<Account> {
  * fresh CI deployment is — migration 3's backfill has nobody to promote either,
  * so a stack started without those variables has **no administrator at all**.
  *
- * So the fixture performs the same deploy-time act the contract reserves for an
- * operator (`web-control-plane.md` §1.1): it runs the server binary once, on an
- * ephemeral port, with the environment account configured. `ensure_admin` is an
- * upsert, so this converges whether or not the account already exists, and the
- * process is killed the moment the credential authenticates against the *real*
- * server — which is also the proof that the account landed in the shared
- * database rather than somewhere the tests cannot see.
- *
- * If the stack was already started with those variables set, this is a no-op
- * that re-establishes the same password.
+ * CI starts the server with these variables. The fixture only authenticates;
+ * restarting another server must not overwrite a password managed in the web
+ * UI or make a later environment account an administrator.
  */
 async function bootstrapAdmin(): Promise<Account> {
-  const email = (
-    process.env.CAIRN_ADMIN_EMAIL ?? `us5-admin-${Date.now()}@example.test`
-  )
+  const email = (process.env.CAIRN_ADMIN_EMAIL ?? "e2e-admin@example.test")
     .trim()
     .toLowerCase();
   const password = process.env.CAIRN_ADMIN_PASSWORD ?? "hunter2hunter2";
-  const displayName = "US5 Administrator";
-
-  const args = ["--addr", "127.0.0.1:0"];
-  if (process.env.DATABASE_URL) {
-    args.push("--database-url", process.env.DATABASE_URL);
-  }
-  const child = spawn(SERVER_BIN, args, {
-    env: {
-      ...process.env,
-      CAIRN_ADMIN_EMAIL: email,
-      CAIRN_ADMIN_PASSWORD: password,
-      CAIRN_ADMIN_DISPLAY_NAME: displayName,
-    },
-    stdio: "ignore",
+  const displayName = process.env.CAIRN_ADMIN_DISPLAY_NAME ?? "E2E Administrator";
+  const login = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
   });
-
-  let stderr = "";
-  child.on("error", (error) => {
-    stderr = String(error);
-  });
-
-  try {
-    const deadline = Date.now() + 60_000;
-    for (;;) {
-      const login = await fetch(`${API}/api/auth/login`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      }).catch(() => null);
-      if (login?.ok) {
-        const pair = (login.headers.get("set-cookie") ?? "").split(";")[0];
-        const eq = pair.indexOf("=");
-        const session = eq === -1 ? "" : pair.slice(eq + 1);
-        if (!session) {
-          throw new Error(`admin login returned no ${SESSION_COOKIE} value`);
-        }
-        const token = await newToken(session, "us5-admin");
-        const me = await apiAs(token, "/api/auth/me");
-        if (me.role !== "admin") {
-          throw new Error(
-            `the environment account came back as ${me.role}, not admin: ${JSON.stringify(me)}`,
-          );
-        }
-        return {
-          email,
-          password,
-          displayName,
-          session,
-          token,
-          id: me.id as string,
-        };
-      }
-      if (Date.now() > deadline) {
-        throw new Error(
-          `no administrator after 60s. The bootstrap server did not seed ` +
-            `${email}${stderr ? `: ${stderr}` : ""}. ` +
-            `Start the stack with CAIRN_ADMIN_EMAIL and CAIRN_ADMIN_PASSWORD, ` +
-            `or check that ${SERVER_BIN} exists.`,
-        );
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  } finally {
-    child.kill();
+  if (!login.ok) {
+    throw new Error(
+      `admin login for ${email}: ${login.status}. Start the server with ` +
+        `CAIRN_ADMIN_EMAIL and CAIRN_ADMIN_PASSWORD before running Playwright.`,
+    );
   }
+  const pair = (login.headers.get("set-cookie") ?? "").split(";")[0];
+  const eq = pair.indexOf("=");
+  const session = eq === -1 ? "" : pair.slice(eq + 1);
+  if (!session) {
+    throw new Error(`admin login returned no ${SESSION_COOKIE} value`);
+  }
+  const token = await newToken(session, "us5-admin");
+  const me = await apiAs(token, "/api/auth/me");
+  if (me.role !== "admin") {
+    throw new Error(
+      `the environment account came back as ${me.role}, not admin: ${JSON.stringify(me)}`,
+    );
+  }
+  return { email, password, displayName, session, token, id: me.id as string };
 }
 
 /** One safe event, in the shape `POST /api/events/batch` accepts. */
@@ -544,28 +444,6 @@ function event(
     occurred_at: new Date().toISOString(),
     content,
   };
-}
-
-/**
- * Post a batch and insist every event landed.
- *
- * A per-event refusal comes back inside a `200`, so an unchecked ingest leaves
- * the whole fixture asserting against events that were never stored — and the
- * failure surfaces two minutes later as "consolidation never produced
- * anything", which points at the wrong thing entirely.
- */
-async function ingest(token: string, events: Record<string, unknown>[]) {
-  const body = await apiAs(token, "/api/events/batch", {
-    method: "POST",
-    body: JSON.stringify({ contract_version: 1, events }),
-  });
-  const results = (body.results ?? []) as { status: string; reason?: string }[];
-  const bad = results.filter((r) => r.status !== "accepted");
-  if (bad.length > 0 || results.length !== events.length) {
-    throw new Error(
-      `not every safe event was accepted: ${JSON.stringify(body)}`,
-    );
-  }
 }
 
 /** Everything the US5 browser tests read, and how each part came to exist. */
@@ -629,30 +507,6 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
   // A closed session, so consolidation elects it at once rather than waiting
   // out the ten-minute age threshold a still-open session is held to.
   const sessionId = uuid();
-  await apiAs(owner.token, "/api/sync/batch", {
-    method: "POST",
-    body: JSON.stringify({
-      project_id: projectId,
-      items: [
-        {
-          idempotency_key: `s-${sessionId}`,
-          entity_type: "session",
-          entity_id: sessionId,
-          operation: "upsert",
-          payload: {
-            agent: "claude-code",
-            branch: "main",
-            commit_sha: "abc1234",
-            status: "completed",
-            started_at: new Date().toISOString(),
-            ended_at: new Date().toISOString(),
-            end_reason: "clear",
-          },
-        },
-      ],
-    }),
-  });
-
   // The four events, in the order the vocabulary rule requires.
   //
   // A `decision_signal`'s tokens must be *justified* by events the server
@@ -663,19 +517,27 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
   // ingest answers `token_not_in_vocabulary`, which `ingest` above turns into a
   // failure here rather than into an empty activity feed later.
   const evidenceCommand = "cargo bench --bench crimson_pillar_probe";
-  await ingest(owner.token, [
-    event(sessionId, 1, "file_changed", {
+  const ingestBody = await apiAs(owner.token, "/api/events/batch", {
+    method: "POST",
+    body: JSON.stringify({
+      contract_version: 1,
+      sessions: [{
+        id: sessionId, project_id: projectId, agent: "claude_code", branch: "main",
+        commit_sha: "abc1234",
+      }],
+      events: [
+        event(sessionId, 1, "file_changed", {
       File: {
         repo_file: "ledger/marmoset.rs",
         repo_file_from: null,
         change_kind: "modified",
         file_identity: "present",
       },
-    }),
-    event(sessionId, 2, "command_executed", {
+        }),
+        event(sessionId, 2, "command_executed", {
       Command: { command_line: evidenceCommand, exit_status: 0 },
-    }),
-    event(sessionId, 3, "decision_signal", {
+        }),
+        event(sessionId, 3, "decision_signal", {
       Decision: {
         decision_kind: "adopt",
         subject_token: "ledger",
@@ -683,11 +545,17 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
         justified_by_seq: 1,
         lexicon_version: 1,
       },
-    }),
-    event(sessionId, 4, "session_closed", {
+        }),
+        event(sessionId, 4, "session_closed", {
       SessionClose: { close_reason: "clear" },
+        }),
+      ],
     }),
-  ]);
+  });
+  const statuses = (ingestBody.results ?? []) as { status: string }[];
+  if (statuses.length !== 4 || statuses.some((result) => result.status !== "accepted")) {
+    throw new Error(`not every safe event was accepted: ${JSON.stringify(ingestBody)}`);
+  }
 
   const { knowledgeId, knowledgeContent } = await awaitConsolidation(
     owner.token,

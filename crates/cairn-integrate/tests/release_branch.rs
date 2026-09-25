@@ -97,7 +97,7 @@ fn tree(body: &str) -> Vec<SkillFile> {
                  cairn_skill_revision: <REVISION>\n---\n\n{body}\n"
             ),
         ),
-        file("references/scopes.md", "Project, branch, task, session.\n"),
+        file("references/scopes.md", "Project, branch, session.\n"),
     ]
 }
 

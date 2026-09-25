@@ -1,4 +1,4 @@
-//! The MCP server: exactly six tools, no more (FR-040).
+//! The MCP server: exactly five tools, no more.
 //!
 //! Speaks JSON-RPC 2.0 over stdio — `initialize`, `tools/list`, `tools/call` —
 //! and forwards every call to the local daemon. Each tool takes an `action`
@@ -19,13 +19,12 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// version back would claim support Cairn does not have.
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// The six tools. Anything beyond this list is a scope violation (FR-040).
+/// The five agent tools.
 pub const TOOL_NAMES: &[&str] = &[
     "cairn_context",
     "cairn_search",
     "cairn_remember",
     "cairn_session",
-    "cairn_task",
     "cairn_handoff",
 ];
 
@@ -115,7 +114,7 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_context",
             "description": "Build the bounded briefing for the current repository: project, \
-                            branch, commit, working tree, task goal, previous handoff, and \
+                            branch, commit, working tree, previous handoff, and \
                             relevant scoped memory — plus the minimum safe continuity, drift \
                             and conflict warnings, and whether your checkpoint diverged.",
             "inputSchema": {
@@ -139,15 +138,18 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_search",
             "description": "Search durable memory. Results are ranked scope-first — current \
-                            task, then branch, then project — with lexical relevance and \
+                            session, then branch, then project — with lexical relevance and \
                             recency breaking ties within a scope. Filter by verification state \
                             or subject; ask for reusable patterns explicitly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
+                    "action": { "type": "string", "enum": ["search", "graph"], "description": "`search` is lexical retrieval. `graph` is a typed, capped related-result request; unavailable servers refuse it explicitly." },
                     "query": { "type": "string" },
-                    "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
+                    "memory_id": { "type": "string", "description": "Required for `graph`; seed memory id." },
+                    "hops": { "type": "integer", "description": "Graph depth, capped at two." },
+                    "scope": { "type": "string", "enum": ["project", "branch", "session"] },
                     "scope_key": { "type": "string" },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "state": { "type": "string", "enum": ["active", "stale", "superseded"] },
@@ -166,7 +168,7 @@ fn tool_definitions() -> Vec<Value> {
                     // own corpus and returned in its own array; there is no
                     // comparator across them (FR-471, FR-472).
                     "domains": { "type": "array", "items": { "type": "string", "enum": ["project", "personal", "team"] }, "description": "Which knowledge domains to search. Omit for all three; personal and team return sibling arrays, never merged into results" },
-                    "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your task" },
+                    "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your session" },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
                 "required": ["cwd"]
@@ -188,10 +190,10 @@ fn tool_definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": [
                         "create", "supersede", "forget",
                         "reinforce", "attach_evidence", "verify", "pin",
-                        "reconcile", "promote", "record_outcome"
+                        "reconcile", "governance"
                     ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
-                    "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
+                    "scope": { "type": "string", "enum": ["project", "branch", "session"] },
                     "scope_key": { "type": "string" },
                     "content": { "type": "string" },
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
@@ -226,42 +228,6 @@ fn tool_definitions() -> Vec<Value> {
                     "basis": { "type": "string", "enum": ["explicit_agent", "evidence"] },
                     "basis_evidence_id": { "type": "string" },
                     "rationale": { "type": "string" },
-                    // promote / record_outcome
-                    "signals": { "type": "array", "items": { "type": "string" } },
-                    "applicability": { "type": "array", "items": { "type": "string" }, "description": "Free-text applicability conditions. Only meaningful when `target` is `pattern` (the default)." },
-                    "root_cause": { "type": "string" },
-                    "approach": { "type": "string" },
-                    "constraints": { "type": "array", "items": { "type": "string" } },
-                    "dry_run": { "type": "boolean" },
-                    // What this promotion targets. Absent means `pattern`, so
-                    // a caller naming none keeps today's behaviour unchanged
-                    // (FR-506, D415).
-                    "target": { "type": "string", "enum": ["pattern", "personal", "team"], "description": "Defaults to `pattern`. `personal` and `team` promote into that domain instead, using `applicability_facts` rather than `applicability` for their conditions." },
-                    // Structured conditions for a `personal`/`team` target,
-                    // distinct from the free-text `applicability` above (which
-                    // stays a pattern's own condition list).
-                    //
-                    // Flat `kind=value` strings, not an array of objects. The
-                    // shape is not a style choice: an action's parameters are
-                    // flat here by rule (D70), because a nested object is how a
-                    // tool grows sub-operations, and `mcp_backward_compatibility`
-                    // enforces it. `Vec<String>` is also what the wire type has
-                    // always been, so this removes a conversion rather than
-                    // adding one.
-                    //
-                    // `kind` is a closed vocabulary — `language` or `tool`, nothing else,
-                    // because both are derivable from files in a working tree
-                    // with no content read (D410, D414). A `kind` outside it
-                    // is refused, never silently dropped, so a promotion never
-                    // ends up applying under a narrower condition than asked
-                    // for (FR-434, FR-514). `value` is open text; a malformed
-                    // one is the validator's business downstream, not this
-                    // schema's.
-                    "applicability_facts": { "type": "array", "items": { "type": "string" }, "description": "`kind=value` conditions for a `personal`/`team` promotion, e.g. `language=rust`, `tool=cargo`. `kind` must be `language` or `tool`; anything else is refused, never dropped. Ignored when target is `pattern`." },
-                    "pattern_id": { "type": "string" },
-                    "outcome": { "type": "string", "enum": ["resolved", "not_applicable", "failed"] },
-                    "alternative_cause": { "type": "string" },
-                    "evidence_id": { "type": "string" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -277,50 +243,14 @@ fn tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint"] },
+                    "action": { "type": "string", "enum": ["current", "start", "end", "checkpoint", "replay"] },
                     "agent": { "type": "string" },
                     "agent_session_key": { "type": "string" },
                     "session_id": { "type": "string" },
-                    "task_id": { "type": "string" },
                     "status": { "type": "string", "enum": ["completed", "interrupted"] },
                     // checkpoint
                     "next_action": { "type": "string", "description": "What you were about to do" },
                     "relevant_paths": { "type": "array", "items": { "type": "string" }, "description": "Repository-relative paths this work depends on" }
-                },
-                "required": ["cwd", "action"]
-            }
-        }),
-        json!({
-            "name": "cairn_task",
-            "description": "List, read, create or update tasks — title, goal, acceptance \
-                            criteria and status. Update one criterion at a time and pass the \
-                            `expected_revision` you read.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": [
-                        "list", "get", "create", "update",
-                        "add_criterion", "update_criterion", "blocker", "readiness"
-                    ] },
-                    "task_id": { "type": "string" },
-                    "title": { "type": "string" },
-                    "goal": { "type": "string" },
-                    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
-                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] },
-                    // add_criterion / update_criterion
-                    "text": { "type": "string" },
-                    "criterion_id": { "type": "string" },
-                    "state": { "type": "string", "enum": ["pending", "satisfied", "blocked", "waived"] },
-                    "verification": { "type": "string", "enum": ["unverified", "verified", "failed"] },
-                    "evidence_observation_id": { "type": "string" },
-                    // This store's local concurrency token, read from `get`. It
-                    // is not a version anyone else shares (D80).
-                    "expected_revision": { "type": "integer" },
-                    // blocker
-                    "description": { "type": "string" },
-                    "blocker_id": { "type": "string" },
-                    "clear": { "type": "boolean" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -386,7 +316,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .get("token_budget")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
-                // The six tools are fixed; diagnostics stay a CLI affordance.
+                // The five tools are fixed; diagnostics stay a web affordance.
                 explain: false,
 
                 // `minimum` excludes personal_notes/team_guidance entirely;
@@ -417,6 +347,15 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
         }
 
         "cairn_search" => {
+            if str_arg(args, "action").as_deref() == Some("graph") {
+                let value = client::send(&Request::Graph {
+                    cwd,
+                    memory_id: uuid_arg(args, "memory_id")?,
+                    hops: args.get("hops").and_then(|v| v.as_i64()),
+                })
+                .await?;
+                return Ok(pretty(&value));
+            }
             let query = MemoryQuery {
                 query: str_arg(args, "query"),
                 scope: enum_arg(args, "scope"),
@@ -587,39 +526,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
-                "promote" => {
-                    client::send(&Request::PatternPromote {
-                        cwd,
-                        memory_id: uuid_arg(args, "memory_id")?,
-                        title: str_arg(args, "title"),
-                        problem: str_arg(args, "problem"),
-                        signals: str_list(args, "signals"),
-                        applicability: str_list(args, "applicability"),
-                        root_cause: str_arg(args, "root_cause"),
-                        approach: str_arg(args, "approach"),
-                        constraints: str_list(args, "constraints"),
-                        dry_run: bool_arg(args, "dry_run"),
-
-                        // Absent means `pattern`, so a caller naming none
-                        // gets today's behaviour unchanged (FR-506, D415).
-                        target: enum_arg(args, "target"),
-                        applicability_facts: applicability_facts_arg(args)?,
-                    })
-                    .await?
-                }
-                "record_outcome" => {
-                    client::send(&Request::PatternOutcome {
-                        cwd,
-                        id: uuid_arg(args, "pattern_id")?,
-                        outcome: enum_arg(args, "outcome")
-                            .ok_or_else(|| WireError::invalid("outcome is required"))?,
-                        signals: str_list(args, "signals"),
-                        alternative_cause: str_arg(args, "alternative_cause"),
-                        evidence_id: uuid_opt(args, "evidence_id"),
-                        session: uuid_opt(args, "session_id"),
-                    })
-                    .await?
-                }
+                "governance" => client::send(&Request::Governance { cwd }).await?,
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -641,16 +548,6 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         cwd,
                         agent: str_arg(args, "agent").unwrap_or_else(|| "mcp-client".into()),
                         agent_session_key: key,
-                        task_id: uuid_arg(args, "task_id").ok(),
-                    })
-                    .await?
-                }
-                "bind_task" => {
-                    client::send(&Request::SessionBindTask {
-                        cwd,
-                        session_id: None,
-                        agent_session_key: key,
-                        task_id: uuid_arg(args, "task_id")?,
                     })
                     .await?
                 }
@@ -680,108 +577,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
-                other => return Err(WireError::invalid(format!("unknown action: {other}"))),
-            };
-            Ok(pretty(&value))
-        }
-
-        "cairn_task" => {
-            let action = required_action(args)?;
-            let value = match action.as_str() {
-                "list" => {
-                    client::send(&Request::TaskList {
-                        cwd,
-                        status: enum_arg(args, "status"),
-                    })
-                    .await?
-                }
-                "get" => {
-                    client::send(&Request::TaskGet {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                    })
-                    .await?
-                }
-                "create" => {
-                    client::send(&Request::TaskCreate {
-                        cwd,
-                        title: str_arg(args, "title")
-                            .ok_or_else(|| WireError::invalid("title is required"))?,
-                        goal: str_arg(args, "goal")
-                            .ok_or_else(|| WireError::invalid("goal is required"))?,
-                        acceptance_criteria: string_list(args, "acceptance_criteria"),
-                    })
-                    .await?
-                }
-                "update" => {
-                    client::send(&Request::TaskUpdate {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                        title: str_arg(args, "title"),
-                        goal: str_arg(args, "goal"),
-                        acceptance_criteria: args
-                            .get("acceptance_criteria")
-                            .map(|_| string_list(args, "acceptance_criteria")),
-                        status: enum_arg(args, "status"),
-                    })
-                    .await?
-                }
-                "add_criterion" => {
-                    client::send(&Request::TaskCriterionAdd {
-                        cwd,
-                        agent_session_key: key,
-                        session_id: uuid_opt(args, "session_id"),
-                        task_id: uuid_arg(args, "task_id")?,
-                        text: str_arg(args, "text")
-                            .ok_or_else(|| WireError::invalid("text is required"))?,
-                    })
-                    .await?
-                }
-                "update_criterion" => {
-                    client::send(&Request::TaskCriterionSet {
-                        cwd,
-                        agent_session_key: key,
-                        session_id: uuid_opt(args, "session_id"),
-                        criterion_id: uuid_arg(args, "criterion_id")?,
-                        state: enum_arg(args, "state"),
-                        text: str_arg(args, "text"),
-                        // Omitting it applies the write and records a blind
-                        // write; supplying what you read is the protection
-                        // (FR-490).
-                        expected_revision: args.get("expected_revision").and_then(|v| v.as_i64()),
-                    })
-                    .await?
-                }
-                // One action, because a blocker has exactly one transition:
-                // `clear: true` closes the one named, anything else opens one.
-                "blocker" => {
-                    if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        client::send(&Request::TaskBlockerClear {
-                            cwd,
-                            agent_session_key: key,
-                            session_id: uuid_opt(args, "session_id"),
-                            blocker_id: uuid_arg(args, "blocker_id")?,
-                        })
-                        .await?
-                    } else {
-                        client::send(&Request::TaskBlockerOpen {
-                            cwd,
-                            agent_session_key: key,
-                            session_id: uuid_opt(args, "session_id"),
-                            task_id: uuid_arg(args, "task_id")?,
-                            description: str_arg(args, "description")
-                                .ok_or_else(|| WireError::invalid("description is required"))?,
-                        })
-                        .await?
-                    }
-                }
-                "readiness" => {
-                    client::send(&Request::TaskReadiness {
-                        cwd,
-                        task_id: uuid_arg(args, "task_id")?,
-                    })
-                    .await?
-                }
+                "replay" => client::send(&Request::Replay { cwd }).await?,
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -867,18 +663,6 @@ fn bool_arg(args: &Value, key: &str) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
-fn str_list(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {
     args.get(key)
         .and_then(|v| v.as_array())
@@ -925,59 +709,6 @@ fn knowledge_domain_arg(args: &Value) -> Result<Option<cairn_core::KnowledgeDoma
     Ok(domain)
 }
 
-/// `applicability_facts` for `cairn_remember action=promote`: `(kind,
-/// value)` pairs, formatted as `"kind=value"` strings, the encoding
-/// `Request::PatternPromote` expects on the wire. `kind` is the closed
-/// `language | tool` vocabulary (D410, D414) — an entry outside it is
-/// refused with an error naming the value, never dropped by a `filter_map`,
-/// because a promotion that silently lost a condition would apply more
-/// broadly than the caller asked for (FR-434, FR-514). A malformed `value`
-/// is passed through as-is; screening it is the content validator's job
-/// downstream, not this schema's.
-fn applicability_facts_arg(args: &Value) -> Result<Vec<String>, WireError> {
-    let Some(items) = args.get("applicability_facts").and_then(|v| v.as_array()) else {
-        return Ok(Vec::new());
-    };
-    items
-        .iter()
-        .map(|item| {
-            let raw = item.as_str().ok_or_else(|| {
-                WireError::invalid("applicability_facts[] entries are `kind=value` strings")
-            })?;
-            // Refused, never dropped (FR-434, FR-514). A silently discarded
-            // condition is worse than a refusal: the promotion still lands, and
-            // it lands applying *more* widely than the caller asked for — the one
-            // direction a mistake here must never go.
-            let (kind, _value) = raw.split_once('=').ok_or_else(|| {
-                WireError::invalid(format!(
-                    "applicability_facts[] entry `{raw}` is not `kind=value`"
-                ))
-            })?;
-            kind.trim()
-                .parse::<cairn_core::ApplicabilityKind>()
-                .map_err(|_| {
-                    WireError::invalid(format!(
-                        "applicability_facts[] kind `{kind}` is outside the closed \
-                         vocabulary (language | tool)"
-                    ))
-                })?;
-            Ok(raw.to_string())
-        })
-        .collect()
-}
-
-fn string_list(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
@@ -987,14 +718,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exposes_exactly_six_tools() {
+    fn exposes_exactly_five_tools() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 6, "FR-040 caps the tool surface at six");
+        assert_eq!(tools.len(), 5, "MCP exposes exactly five tools");
         let names: Vec<&str> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap_or_default())
             .collect();
         assert_eq!(names, TOOL_NAMES);
+        for name in ["cairn_search", "cairn_remember"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("surviving tool");
+            let scopes = tool["inputSchema"]["properties"]["scope"]["enum"]
+                .as_array()
+                .expect("scope enum");
+            assert_eq!(scopes.len(), 3);
+        }
+    }
+
+    #[test]
+    fn advanced_actions_stay_typed_inside_the_five_tool_surface() {
+        let tools = tool_definitions();
+        let action_values = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool["inputSchema"]["properties"]["action"]["enum"].as_array())
+                .expect("typed action enum")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert!(action_values("cairn_search").contains(&"graph"));
+        assert!(action_values("cairn_session").contains(&"replay"));
+        assert!(action_values("cairn_remember").contains(&"governance"));
+        assert_eq!(tools.len(), 5);
     }
 
     #[test]
@@ -1059,10 +819,9 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_is_still_exactly_six_tools() {
-        // FR-128, SC-106: a test fails if a seventh appears.
-        assert_eq!(TOOL_NAMES.len(), 6, "the MCP surface grew a seventh tool");
-        assert_eq!(tool_definitions().len(), 6);
+    fn the_surface_is_exactly_five_tools() {
+        assert_eq!(TOOL_NAMES.len(), 5, "the MCP surface grew a sixth tool");
+        assert_eq!(tool_definitions().len(), 5);
         for forbidden in [
             "cairn_doctor",
             "cairn_repair",

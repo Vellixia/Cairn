@@ -60,11 +60,11 @@ fn report_health(pg: &Pg, cells: Vec<Value>) -> (Value, u16) {
 fn read_health(pg: &Pg) -> Vec<Value> {
     let (body, status) = get_json_status_bearer(
         &pg.server.base,
-        &format!("/api/projects/{}/health", pg.project),
+        &format!("/api/projects/{}/integration-health", pg.project),
         &pg.owner.token,
     );
     assert_eq!(status, 200, "reading health: {body}");
-    body["cells"].as_array().cloned().unwrap_or_default()
+    body["rows"].as_array().cloned().unwrap_or_default()
 }
 
 fn cell_for<'a>(cells: &'a [Value], capability: &str) -> Option<&'a Value> {

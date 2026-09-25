@@ -33,7 +33,7 @@ def case(index, slug, description, runs, expect):
 # --- the four authority values -------------------------------------------
 case(1, "cairn_deterministic_check",
      "A deterministic check this machine ran over evidence Cairn collected. "
-     "The only authority a task criterion or a cross-project promotion accepts.",
+     "The only authority a cross-project promotion accepts.",
      [{"result": "verified", "collector": "cairn", "verifier": "configuration"}],
      {"authority": "cairn", "satisfies_deterministic_requirement": True,
       "criterion_may_verify": True, "promotion_eligible": True})
@@ -49,7 +49,7 @@ case(2, "attested_by_an_agent",
 case(3, "imported_from_a_peer_that_checked_it",
      "A peer established this deterministically. It is reported as verified "
      "elsewhere, never as verified here, and it does not count toward local "
-     "readiness (FR-368).",
+     "local authority (FR-368).",
      [],
      {"imported_from": "cairn", "authority": "remote_cairn",
       "satisfies_deterministic_requirement": False,
