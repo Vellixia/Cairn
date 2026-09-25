@@ -20,7 +20,7 @@ if [[ "${CAIRN_ISOLATED_PREPARE:-1}" == "1" ]]; then
     -v "$ROOT":/work -w /work \
     -v cairn-linux-target:/tmp/target-linux \
     -v cairn-linux-registry:/usr/local/cargo/registry \
-    -e CARGO_TARGET_DIR=/tmp/target-linux \
+    -e CARGO_TARGET_DIR=/tmp/target-linux/build \
     -e RUSTUP_TOOLCHAIN=1.97.1 \
     "$IMAGE" \
     bash -lc '
@@ -37,7 +37,7 @@ docker run --rm --network none \
   -v "$ROOT":/work -w /work \
   -v cairn-linux-target:/tmp/target-linux \
   -v cairn-linux-registry:/usr/local/cargo/registry \
-  -e CARGO_TARGET_DIR=/tmp/target-linux \
+  -e CARGO_TARGET_DIR=/tmp/target-linux/build \
   -e RUSTUP_TOOLCHAIN=1.97.1 \
   "$IMAGE" \
   bash -lc '
