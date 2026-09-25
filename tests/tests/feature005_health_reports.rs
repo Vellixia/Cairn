@@ -64,11 +64,11 @@ fn an_observed_capability_is_accepted_and_read_back() {
     );
     let (body, code) = get_json_status_bearer(
         &pg.server.base,
-        &format!("/api/projects/{}/health", pg.project),
+        &format!("/api/projects/{}/integration-health", pg.project),
         &pg.owner.token,
     );
     assert_eq!(code, 200, "{body}");
-    let cells = body["cells"].as_array().expect("cells");
+    let cells = body["rows"].as_array().expect("rows");
     assert_eq!(cells.len(), 1);
     assert_eq!(cells[0]["status"], "supported");
     assert_eq!(cells[0]["evidence_kind"], "observation");
