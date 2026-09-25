@@ -645,12 +645,6 @@ pub fn routes() -> Router<AppState> {
             web_operations::LOGICAL_IMPORT,
             crate::transfer::logical_import,
         )
-        // Migration and cutover (`contracts/migration-cutover.md`). The first
-        // four are the client's own migration path (§4-§9) and stay reachable
-        // whatever `server_authority.mode` says — a store migrating *after*
-        // cutover is exactly what FR-876d requires. The fifth is the server's
-        // one-way switch and takes `AdminUser` for the same reason ratify and
-        // retire do: this is not a tool action an agent has, ever.
         // Read API for the web UI
         .web_operation(web_operations::PROJECT, project_overview)
         .web_operation(web_operations::SESSIONS, project_sessions)
