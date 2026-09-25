@@ -226,3 +226,24 @@ test("settings exposes password and member controls without user enumeration", a
   await expect(page.getByLabel("Member user ID")).toBeVisible();
   await expect(page.getByTestId("account-table")).toHaveCount(0);
 });
+
+test("administrator can create a setup-ready project from Settings", async ({ page }) => {
+  await signIn(page, admin);
+  await page.goto("/settings");
+
+  const name = `browser-project-${Date.now()}`;
+  const remote = `github.com/example/${name}`;
+  const created = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === "/api/projects" &&
+    response.request().method() === "POST" &&
+    response.status() === 200,
+  );
+  await page.getByLabel("Project name").fill(name);
+  await page.getByLabel("Repository remote").fill(remote);
+  await page.getByRole("button", { name: "Create project" }).click();
+  const project = (await (await created).json()) as { id: string };
+
+  await page.goto(`/projects/${project.id}`);
+  await expect(page.getByRole("heading", { name })).toBeVisible();
+  await expect(page.getByText(remote)).toBeVisible();
+});

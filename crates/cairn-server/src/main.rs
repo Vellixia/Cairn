@@ -261,7 +261,13 @@ async fn main() -> anyhow::Result<()> {
             .allow_origin(origin.parse::<axum::http::HeaderValue>()?)
             .allow_credentials(true)
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]),
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ]),
         None => CorsLayer::new()
             .allow_origin(Any)
             .allow_headers(Any)

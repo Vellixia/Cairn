@@ -223,7 +223,7 @@ export interface MemorySearch {
   state?: string;
   limit?: number;
 }
-export interface CreateProjectBody { name: string; repository_remote?: string; }
+export interface CreateProjectBody { name: string; repository_remote: string; }
 export interface CreateMemoryBody { type: KnowledgeType; scope: MemoryScope; content: string; scope_key?: string; topic_key?: string; value_key?: string; session_id?: string; command_id?: string; }
 export interface CreatePersonalKnowledgeBody { type: KnowledgeType; content: string; topic_key?: string; value_key?: string; command_id?: string; }
 export interface ProposeTeamKnowledgeBody { type: KnowledgeType; content: string; topic_key?: string; value_key?: string; command_id?: string; }

@@ -1,6 +1,6 @@
 # Cairn product requirements — published alpha.8
 
-**Updated:** 2026-09-26. **Product baseline:** published [v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), tagged at `4cbb2c6` on 2026-09-25. **Checkout warning:** this workspace's `main` is still `3741719` with alpha.7 source. This document describes the published alpha.8 product; it does not claim this checkout runs alpha.8. [Roadmap](ROADMAP.md) tracks the mismatch and future work.
+**Updated:** 2026-09-26. **Product baseline:** published [v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), tagged at `4cbb2c6` on 2026-09-25. **Source status:** this branch aligns development source with alpha.8 and adds first-use deployment fixes; released-artifact browser and upgrade proof remain open. [Roadmap](ROADMAP.md) tracks source, release, and operational validation separately.
 
 Source of truth for the current product: the tagged [README](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/README.md), [architecture](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/architecture.md), [integration ownership](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/integrations.md), [testing](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/testing.md), code, and release notes. The Feature 001–005 specifications in this older checkout describe historical delivery; alpha.8 removed them from its tagged tree. They are useful history, not a current interface contract.
 

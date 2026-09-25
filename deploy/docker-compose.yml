@@ -42,8 +42,8 @@ services:
       CAIRN_SERVER_ADDR: 0.0.0.0:8080
       CAIRN_WEB_ORIGIN: ${CAIRN_WEB_ORIGIN:-http://127.0.0.1:3100}
       # The operator's account, defined here rather than registered through the
-      # UI. Blank means seed nothing; the server re-applies the password on
-      # every start, so rotating it is an edit and a restart.
+      # UI. Blank means seed nothing. These values bootstrap a missing admin;
+      # an existing admin keeps its password after restart.
       CAIRN_ADMIN_EMAIL: ${CAIRN_ADMIN_EMAIL:-}
       CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:-}
       CAIRN_ADMIN_DISPLAY_NAME: ${CAIRN_ADMIN_DISPLAY_NAME:-Admin}
@@ -58,13 +58,9 @@ services:
     ports:
       - "${CAIRN_WEB_PORT:-3100}:3100"
     environment:
-      # Where the browser should reach the API. Leave it empty behind a reverse
-      # proxy that serves the UI at `/` and the API at `/api` on one hostname —
-      # the UI then calls the same origin it was loaded from, which is the
-      # arrangement to prefer. Set it only for a split-origin deployment, for
-      # example https://cairn-api.example.com. Read on every request, so
-      # changing it is an edit and a restart, never a rebuild.
-      CAIRN_API_ORIGIN: ${CAIRN_API_ORIGIN:-}
+      # The browser reaches the separately published API in this example.
+      # Reverse-proxy deployments may leave this empty for same-origin `/api`.
+      CAIRN_API_ORIGIN: ${CAIRN_API_ORIGIN:-http://127.0.0.1:8080}
 
 volumes:
   cairn-postgres:

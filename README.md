@@ -59,7 +59,8 @@ longer match recorded ownership are reported as conflicts and are not overwritte
 See [integration ownership](docs/integrations.md).
 
 Repositories must have a remote that matches an existing project. Administrators
-create accounts and projects, and grant membership, in web before machine setup.
+create accounts and setup-ready projects with that exact remote, then grant
+membership, in web before machine setup.
 
 ## Agent interface
 

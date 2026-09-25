@@ -1,6 +1,6 @@
 # Cairn delivery history and feature roadmap
 
-**Updated:** 2026-09-26. **Latest published version:** [v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), released 2026-09-25. **This checkout:** `main` at `3741719`, still alpha.7; alpha.8 tag is `4cbb2c6` on `codex/cairn-v1-evidence-consolidation`. The [PRD](PRD.md) describes the published alpha.8 product.
+**Updated:** 2026-09-26. **Latest published version:** [v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), released 2026-09-25. **This branch:** alpha.8 source is integrated from tag `4cbb2c6`; onboarding fixes below are successor work pending merge/release. The [PRD](PRD.md) describes the alpha.8 product contract.
 
 **How to read this checklist:** `[x]` under history means shipped or recorded by the cited tag, not that this alpha.7 checkout contains it or that every older requirement still applies. `[ ]` means work proposed or evidence still needed. Source, release, and operational validation are separate states. No dates or owners are committed for future items.
 
@@ -25,7 +25,7 @@
 | Question | Current answer | Evidence |
 | --- | --- | --- |
 | Latest public release? | `v0.1.0-alpha.8`, published 2026-09-25 | [GitHub release](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8) |
-| What does this checkout build? | `0.1.0-alpha.7` on `main` at `3741719` | [local Cargo.toml](../Cargo.toml); checkout commit |
+| What does this branch build? | `0.1.0-alpha.8` from the alpha.8 integration branch | [local Cargo.toml](../Cargo.toml); checkout commit |
 | Where is alpha.8 source? | Signed tag `v0.1.0-alpha.8` at `4cbb2c6`; local/remote `codex/cairn-v1-evidence-consolidation` branch | Git refs and [tagged source](https://github.com/Vellixia/Cairn/tree/v0.1.0-alpha.8) |
 | Is alpha.8 the old 001–005 feature set plus one version? | No. It removes tasks, one MCP tool, broad CLI, local canonical knowledge, and many web routes; it keeps and relocates the remaining behavior. | [Release notes](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), [architecture](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/architecture.md) |
 | Did this document run alpha.8 locally? | No. Status below is tag/source/release evidence, with concrete unverified checks listed separately. | This documentation pass |
@@ -34,13 +34,13 @@
 
 | Area | State on published alpha.8 | Remaining proof or gap |
 | --- | --- | --- |
-| Release/source | Published tag and artifacts; local `main` is behind | Choose canonical development branch and align checkout/documentation. |
-| Agent setup | One-command implementation shipped | Settings-created projects lack the remote setup needs; full web-to-agent onboarding cannot complete as written. |
+| Release/source | Published tag; alpha.8 source now aligned on this branch | Merge branch, then publish successor artifacts after live gates. |
+| Agent setup | One-command implementation shipped; Settings now collects required remote in this branch | Live browser-to-setup proof still pending. |
 | Capture and delivery | Safe event path, spools, retries, receipts, and server consolidation shipped | Rehearse failure/restart cases with published artifacts and varied agent work. |
 | Knowledge and governance | Server-owned project/personal/team memory, evidence, verification, and ratification shipped | Measure usefulness across diverse work; retain privacy/authorization checks. |
-| Browser | Consolidated destinations shipped | First-page memory limit; default Compose browser API routing; split-origin PATCH failure. |
+| Browser | Consolidated destinations shipped; default Compose API origin and PATCH CORS fixed in this branch | Live browser proof; first-page memory limit remains. |
 | Migration | Backup, conservation, import, and task archive code shipped | Record representative alpha.7 → alpha.8 migration and restore outcome. |
-| Release verification | CI gates defined; alpha.8 release published | This document pass did not rerun alpha.8 test or live deployment gates. |
+| Release verification | CI gates defined; source/build/contract checks pass on this branch | Docker/live browser, migration, and published-artifact gates remain. |
 
 ## Past releases: delivered work
 
@@ -100,10 +100,10 @@ These items were checked against the alpha.8 tag, not copied blindly from the al
 
 | Priority | State | Evidence | Completion check |
 | --- | --- | --- | --- |
-| P0 | Published alpha.8 and `main` alpha.7 disagree | This checkout `Cargo.toml` says alpha.7; GitHub release and tag say alpha.8. | Decide canonical branch, integrate published V1 source without overwriting this dirty worktree, and make source/docs/version provenance agree. |
-| P0 | Example environment still pins alpha.4 | [Tagged `deploy/.env.example`](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/deploy/.env.example) says alpha.4 while tagged Compose fallback and packages say alpha.8. | Fix template; fresh documented deployment pulls matching alpha.8 server/web images. |
-| P1 | Web project creation cannot make a setup-ready project | Tagged Settings sends only project name; server stores absent `repository_remote` as null; daemon setup requires exact remote match. [Settings](<https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/app/(app)/settings/page.tsx>), [server API](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-server/src/api.rs). | Web can register a normalized remote under existing authorization; account → project → membership → token → setup succeeds end to end. Until then, API provisioning with `repository_remote` is required. |
-| P1 | Example Compose cannot route default browser API calls | Tagged Compose exposes web and API on separate ports, `CAIRN_API_ORIGIN` defaults empty, and Next has no `/api` rewrite. [Compose](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/deploy/docker-compose.yml), [web config](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/next.config.mjs). | Ship a working same-origin proxy example or explicit split-origin configuration; verify fresh browser login against example stack. |
+| P0 | Published alpha.8 and old `main` disagreed | Alpha.8 source is integrated on this branch; current `main` remains unchanged until PR merge. | Merge branch, then keep source/docs/version provenance aligned. |
+| P1 | Example environment pinned alpha.4 | Branch template now pins alpha.8. | Release a corrected artifact/template and verify fresh documented deployment. |
+| P1 | Web project creation could not make setup-ready project | Branch UI/API now require and store exact `repository_remote`. | Browser account → project → membership → token → setup succeeds end to end. |
+| P1 | Example Compose could not route default browser API calls | Branch default points browser to local published API; split-origin PATCH is allowed. | Fresh browser login/project read and admin edit pass against example stack. |
 | P1 | Environment password-rotation guidance is wrong | Tagged template says restart reapplies admin password, but server returns when any active admin already exists. [Template](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/deploy/.env.example), [auth](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-server/src/auth.rs). | Document environment values as bootstrap/recovery inputs; rotate existing password in web. Restart test proves changed password persists. |
 | P1 | Split-origin admin edits blocked by CORS | Tagged server allows GET/POST/DELETE/OPTIONS but admin edit route and web client use PATCH. [Server main](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-server/src/main.rs) and [web client](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/lib/api.ts). | Browser preflight and PATCH succeed for exact allowed origin; unrelated origin remains refused. |
 | P1 | Deployment transport boundary needs safe default | Tagged Compose publishes API port on all host interfaces; default web origin is HTTP. [Compose](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/deploy/docker-compose.yml). | Host-proxy example binds API to loopback or keeps it private; remote plaintext path fails; HTTPS cookie attributes match deployment. Configuration risk, not a proven auth bypass. |

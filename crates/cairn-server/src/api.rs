@@ -1835,8 +1835,7 @@ fn parse_optional<T: std::str::FromStr>(value: Option<&str>, field: &str) -> Api
 #[derive(Deserialize)]
 struct CreateProjectBody {
     name: String,
-    #[serde(default)]
-    repository_remote: Option<String>,
+    repository_remote: String,
 }
 
 async fn create_project(
@@ -1844,12 +1843,20 @@ async fn create_project(
     user: SettledUser,
     Json(body): Json<CreateProjectBody>,
 ) -> ApiResult<Json<Value>> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::invalid("project name cannot be empty"));
+    }
+    let repository_remote = body.repository_remote.trim();
+    if repository_remote.is_empty() {
+        return Err(ApiError::invalid("repository_remote cannot be empty"));
+    }
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
     sqlx::query("INSERT INTO projects (id, name, repository_remote) VALUES ($1, $2, $3)")
         .bind(id)
-        .bind(&body.name)
-        .bind(&body.repository_remote)
+        .bind(name)
+        .bind(repository_remote)
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)")
@@ -1858,7 +1865,7 @@ async fn create_project(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(json!({ "id": id, "name": body.name })))
+    Ok(Json(json!({ "id": id, "name": name })))
 }
 
 async fn list_projects(
