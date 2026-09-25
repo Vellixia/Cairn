@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 pub fn uuid(row: &SqliteRow, col: &str) -> Result<Uuid> {
     let raw: String = row.try_get(col)?;
-    Uuid::parse_str(&raw).map_err(|e| StoreError::Corrupt(format!("{col}: {e}")))
+    Uuid::parse_str(&raw).map_err(|e| StoreError::Corrupt(format!("{col} `{raw}`: {e}")))
 }
 
 pub fn opt_uuid(row: &SqliteRow, col: &str) -> Result<Option<Uuid>> {
@@ -24,7 +24,7 @@ pub fn opt_uuid(row: &SqliteRow, col: &str) -> Result<Option<Uuid>> {
         Some(s) if s.is_empty() => Ok(None),
         Some(s) => Uuid::parse_str(&s)
             .map(Some)
-            .map_err(|e| StoreError::Corrupt(format!("{col}: {e}"))),
+            .map_err(|e| StoreError::Corrupt(format!("{col} `{s}`: {e}"))),
     }
 }
 
