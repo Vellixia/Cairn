@@ -623,7 +623,9 @@ fn an_old_observation_keeps_its_timestamp_and_the_server_offers_no_verdict_on_it
     );
 
     let expected = chrono::DateTime::parse_from_rfc3339(long_ago).expect("a fixed timestamp");
-    for (label, rows) in [("integration-health", integration_rows(&pg))] {
+    {
+        let label = "integration-health";
+        let rows = integration_rows(&pg);
         let row = one_row(&rows, "claude_code", "event:file_changed");
         // Still `supported`. The row says "worked as of `observed_at`", and the
         // view is what turns that into "worked" rather than "working"; a server
@@ -940,7 +942,9 @@ fn two_accounts_behind_one_machine_label_stay_attributable() {
         "two accounts' observations were merged in the table"
     );
 
-    for (label, rows) in [("integration-health", integration_rows(&pg))] {
+    {
+        let label = "integration-health";
+        let rows = integration_rows(&pg);
         let cells = rows_for(&rows, "claude_code", capability);
         assert_eq!(
             cells.len(),
