@@ -84,24 +84,6 @@
         "repairing silently would be undetectable downstream."
       ]
     },
-    "legacy_keys": {
-      "criterion": "SC-746 (un-normalized legacy keys produce no second record)",
-      "requires": "seeded from a real v7-era store, not a v8 store containing an old-looking string",
-      "must_cover": [
-        "space-separated legacy value key",
-        "hyphen-separated legacy value key",
-        "slash-separated legacy value key",
-        "mixed case",
-        "a genuinely different value that must still conflict"
-      ],
-      "location": "tests/tests/feature005_key_compat.rs",
-      "status": "present",
-      "notes": [
-        "The fixture writes through the v7 schema and then migrates, so the row",
-        "was written by code that predates the folding. A v8 fixture holding an",
-        "old-looking string would pass without proving anything."
-      ]
-    },
     "reference_identity": {
       "criterion": "SC-766, SC-767",
       "requires": "one UUID shared across project, personal, team and pattern, on every surface carrying a reference",
@@ -198,28 +180,6 @@
         "Moved by T044. T031-T033 established the claim machinery's own crash",
         "cases; the twenty pre-registered points SC-739 asks for belong with the",
         "pass they interrupt, which is where they now are."
-      ]
-    },
-    "migration_stores": {
-      "criterion": "SC-746, FR-861-FR-878",
-      "requires": "populated v7 stores covering every retained-local reason and every blocked-row report",
-      "must_cover": [
-        "local_only",
-        "server_refused",
-        "possession_indeterminate",
-        "owner_unclaimed",
-        "no_recorded_author",
-        "author_mismatch",
-        "capability_blocked"
-      ],
-      "location": "tests/src/feature005.rs::LegacyV7",
-      "status": "present",
-      "notes": [
-        "Completed by T138-T155. The fixture runs the shipped migrations to v7,",
-        "populates the store, and swaps it under a stopped daemon so the current",
-        "build migrates it in place -- a real prior schema rather than a hand-written",
-        "approximation of one. Driven by tests/tests/feature005_migration.rs,",
-        "feature005_pattern_migration.rs and feature005_migration_restart.rs."
       ]
     },
     "sc701a_holdout": {

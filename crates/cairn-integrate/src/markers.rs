@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn the_block_is_located_by_the_literal_prefix_not_by_the_word_cairn() {
         // FR-139: a developer's prose mentioning Cairn is not a Cairn block.
-        let text = "Run `cairn connect` first. Cairn is memory. cairn hook SessionStart\n";
+        let text = "Run `cairn setup` first. Cairn is memory. cairn hook SessionStart\n";
         assert_eq!(find(text, CONTRACT_ID), Ok(None));
     }
 

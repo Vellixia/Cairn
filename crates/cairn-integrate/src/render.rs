@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn the_contract_states_every_required_rule() {
-        // FR-124: the nine rules, by subject.
+        // Required rules, by subject.
         let c = Contract::canonical();
         let ids: Vec<&str> = c.rules.iter().map(|r| r.id.as_str()).collect();
         for required in [
@@ -176,7 +176,6 @@ mod tests {
             "evidence",
             "secrets",
             "lifecycle",
-            "task",
             "depth",
             // Feature 003's four obligations (FR-498). Each is a thing an
             // agent must *do*, not a thing it must know, which is why they
@@ -191,7 +190,7 @@ mod tests {
                 "contract omits the {required} rule"
             );
         }
-        assert_eq!(c.rules.len(), 13);
+        assert_eq!(c.rules.len(), 12);
     }
 
     /// Both renderings stay inside the bound (FR-125, Feature 002 FR-129).

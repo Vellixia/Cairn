@@ -1,0 +1,8 @@
+-- Forward repair for databases which recorded version 13 before the removed
+-- feature artifact became part of the manifest. Never edit 0013: applied
+-- migration history is immutable.
+--
+-- SQLite cannot conditionally add a column. `migrate::finish(14)` inspects
+-- the actual v13 shape in this migration transaction, adds only missing
+-- columns, then normalizes dispositions. This supports both historical v13
+-- shapes: restored pre-artifact and the shipped artifact-bearing shape.

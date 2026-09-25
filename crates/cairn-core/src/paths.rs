@@ -27,8 +27,13 @@ pub fn home() -> PathBuf {
         .join("cairn")
 }
 
-/// The local SQLite database (D2).
+/// V1's thin local edge database.
 pub fn db_path() -> PathBuf {
+    home().join("edge.sqlite3")
+}
+
+/// Pre-V1 SQLite database, retained unchanged during setup migration.
+pub fn legacy_db_path() -> PathBuf {
     home().join("cairn.sqlite3")
 }
 
@@ -253,7 +258,14 @@ mod tests {
         let prev = std::env::var_os("CAIRN_HOME");
         std::env::set_var("CAIRN_HOME", "/tmp/cairn-test-home");
         assert_eq!(home(), PathBuf::from("/tmp/cairn-test-home"));
-        assert!(db_path().starts_with("/tmp/cairn-test-home"));
+        assert_eq!(
+            db_path(),
+            PathBuf::from("/tmp/cairn-test-home/edge.sqlite3")
+        );
+        assert_eq!(
+            legacy_db_path(),
+            PathBuf::from("/tmp/cairn-test-home/cairn.sqlite3")
+        );
         // A path the platform allows but `env::var` cannot return: read as a
         // `String` this looks exactly like "unset", and `home()` would hand back
         // the real platform directory while the caller believed it had been

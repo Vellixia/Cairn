@@ -2,7 +2,7 @@
 
 Two groups:
 
-  * `staleness/` — every divergence class (branch, commit, task, files) alone
+  * `staleness/` — every divergence class (branch, commit, files) alone
     and in combination, each naming the classification it must produce and
     whether the recorded next action may be presented as the action to take. It
     may not, ever, unless the checkpoint is `current` (FR-434, SC-311).
@@ -24,7 +24,6 @@ EXTERNAL.mkdir(parents=True, exist_ok=True)
 BRANCH = "main"
 COMMIT = "abc123def456abc123def456abc123def456abcd"
 MOVED = "def456abc123def456abc123def456abc123defa"
-TASK = "01a00000-0000-7000-8000-000000000001"
 DIGEST_A = "1111111111111111111111111111111111111111111111111111111111111111"
 DIGEST_B = "2222222222222222222222222222222222222222222222222222222222222222"
 
@@ -50,12 +49,10 @@ def case(directory, i, slug, description, assumed, current, expect):
     )
 
 
-def assumed(branch=BRANCH, commit=COMMIT, task=TASK, digest="d0", paths=None):
+def assumed(branch=BRANCH, commit=COMMIT, paths=None):
     return {
         "branch": branch,
         "commit": commit,
-        "task_id": task,
-        "task_state_digest": digest,
         "path_fingerprints": paths if paths is not None else [fingerprint("src/retry.rs")],
     }
 
@@ -63,17 +60,13 @@ def assumed(branch=BRANCH, commit=COMMIT, task=TASK, digest="d0", paths=None):
 def current(
     branch=BRANCH,
     commit=COMMIT,
-    digest="d0",
     paths=None,
-    task_exists=True,
     worktree_exists=True,
 ):
     return {
         "branch": branch,
         "commit": commit,
-        "task_exists": task_exists,
         "worktree_exists": worktree_exists,
-        "task_state_digest": digest,
         "path_fingerprints": paths if paths is not None else [fingerprint("src/retry.rs")],
     }
 
@@ -87,7 +80,7 @@ n = 0
 n += 1
 case(
     ROOT, n, "nothing_moved",
-    "Branch, commit, task state and every relevant path are as recorded. This is "
+    "Branch, commit and every relevant path are as recorded. This is "
     "the only case in which the recorded next action may be presented as the "
     "action to take.",
     assumed(), current(),
@@ -110,16 +103,6 @@ case(
     "developer - and the recorded action may already be done.",
     assumed(), current(commit=MOVED),
     {"state": "diverged", "divergences": ["commit"], "next_action_is_live": False},
-)
-
-n += 1
-case(
-    ROOT, n, "task_alone",
-    "The task state digest differs, so the task advanced. Decided by the derived "
-    "digest and never by a counter, so it means the same thing whichever machine "
-    "moved it (D80).",
-    assumed(), current(digest="d1"),
-    {"state": "diverged", "divergences": ["task"], "next_action_is_live": False},
 )
 
 n += 1
@@ -147,28 +130,19 @@ case(
 
 n += 1
 case(
-    ROOT, n, "branch_and_task",
-    "A different branch and an advanced task.",
-    assumed(), current(branch="feature/retry", digest="d1"),
-    {"state": "diverged", "divergences": ["branch", "task"], "next_action_is_live": False},
-)
-
-n += 1
-case(
     ROOT, n, "every_class_at_once",
-    "Everything moved. All four classes are reported, and the recorded action is "
+    "Everything moved. All three classes are reported, and the recorded action is "
     "still delivered - labelled - because throwing it away loses information "
     "while presenting it as the instruction is the failure mode (US6 #2).",
     assumed(),
     current(
         branch="feature/retry",
         commit=MOVED,
-        digest="d1",
         paths=[fingerprint("src/retry.rs", value=DIGEST_B)],
     ),
     {
         "state": "diverged",
-        "divergences": ["branch", "commit", "task", "files"],
+        "divergences": ["branch", "commit", "files"],
         "next_action_is_live": False,
     },
 )
@@ -176,15 +150,6 @@ case(
 # ---------------------------------------------------------------------------
 # Unresolvable — partial continuity is a result, not a failure.
 # ---------------------------------------------------------------------------
-
-n += 1
-case(
-    ROOT, n, "the_task_no_longer_exists",
-    "The assumed task is gone. Every continuity field that does not depend on it "
-    "is still delivered; the checkpoint is unresolvable, not an error (FR-435).",
-    assumed(), current(task_exists=False),
-    {"state": "unresolvable", "next_action_is_live": False},
-)
 
 n += 1
 case(

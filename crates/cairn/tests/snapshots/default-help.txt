@@ -1,0 +1,11 @@
+Persistent, project-aware memory for AI coding agents
+
+Usage: cairn [OPTIONS] <COMMAND>
+
+Commands:
+  setup  Set up this repository for Cairn
+
+Options:
+      --json     Emit the stable JSON envelope instead of human output
+  -h, --help     Print help
+  -V, --version  Print version

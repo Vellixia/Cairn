@@ -1,5 +1,4 @@
-≥10 cases: the same topic at different scope precedence ranks — project against task, project
-against branch.
+≥10 cases: the same topic at different scope precedence ranks — project against branch or session.
 
 Rule: **no** conflict is declared. The narrower memory applies in its own context by existing scope
 precedence and the broader one is presented as the answer it narrows (FR-333, FR-385). A case here

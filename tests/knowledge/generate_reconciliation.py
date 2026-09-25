@@ -335,8 +335,7 @@ def build():
         })
 
     # -- conflict/scope_exception -------------------------------------------
-    SCOPES = [("task", "T1"), ("branch", "main"), ("task", "T2"), ("branch", "feature/x"),
-              ("session", "S1")]
+    SCOPES = [("branch", "main"), ("session", "S1")]
     i = 0
     for topic, value, broad, narrow, narrow_value in PAIRS[:6]:
         for scope, key in SCOPES[:2]:
@@ -362,8 +361,6 @@ def build():
     DISJOINT = [
         ("branch", "main", "branch", "feature/graphql"),
         ("branch", "main", "branch", "release/0.5"),
-        ("task", "T1", "task", "T2"),
-        ("task", "T3", "task", "T4"),
         ("session", "S1", "session", "S2"),
         ("branch", "feature/a", "branch", "feature/b"),
     ]

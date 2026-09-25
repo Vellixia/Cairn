@@ -2,23 +2,483 @@
 
 use crate::auth::{self, AdminUser, CurrentUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
+use crate::global::{ratify_team, retire_team};
 use crate::AppState;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::handler::Handler;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, on, post};
 use axum::{Json, Router};
-use cairn_core::domain::KnowledgeDomain;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::Row;
 use std::str::FromStr;
 use uuid::Uuid;
+
+/// Web client's authoritative operation catalogue. Router uses these paths;
+/// contract tests use full entries, so browser method/path/type drift is one
+/// failed check rather than three independent conventions.
+pub(crate) mod web_operations {
+    use axum::routing::MethodFilter;
+
+    #[derive(Clone, Copy)]
+    pub(crate) struct WebOperation {
+        pub name: &'static str,
+        pub method: &'static str,
+        pub path: &'static str,
+        pub request: &'static str,
+        pub response: &'static str,
+    }
+
+    impl WebOperation {
+        /// Convert catalogue method into Axum's actual route filter. Keeping
+        /// this conversion at binding point makes a registry method change
+        /// change live router behavior, rather than merely test metadata.
+        pub(crate) fn method_filter(self) -> MethodFilter {
+            match self.method {
+                "GET" => MethodFilter::GET,
+                "POST" => MethodFilter::POST,
+                "PATCH" => MethodFilter::PATCH,
+                "DELETE" => MethodFilter::DELETE,
+                _ => panic!("unsupported web operation method"),
+            }
+        }
+    }
+
+    macro_rules! operation {
+        ($name:ident, $method:literal, $path:literal, $_legacy_handler:literal, $request:literal, $response:literal) => {
+            pub(crate) const $name: WebOperation = WebOperation {
+                name: stringify!($name),
+                method: $method,
+                path: $path,
+                request: $request,
+                response: $response,
+            };
+        };
+    }
+
+    operation!(
+        VERSION,
+        "GET",
+        "/api/version",
+        "version",
+        "none",
+        "VersionInfo"
+    );
+    operation!(ME, "GET", "/api/auth/me", "me", "none", "User");
+    operation!(
+        LOGIN,
+        "POST",
+        "/api/auth/login",
+        "login",
+        "LoginBody",
+        "LoginResponse"
+    );
+    operation!(
+        LOGOUT,
+        "POST",
+        "/api/auth/logout",
+        "logout",
+        "none",
+        "OkResponse"
+    );
+    operation!(
+        TOKENS,
+        "GET",
+        "/api/tokens",
+        "list_tokens",
+        "none",
+        "TokensResponse"
+    );
+    operation!(
+        CREATE_TOKEN,
+        "POST",
+        "/api/tokens",
+        "create_token",
+        "TokenBody",
+        "CreatedToken"
+    );
+    operation!(
+        REVOKE_TOKEN,
+        "DELETE",
+        "/api/tokens/{id}",
+        "revoke_token",
+        "none",
+        "RevokedResponse"
+    );
+    operation!(
+        PROJECTS,
+        "GET",
+        "/api/projects",
+        "list_projects",
+        "none",
+        "ProjectsResponse"
+    );
+    operation!(
+        CREATE_PROJECT,
+        "POST",
+        "/api/projects",
+        "create_project",
+        "CreateProjectBody",
+        "CreatedProject"
+    );
+    operation!(
+        PROJECT,
+        "GET",
+        "/api/projects/{id}",
+        "project_overview",
+        "none",
+        "ProjectOverview"
+    );
+    operation!(
+        SESSIONS,
+        "GET",
+        "/api/projects/{id}/sessions",
+        "project_sessions",
+        "none",
+        "SessionsResponse"
+    );
+    operation!(
+        HANDOFF,
+        "GET",
+        "/api/sessions/{id}/handoff",
+        "session_handoff",
+        "none",
+        "HandoffResponse"
+    );
+    operation!(
+        MEMORIES,
+        "GET",
+        "/api/projects/{id}/memories",
+        "project_memories",
+        "MemorySearchQuery",
+        "MemoryPage"
+    );
+    operation!(
+        CREATE_MEMORY,
+        "POST",
+        "/api/projects/{id}/memories",
+        "create_memory",
+        "CreateMemoryBody",
+        "CreatedMemory"
+    );
+    operation!(
+        DELETE_MEMORY,
+        "DELETE",
+        "/api/memories/{id}",
+        "delete_memory",
+        "none",
+        "DeletedResponse"
+    );
+    operation!(
+        FUNNEL,
+        "GET",
+        "/api/projects/{id}/funnel",
+        "project_funnel",
+        "FunnelQuery",
+        "Funnel"
+    );
+    operation!(
+        ACTIVITY,
+        "GET",
+        "/api/projects/{id}/activity",
+        "project_activity",
+        "ActivityQuery",
+        "ActivityPage"
+    );
+    operation!(
+        CONSOLIDATION_RUNS,
+        "GET",
+        "/api/projects/{id}/consolidation-runs",
+        "project_consolidation_runs",
+        "PageQuery",
+        "ConsolidationRunPage"
+    );
+    operation!(
+        MEMORY,
+        "GET",
+        "/api/memories/{id}",
+        "memory_detail",
+        "none",
+        "MemoryDetailResponse"
+    );
+    operation!(
+        RETRIEVAL_TRACES,
+        "GET",
+        "/api/projects/{id}/retrieval-traces",
+        "project_retrieval_traces",
+        "TraceListQuery",
+        "TracePage"
+    );
+    operation!(
+        RETRIEVAL_TRACE,
+        "GET",
+        "/api/retrieval-traces/{trace_id}",
+        "retrieval_trace",
+        "none",
+        "TraceDetail"
+    );
+    operation!(
+        INTEGRATION_HEALTH,
+        "GET",
+        "/api/projects/{id}/integration-health",
+        "project_integration_health",
+        "none",
+        "HealthRowsResponse"
+    );
+    operation!(
+        PERSONAL_KNOWLEDGE,
+        "GET",
+        "/api/personal/knowledge",
+        "personal_knowledge_view",
+        "PageQuery",
+        "PersonalKnowledgePage"
+    );
+    operation!(
+        CREATE_PERSONAL_KNOWLEDGE,
+        "POST",
+        "/api/personal/knowledge",
+        "create_personal",
+        "CreatePersonalKnowledgeBody",
+        "CreatedKnowledge"
+    );
+    operation!(
+        PATTERNS,
+        "GET",
+        "/api/patterns",
+        "list_patterns",
+        "PageQuery",
+        "PatternList"
+    );
+    operation!(
+        TEAM_KNOWLEDGE,
+        "GET",
+        "/api/team/knowledge",
+        "team_knowledge_view",
+        "PageQuery",
+        "TeamKnowledgePage"
+    );
+    operation!(
+        PROPOSE_TEAM_KNOWLEDGE,
+        "POST",
+        "/api/team/knowledge",
+        "propose_team",
+        "ProposeTeamKnowledgeBody",
+        "TeamProposal"
+    );
+    operation!(
+        PROMOTE_PATTERN,
+        "POST",
+        "/api/patterns",
+        "promote_pattern",
+        "PromotePatternBody",
+        "PromotedPattern"
+    );
+    operation!(
+        RATIFY_TEAM,
+        "POST",
+        "/api/team/{id}/ratify",
+        "ratify_team",
+        "empty object",
+        "TeamTransition"
+    );
+    operation!(
+        RETIRE_TEAM,
+        "POST",
+        "/api/team/{id}/retire",
+        "retire_team",
+        "empty object",
+        "TeamTransition"
+    );
+    operation!(
+        PRIVACY_POLICY,
+        "GET",
+        "/api/privacy-policy",
+        "privacy_policy",
+        "none",
+        "PrivacyPolicy"
+    );
+    operation!(
+        LOGICAL_EXPORT,
+        "GET",
+        "/api/admin/logical-export",
+        "logical_export",
+        "none",
+        "LogicalBundle"
+    );
+    operation!(
+        LOGICAL_IMPORT,
+        "POST",
+        "/api/admin/logical-import",
+        "logical_import",
+        "LogicalImportBody",
+        "LogicalImportReport"
+    );
+    operation!(
+        SYSTEM_HEALTH,
+        "GET",
+        "/api/system/health",
+        "system_health",
+        "none",
+        "SystemHealth"
+    );
+    operation!(
+        CONSOLIDATION_HEALTH,
+        "GET",
+        "/api/consolidation/health",
+        "consolidation_health",
+        "none",
+        "ConsolidationHealth"
+    );
+    operation!(
+        ADMIN_USERS,
+        "GET",
+        "/api/admin/users",
+        "list_users",
+        "none",
+        "UsersResponse"
+    );
+    operation!(
+        CREATE_ADMIN_USER,
+        "POST",
+        "/api/admin/users",
+        "create_user",
+        "CreateUserBody",
+        "CreatedAccount"
+    );
+    operation!(
+        PATCH_ADMIN_USER,
+        "PATCH",
+        "/api/admin/users/{id}",
+        "patch_user",
+        "PatchUserBody",
+        "Account"
+    );
+    operation!(
+        RESET_ADMIN_USER_PASSWORD,
+        "POST",
+        "/api/admin/users/{id}/reset-password",
+        "reset_user_password",
+        "none",
+        "ResetPasswordResponse"
+    );
+
+    #[cfg(test)]
+    pub(crate) const ALL: &[WebOperation] = &[
+        VERSION,
+        ME,
+        LOGIN,
+        LOGOUT,
+        TOKENS,
+        CREATE_TOKEN,
+        REVOKE_TOKEN,
+        PROJECTS,
+        CREATE_PROJECT,
+        PROJECT,
+        SESSIONS,
+        HANDOFF,
+        MEMORIES,
+        CREATE_MEMORY,
+        DELETE_MEMORY,
+        FUNNEL,
+        ACTIVITY,
+        CONSOLIDATION_RUNS,
+        MEMORY,
+        RETRIEVAL_TRACES,
+        RETRIEVAL_TRACE,
+        INTEGRATION_HEALTH,
+        PERSONAL_KNOWLEDGE,
+        CREATE_PERSONAL_KNOWLEDGE,
+        PATTERNS,
+        TEAM_KNOWLEDGE,
+        PROPOSE_TEAM_KNOWLEDGE,
+        PROMOTE_PATTERN,
+        RATIFY_TEAM,
+        RETIRE_TEAM,
+        PRIVACY_POLICY,
+        LOGICAL_EXPORT,
+        LOGICAL_IMPORT,
+        SYSTEM_HEALTH,
+        CONSOLIDATION_HEALTH,
+        ADMIN_USERS,
+        CREATE_ADMIN_USER,
+        PATCH_ADMIN_USER,
+        RESET_ADMIN_USER_PASSWORD,
+    ];
+}
+
+/// Bind a browser operation through its catalogue method and path. The typed
+/// Axum handler is passed here, at the only binding point; authorization stays
+/// structural in its extractor signature, never a registry string assertion.
+trait WebOperationRouterExt {
+    fn web_operation<H, T>(self, operation: web_operations::WebOperation, handler: H) -> Self
+    where
+        H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+        T: 'static;
+}
+
+impl WebOperationRouterExt for Router<AppState> {
+    fn web_operation<H, T>(self, operation: web_operations::WebOperation, handler: H) -> Self
+    where
+        H: Handler<T, AppState> + Clone + Send + Sync + 'static,
+        T: 'static,
+    {
+        let _ = (operation.name, operation.request, operation.response);
+        self.route(operation.path, on(operation.method_filter(), handler))
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct OkResponse {
+    ok: bool,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct TokensResponse {
+    tokens: Vec<Value>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct RevokedResponse {
+    revoked: Uuid,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct ProjectsResponse {
+    projects: Vec<Value>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SessionsResponse {
+    sessions: Vec<Value>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct HandoffResponse {
+    handoff: Value,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct DeletedResponse {
+    deleted: Uuid,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct MemoryDetailResponse {
+    memory: Value,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct HealthRowsResponse {
+    rows: Vec<Value>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct UsersResponse {
+    users: Vec<Value>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct ResetPasswordResponse {
+    id: Uuid,
+    temporary_password: String,
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/health", get(health))
-        .route("/api/version", get(version))
+        .web_operation(web_operations::VERSION, version)
         // Authentication
         //
         // There is deliberately no registration route. Self-service account
@@ -33,54 +493,37 @@ pub fn routes() -> Router<AppState> {
         // talks to the database directly and is reachable only by whoever
         // already controls the host.
         //
-        // The route itself still answers, because removal is a compatibility
-        // event for every client built before it and `404` is the one status
-        // that cannot say so — it reads identically to a typo'd URL or a route
-        // that never existed. `410 Gone` means "this existed and was
-        // deliberately retired", and the body names the replacement so an
-        // operator holding only the response can act on it (FR-587,
-        // `compatibility.md` §1b).
-        .route("/api/auth/register", post(register_removed))
-        .route("/api/auth/login", post(login))
+        .web_operation(web_operations::LOGIN, login)
         .route("/api/auth/password", post(change_password))
         // Administration. Every route here takes `AdminUser`, so authorization
         // is the parameter list rather than a check a handler could forget.
-        .route("/api/admin/users", get(list_users).post(create_user))
-        .route("/api/admin/users/{id}", patch(patch_user))
-        .route(
-            "/api/admin/users/{id}/reset-password",
-            post(reset_user_password),
+        .web_operation(web_operations::ADMIN_USERS, list_users)
+        .web_operation(web_operations::CREATE_ADMIN_USER, create_user)
+        .web_operation(web_operations::PATCH_ADMIN_USER, patch_user)
+        .web_operation(
+            web_operations::RESET_ADMIN_USER_PASSWORD,
+            reset_user_password,
         )
-        .route("/api/auth/logout", post(logout))
-        .route("/api/auth/me", get(me))
-        .route("/api/tokens", get(list_tokens).post(create_token))
-        .route("/api/tokens/{id}", delete(revoke_token))
+        .web_operation(web_operations::LOGOUT, logout)
+        .web_operation(web_operations::ME, me)
+        .web_operation(web_operations::TOKENS, list_tokens)
+        .web_operation(web_operations::CREATE_TOKEN, create_token)
+        .web_operation(web_operations::REVOKE_TOKEN, revoke_token)
         // Linking (FR-064)
-        .route("/api/projects", get(list_projects).post(create_project))
-        .route("/api/projects/lookup", get(lookup_projects))
+        .web_operation(web_operations::PROJECTS, list_projects)
+        .web_operation(web_operations::CREATE_PROJECT, create_project)
         .route(
             "/api/projects/{id}/members",
             get(list_members).post(add_member).delete(remove_member),
         )
-        // No join route either, for the same reason. It required only that the
-        // project exist, so naming a UUID was enough to become a member of it —
-        // and `lookup` below handed those UUIDs out. A client attaching a fresh
-        // clone to a project it is already a member of does not need a route:
-        // `GET /api/projects` already reports the caller's memberships, and
-        // `cairn link --project` now checks that list instead of asking to be
-        // added to it.
-        //
-        // Same `410 Gone` treatment, for the same reason (FR-587).
-        .route("/api/projects/{id}/join", post(join_removed))
         // Sync
-        // Safe-event ingest. A boundary of its own, not `/api/sync/batch`:
+        // Safe-event ingest is its own boundary:
         // that one carries whole entities a client already decided to store,
         // this one carries typed observations the server decides about. Merged
         // rather than routed inline so its body limit stays its own — see
         // `event_ingest_route`.
         .merge(event_ingest_route())
-        .route("/api/sync/batch", post(sync_batch))
-        .route("/api/sync/changes", get(sync_changes))
+        // Server retrieval is canonical; entity sync/pull routes were removed.
         // Read-back for the two non-project domains (T101, T129).
         //
         // Two routes rather than one taking a namespace: see
@@ -89,13 +532,11 @@ pub fn routes() -> Router<AppState> {
         // and personal knowledge must have no parameter capable of naming
         // someone else's.
         //
-        // Deliberately **not** extra arrays on `/api/sync/changes`: that route
+        // Deliberately not extra arrays on a generic entity feed: such a route
         // takes a `project_id` and answers under one cursor, and each namespace
         // has to keep its own pull position and its own backoff (FR-486,
         // FR-487, FR-488). Sharing the project route would couple a personal
         // pull to a project the personal domain does not belong to.
-        .route("/api/sync/changes/personal", get(sync_personal_changes))
-        .route("/api/sync/changes/team", get(sync_team_changes))
         // The third of the same shape (T085). A pattern is a personal-domain
         // record, so this feed is owner-scoped exactly as `changes/personal`
         // is, and for the same reason a namespace parameter is not used to
@@ -106,10 +547,6 @@ pub fn routes() -> Router<AppState> {
         // already holds a pattern only learns it was forgotten from the row
         // itself, so a forgotten pattern travels once more with its
         // `forgotten_at` and no content.
-        .route(
-            "/api/sync/changes/patterns",
-            get(crate::commands::pattern_changes),
-        )
         // The team lifecycle. `AdminUser` on both handlers, so a member reaching
         // either is refused before the handler runs — an agent has no tool
         // action shaped like ratification and must not gain one through a route
@@ -118,9 +555,10 @@ pub fn routes() -> Router<AppState> {
         // replaces a shape the `memory` upsert used to allow, and the
         // difference is that a command states an intent the server acts on
         // rather than a row the server stores.
-        .route(
-            "/api/projects/{id}/memories",
-            get(project_memories).post(crate::commands::create_memory),
+        .web_operation(web_operations::MEMORIES, project_memories)
+        .web_operation(
+            web_operations::CREATE_MEMORY,
+            crate::commands::create_memory,
         )
         .route(
             "/api/projects/{id}/memory-relations",
@@ -140,9 +578,13 @@ pub fn routes() -> Router<AppState> {
         // parameter that could name an owner — see
         // `global::personal_knowledge_view` for why that is the guarantee
         // rather than a check.
-        .route(
-            "/api/personal/knowledge",
-            get(crate::global::personal_knowledge_view).post(crate::commands::create_personal),
+        .web_operation(
+            web_operations::PERSONAL_KNOWLEDGE,
+            crate::global::personal_knowledge_view,
+        )
+        .web_operation(
+            web_operations::CREATE_PERSONAL_KNOWLEDGE,
+            crate::commands::create_personal,
         )
         .route(
             "/api/personal/knowledge/{id}/forget",
@@ -153,9 +595,13 @@ pub fn routes() -> Router<AppState> {
         // its own — `web-control-plane.md` §8 is explicit that a web-specific
         // curation handler would reopen the double-ratification race the
         // existing compare-and-swap statements close (FR-889a).
-        .route(
-            "/api/team/knowledge",
-            get(crate::global::team_knowledge_view).post(crate::commands::propose_team),
+        .web_operation(
+            web_operations::TEAM_KNOWLEDGE,
+            crate::global::team_knowledge_view,
+        )
+        .web_operation(
+            web_operations::PROPOSE_TEAM_KNOWLEDGE,
+            crate::commands::propose_team,
         )
         .route(
             "/api/memories/{id}/forget",
@@ -176,9 +622,10 @@ pub fn routes() -> Router<AppState> {
         // the content through `POST /api/team/knowledge` and a human
         // administrator ratifies it — and the personal pattern stays owner-only
         // and stays in the personal domain (FR-708e, Constitution V).
-        .route(
-            "/api/patterns",
-            get(crate::commands::list_patterns).post(crate::commands::promote_pattern),
+        .web_operation(web_operations::PATTERNS, crate::commands::list_patterns)
+        .web_operation(
+            web_operations::PROMOTE_PATTERN,
+            crate::commands::promote_pattern,
         )
         .route(
             "/api/patterns/{id}/forget",
@@ -187,30 +634,23 @@ pub fn routes() -> Router<AppState> {
         // Ratify and retire already exist and are reused unchanged: each is one
         // compare-and-swap statement, `AdminUser`-gated, and re-implementing
         // them would be a second place for the transition rule to live.
-        .route("/api/team/{id}/ratify", post(ratify_team))
-        .route("/api/team/{id}/retire", post(retire_team))
-        // Migration and cutover (`contracts/migration-cutover.md`). The first
-        // four are the client's own migration path (§4-§9) and stay reachable
-        // whatever `server_authority.mode` says — a store migrating *after*
-        // cutover is exactly what FR-876d requires. The fifth is the server's
-        // one-way switch and takes `AdminUser` for the same reason ratify and
-        // retire do: this is not a tool action an agent has, ever.
-        .route("/api/migration/register", post(migration_register))
-        .route("/api/migration/drain", post(migration_drain))
-        .route("/api/migration/possession", post(migration_possession))
-        .route("/api/migration/complete", post(migration_complete))
-        .route("/api/admin/cutover", post(admin_cutover))
+        .web_operation(web_operations::RATIFY_TEAM, ratify_team)
+        .web_operation(web_operations::RETIRE_TEAM, retire_team)
+        .web_operation(web_operations::PRIVACY_POLICY, privacy_policy)
+        .web_operation(
+            web_operations::LOGICAL_EXPORT,
+            crate::transfer::logical_export,
+        )
+        .web_operation(
+            web_operations::LOGICAL_IMPORT,
+            crate::transfer::logical_import,
+        )
         // Read API for the web UI
-        .route("/api/projects/{id}", get(project_overview))
-        .route("/api/projects/{id}/tasks", get(project_tasks))
-        .route("/api/projects/{id}/sessions", get(project_sessions))
-        .route("/api/projects/{id}/sync-status", get(project_sync_status))
+        .web_operation(web_operations::PROJECT, project_overview)
+        .web_operation(web_operations::SESSIONS, project_sessions)
         // Health and the capture funnel. One write path and one read path per
         // report, shared by US5's dashboard and US6's status (T035).
-        .route(
-            "/api/projects/{id}/health",
-            get(read_health).post(report_health),
-        )
+        .route("/api/projects/{id}/health", post(report_health))
         .route("/api/projects/{id}/dispositions", post(report_dispositions))
         // The web control plane's project-scoped reads (T108, T109). Every one
         // of them calls `require_member` before its query, so a non-member is
@@ -222,19 +662,22 @@ pub fn routes() -> Router<AppState> {
         // and not a second implementation of it: the agents screen and US6's
         // status ask the same question, and the only thing that differed was the
         // envelope key each audience already depends on.
-        .route("/api/projects/{id}/funnel", get(project_funnel))
-        .route("/api/projects/{id}/activity", get(project_activity))
-        .route(
-            "/api/projects/{id}/consolidation-runs",
-            get(project_consolidation_runs),
+        .web_operation(web_operations::FUNNEL, project_funnel)
+        .web_operation(web_operations::ACTIVITY, project_activity)
+        // Advanced reads are derived views over canonical rows. They do not
+        // accept a command body and therefore cannot create truth or replay an
+        // event effect.
+        .route("/api/projects/{id}/graph", get(project_graph))
+        .route("/api/projects/{id}/replay", get(project_replay))
+        .route("/api/projects/{id}/analytics", get(project_analytics))
+        .web_operation(
+            web_operations::CONSOLIDATION_RUNS,
+            project_consolidation_runs,
         )
-        .route(
-            "/api/projects/{id}/retrieval-traces",
-            get(project_retrieval_traces),
-        )
-        .route(
-            "/api/projects/{id}/integration-health",
-            get(project_integration_health),
+        .web_operation(web_operations::RETRIEVAL_TRACES, project_retrieval_traces)
+        .web_operation(
+            web_operations::INTEGRATION_HEALTH,
+            project_integration_health,
         )
         // Deployment-wide rather than project-scoped, so the gate is the role
         // and not a membership. `AdminUser` in the parameter list is the
@@ -254,28 +697,26 @@ pub fn routes() -> Router<AppState> {
             "/api/verification/attestations",
             post(crate::verifysummary::report_attestation),
         )
-        .route("/api/system/health", get(system_health))
+        .web_operation(web_operations::SYSTEM_HEALTH, system_health)
         // Consolidation's own backlog, readable while a pass is running and
         // immediately after a restart, because every field behind it is a
         // committed row rather than worker state (SC-748, FR-793c).
-        .route("/api/consolidation/health", get(consolidation_health))
+        .web_operation(web_operations::CONSOLIDATION_HEALTH, consolidation_health)
         // Retrieval, its trace, and the outcome of actually transmitting it.
         // Three routes and not one: generating a briefing, reading back what
         // was selected, and reporting what reached the agent are three
         // different claims, and collapsing them would let the first stand in
         // for the third (FR-843, FR-854).
         .route("/api/retrieve", post(retrieve_context))
-        .route("/api/retrieval-traces/{trace_id}", get(retrieval_trace))
+        .web_operation(web_operations::RETRIEVAL_TRACE, retrieval_trace)
         .route(
             "/api/retrieval-traces/{trace_id}/transmission",
             post(retrieval_transmission),
         )
         .route("/api/sessions/{id}", get(session_detail))
-        .route("/api/sessions/{id}/handoff", get(session_handoff))
-        .route(
-            "/api/memories/{id}",
-            get(memory_detail).delete(delete_memory),
-        )
+        .web_operation(web_operations::HANDOFF, session_handoff)
+        .web_operation(web_operations::MEMORY, memory_detail)
+        .web_operation(web_operations::DELETE_MEMORY, delete_memory)
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +731,150 @@ pub fn routes() -> Router<AppState> {
 /// hundred. A thousand is comfortably above any honest report and well below
 /// what an unbounded one could do to a request handler.
 const REPORT_MAX_ROWS: usize = 1000;
+
+/// A graph view is deliberately small: one seed, at most two relation hops and
+/// fifty returned edges. PostgreSQL remains the sole relation store.
+const GRAPH_MAX_HOPS: i64 = 2;
+const GRAPH_MAX_EDGES: i64 = 50;
+const REPLAY_MAX_EVENTS: i64 = 100;
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    memory_id: Uuid,
+    #[serde(default)]
+    hops: Option<i64>,
+}
+
+async fn project_graph(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Query(query): Query<GraphQuery>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let hops = query.hops.unwrap_or(1).clamp(1, GRAPH_MAX_HOPS);
+    let rows = sqlx::query(
+        "WITH RECURSIVE walk(from_id, to_id, kind, current_id, depth, node_path, edge_path) AS (
+            SELECT r.from_memory_id, r.to_memory_id, r.kind,
+                   CASE WHEN r.from_memory_id = $2 THEN r.to_memory_id ELSE r.from_memory_id END,
+                   1,
+                   ARRAY[$2::uuid, CASE WHEN r.from_memory_id = $2 THEN r.to_memory_id ELSE r.from_memory_id END],
+                   ARRAY[format('%s:%s:%s', r.from_memory_id, r.to_memory_id, r.kind)]
+              FROM memory_relations r
+              JOIN memories from_memory ON from_memory.id = r.from_memory_id AND from_memory.project_id = $1
+              JOIN memories to_memory ON to_memory.id = r.to_memory_id AND to_memory.project_id = $1
+             WHERE r.deleted_at IS NULL AND r.project_id = $1
+               AND (r.from_memory_id = $2 OR r.to_memory_id = $2)
+            UNION ALL
+            SELECT r.from_memory_id, r.to_memory_id, r.kind,
+                   CASE WHEN r.from_memory_id = w.current_id THEN r.to_memory_id ELSE r.from_memory_id END,
+                   w.depth + 1,
+                   w.node_path || CASE WHEN r.from_memory_id = w.current_id THEN r.to_memory_id ELSE r.from_memory_id END,
+                   w.edge_path || format('%s:%s:%s', r.from_memory_id, r.to_memory_id, r.kind)
+              FROM walk w
+              JOIN memory_relations r ON r.from_memory_id = w.current_id OR r.to_memory_id = w.current_id
+              JOIN memories from_memory ON from_memory.id = r.from_memory_id AND from_memory.project_id = $1
+              JOIN memories to_memory ON to_memory.id = r.to_memory_id AND to_memory.project_id = $1
+             WHERE r.deleted_at IS NULL AND r.project_id = $1 AND w.depth < $3
+               AND NOT (CASE WHEN r.from_memory_id = w.current_id THEN r.to_memory_id ELSE r.from_memory_id END = ANY(w.node_path))
+               AND NOT (format('%s:%s:%s', r.from_memory_id, r.to_memory_id, r.kind) = ANY(w.edge_path))
+         ), unique_edges AS (
+            SELECT DISTINCT ON (from_id, to_id, kind) from_id, to_id, kind, depth
+              FROM walk ORDER BY from_id, to_id, kind, depth
+         ) SELECT from_id, to_id, kind, depth FROM unique_edges
+           ORDER BY depth, kind, from_id, to_id LIMIT $4",
+    )
+    .bind(project_id).bind(query.memory_id).bind(hops).bind(GRAPH_MAX_EDGES)
+    .fetch_all(&state.pool).await?;
+    let edges: Vec<Value> = rows.iter().map(|r| json!({
+        "from": r.get::<Uuid, _>("from_id"), "to": r.get::<Uuid, _>("to_id"),
+        "kind": r.get::<String, _>("kind"), "depth": r.get::<i32, _>("depth"),
+        "score": { "lexical": 0.0, "vector": 0.0, "relation": 1.0 / r.get::<i32, _>("depth") as f64, "recency": 0.0 }
+    })).collect();
+    Ok(Json(
+        json!({ "seed": query.memory_id, "hops": hops, "max_hops": GRAPH_MAX_HOPS,
+        "max_edges": GRAPH_MAX_EDGES, "edges": edges, "truncated": rows.len() as i64 == GRAPH_MAX_EDGES }),
+    ))
+}
+
+async fn project_replay(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let rows = sqlx::query("SELECT event_id, session_id, kind, received_at FROM safe_events WHERE project_id = $1 ORDER BY received_at DESC, event_id DESC LIMIT $2")
+        .bind(project_id).bind(REPLAY_MAX_EVENTS).fetch_all(&state.pool).await?;
+    Ok(Json(json!({ "events": rows.iter().map(|r| replay_metadata(
+            r.get("event_id"), r.get("session_id"), r.get("kind"), r.get("received_at")
+        )).collect::<Vec<_>>(), "limit": REPLAY_MAX_EVENTS, "read_only": true, "content_available": false })))
+}
+
+/// The replay boundary deliberately accepts only safe-event metadata. Event
+/// content is never selected, passed here, returned, or replayed.
+fn replay_metadata(
+    event_id: Uuid,
+    session_id: Uuid,
+    kind: String,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    json!({ "event_id": event_id, "session_id": session_id, "kind": kind, "accepted_at": accepted_at })
+}
+
+#[cfg(test)]
+mod advanced_view_tests {
+    use super::*;
+
+    #[test]
+    fn graph_and_replay_caps_are_hard_limits() {
+        assert_eq!(99_i64.clamp(1, GRAPH_MAX_HOPS), 2);
+        assert_eq!(GRAPH_MAX_EDGES, 50);
+        assert_eq!(REPLAY_MAX_EVENTS, 100);
+    }
+
+    #[test]
+    fn replay_projection_exposes_no_event_content() {
+        let metadata = replay_metadata(
+            Uuid::nil(),
+            Uuid::nil(),
+            "tool_call".into(),
+            chrono::DateTime::UNIX_EPOCH,
+        );
+        assert!(metadata.get("content").is_none());
+        assert!(metadata.get("event_id").is_some());
+        assert!(metadata.get("accepted_at").is_some());
+    }
+}
+
+async fn project_analytics(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id()).await?;
+    let counts = sqlx::query(
+        "SELECT
+           (SELECT COUNT(*) FROM safe_events WHERE project_id = $1) AS capture,
+           (SELECT COUNT(*) FROM consolidation_runs WHERE project_id = $1) AS consolidation,
+           (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1) AS retrieval,
+           (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND delivery_state = 'transmitted') AS delivery,
+           (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND latency_ms IS NOT NULL) AS latency_count,
+           (SELECT COALESCE(AVG(latency_ms), 0)::DOUBLE PRECISION FROM retrieval_traces WHERE project_id = $1 AND latency_ms IS NOT NULL) AS latency_avg_ms,
+           (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND delivery_state = 'failed') AS failures",
+    )
+    .bind(project_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "capture": counts.get::<i64, _>("capture"),
+        "consolidation": counts.get::<i64, _>("consolidation"),
+        "retrieval": counts.get::<i64, _>("retrieval"),
+        "delivery": counts.get::<i64, _>("delivery"),
+        "latency": { "count": counts.get::<i64, _>("latency_count"), "average_ms": counts.get::<f64, _>("latency_avg_ms") },
+        "failures": counts.get::<i64, _>("failures"),
+        "derived_from_existing_records": true
+    })))
+}
 
 /// Validate a reported health matrix and seed the rows a read API returns.
 ///
@@ -383,7 +968,8 @@ async fn report_health(
              DO UPDATE SET status = EXCLUDED.status,
                            evidence_kind = EXCLUDED.evidence_kind,
                            observed_at = EXCLUDED.observed_at,
-                           degraded = EXCLUDED.degraded",
+                           degraded = EXCLUDED.degraded,
+                           reported_at = now()",
         )
         .bind(project_id)
         .bind(user.id)
@@ -408,38 +994,12 @@ async fn report_health(
     Ok(Json(json!({ "accepted": accepted })))
 }
 
-/// The matrix as it stands, for one project.
-///
-/// A plain read over what the write side accepted. It does **not** synthesize
-/// missing cells: a matrix with a cell absent is a real state — nothing has
-/// ever reported it — and filling it in here would make "no report arrived"
-/// indistinguishable from "reported as no evidence" (FR-855).
-async fn read_health(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    Path(project_id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, project_id, user.id).await?;
-    let cells = integration_health_rows(&state.pool, project_id).await?;
-    Ok(Json(json!({ "cells": cells })))
-}
-
-/// The matrix rows for one project — the single read both health surfaces use.
-///
-/// Extracted rather than copied because US5's agents screen and US6's status
-/// output ask the *same* question of the same table, and a second query is a
-/// second place for "which columns a matrix cell has" to drift. What kept them
-/// apart was only the envelope key their two audiences already depend on
-/// (`cells` on `/health`, `rows` on `/integration-health`), and an envelope is
-/// not a reason to have two queries.
-///
-/// It synthesizes nothing. A capability with no row has never been reported,
-/// which is a different state from a capability reported as `no_evidence`, and
-/// filling the gap here would erase the distinction FR-855 draws.
+/// Stored installation reports for one project. Missing rows stay missing:
+/// no report and reported `no_evidence` are different states.
 async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiResult<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT account_id, writer_id, agent, capability, stage, status, evidence_kind,
-                observed_at, degraded
+                observed_at, degraded, reported_at
            FROM integration_health
           WHERE project_id = $1
           ORDER BY agent, capability, stage, writer_id, account_id",
@@ -471,6 +1031,9 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
                     .get::<Option<chrono::DateTime<chrono::Utc>>, _>("observed_at")
                     .map(|t| t.to_rfc3339()),
                 "degraded": r.get::<Option<bool>, _>("degraded"),
+                "reported_at": r
+                    .get::<chrono::DateTime<chrono::Utc>, _>("reported_at")
+                    .to_rfc3339(),
             })
         })
         .collect())
@@ -478,13 +1041,8 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
 
 /// `GET /api/projects/{id}/integration-health` — the agents screen (FR-887).
 ///
-/// Reads through [`integration_health_rows`], which is `read_health`'s own
-/// query: the path is new because `web-control-plane.md` §2 names it, and the
-/// implementation is not, because a second one would be a second answer to
-/// "which capabilities are working".
-///
-/// `stale` is deliberately absent from the row. §5 computes it client-side from
-/// `observed_at` against a per-capability freshness window, and a server that
+/// `stale` is deliberately absent from the row. The web view computes it from
+/// server-owned `reported_at`; `observed_at` remains the reporter's claim, and a server that
 /// baked one window in would be asserting that every capability goes stale at
 /// the same rate. What the row owes the view is the observation time and the
 /// machine it came from (FR-857, FR-860); the judgement is the view's.
@@ -492,11 +1050,11 @@ async fn project_integration_health(
     State(state): State<AppState>,
     user: SettledUser,
     Path(project_id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<HealthRowsResponse>> {
     auth::require_member(&state.pool, project_id, user.id()).await?;
-    Ok(Json(json!({
-        "rows": integration_health_rows(&state.pool, project_id).await?,
-    })))
+    Ok(Json(HealthRowsResponse {
+        rows: integration_health_rows(&state.pool, project_id).await?,
+    }))
 }
 
 /// Record capture dispositions — the funnel's client-reported half.
@@ -591,7 +1149,7 @@ async fn report_dispositions(
 /// A router of its own, merged in, so the limit applies to **this route only**.
 /// Axum's `DefaultBodyLimit` is a layer, and putting it on the main router would
 /// silently retighten every other endpoint from the 2 MB default to 1 MiB —
-/// including `/api/sync/batch`, which is a different boundary with its own
+/// including deprecated entity synchronization, which had a different boundary
 /// bounds and no requirement asking for this one.
 fn event_ingest_route() -> Router<AppState> {
     Router::new()
@@ -599,40 +1157,22 @@ fn event_ingest_route() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(cairn_core::event::BODY_MAX_BYTES))
 }
 
-/// The two routes the security prerequisite removed answer here (FR-587).
-///
-/// Neither takes an authentication extractor. A client that used to register
-/// had no account to authenticate with, and a client that used to self-join
-/// deserves to learn the route is gone rather than that its token is wrong —
-/// answering `401` first would hide the actual fact behind an unrelated one.
-///
-/// The message names both the replacement route and the CLI verb, because the
-/// two audiences that hit this are an integrator reading HTTP and an operator
-/// reading a terminal, and neither should have to translate for the other
-/// (`compatibility.md` §1b, SC-458).
-async fn register_removed() -> ApiError {
-    ApiError::new(
-        StatusCode::GONE,
-        "route_removed",
-        "self-registration is disabled; an administrator creates accounts with          `POST /api/admin/users` (`cairn user create`)",
-    )
-}
-
-/// See [`register_removed`].
-///
-/// The path segment is taken as a string rather than parsed as a UUID: a
-/// malformed id would otherwise be refused as a bad request, which says
-/// nothing about the route being gone.
-async fn join_removed(Path(_id): Path<String>) -> ApiError {
-    ApiError::new(
-        StatusCode::GONE,
-        "route_removed",
-        "self-join is disabled; an existing member or admin adds you with          `POST /api/projects/{id}/members` (`cairn project member add`)",
-    )
-}
-
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+/// Read-only description of privacy rules enforced by this running build.
+async fn privacy_policy(_user: SettledUser) -> Json<Value> {
+    Json(json!({
+        "mutable": false,
+        "safe_event_contract_version": cairn_core::event::CONTRACT_VERSION,
+        "batch_max_events": cairn_core::event::BATCH_MAX_EVENTS,
+        "body_max_bytes": cairn_core::event::BODY_MAX_BYTES,
+        "refused_field_names": crate::events::REFUSED_FIELD_NAMES,
+        "refused_top_level_fields": crate::events::REFUSED_AT_TOP_LEVEL,
+        "screens_all_member_project_identities": true,
+        "stores_raw_observations": false,
+    }))
 }
 
 /// What this deployment runs, and whether a newer release exists.
@@ -640,13 +1180,9 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
-    // Read fresh rather than from the application state: an administrator can
-    // cut this deployment over while it is running, and a client polls here to
-    // learn that they did.
-    let authority = crate::version::authority_for(&state.pool, state.schema_version).await;
     let payload = state
         .releases
-        .payload(state.schema_version, state.server_instance_id, authority)
+        .payload(state.schema_version, state.server_instance_id)
         .await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
@@ -659,6 +1195,11 @@ async fn version(State(state): State<AppState>) -> Json<Value> {
 struct LoginBody {
     email: String,
     password: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct LoginResponse {
+    pub id: Uuid,
 }
 
 async fn login(
@@ -724,7 +1265,7 @@ async fn login(
         .parse()
         .map_err(|_| ApiError::internal("bad cookie"))?,
     );
-    Ok((headers, Json(json!({ "id": user_id }))))
+    Ok((headers, Json(LoginResponse { id: user_id })))
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<impl IntoResponse> {
@@ -749,7 +1290,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .parse()
         .map_err(|_| ApiError::internal("bad cookie"))?,
     );
-    Ok((out, Json(json!({ "ok": true }))))
+    Ok((out, Json(OkResponse { ok: true })))
 }
 
 /// Generate a briefing for one session, and trace it.
@@ -911,7 +1452,10 @@ async fn create_token(
     ))
 }
 
-async fn list_tokens(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
+async fn list_tokens(
+    State(state): State<AppState>,
+    user: SettledUser,
+) -> ApiResult<Json<TokensResponse>> {
     let rows = sqlx::query(
         "SELECT id, name, created_at, last_used_at, revoked_at FROM api_tokens
          WHERE user_id = $1 ORDER BY created_at DESC",
@@ -932,20 +1476,20 @@ async fn list_tokens(State(state): State<AppState>, user: SettledUser) -> ApiRes
             })
         })
         .collect();
-    Ok(Json(json!({ "tokens": tokens })))
+    Ok(Json(TokensResponse { tokens }))
 }
 
 async fn revoke_token(
     State(state): State<AppState>,
     user: SettledUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<RevokedResponse>> {
     sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user.id())
         .execute(&state.pool)
         .await?;
-    Ok(Json(json!({ "revoked": id })))
+    Ok(Json(RevokedResponse { revoked: id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,15 +1578,15 @@ async fn create_user(
 async fn list_users(
     State(state): State<AppState>,
     AdminUser(_): AdminUser,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<UsersResponse>> {
     let rows = sqlx::query(&format!(
         "SELECT {USER_COLUMNS} FROM users ORDER BY created_at"
     ))
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(
-        json!({ "users": rows.iter().map(user_json).collect::<Vec<_>>() }),
-    ))
+    Ok(Json(UsersResponse {
+        users: rows.iter().map(user_json).collect(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1166,7 +1710,7 @@ async fn reset_user_password(
     State(state): State<AppState>,
     AdminUser(_): AdminUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<ResetPasswordResponse>> {
     let target: Option<(String,)> = sqlx::query_as("SELECT email FROM users WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.pool)
@@ -1218,7 +1762,10 @@ async fn reset_user_password(
     tx.commit().await?;
 
     // Returned once, on this response, and never retrievable again (FR-554).
-    Ok(Json(json!({ "id": id, "temporary_password": temporary })))
+    Ok(Json(ResetPasswordResponse {
+        id,
+        temporary_password: temporary,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1288,8 +1835,7 @@ fn parse_optional<T: std::str::FromStr>(value: Option<&str>, field: &str) -> Api
 #[derive(Deserialize)]
 struct CreateProjectBody {
     name: String,
-    #[serde(default)]
-    repository_remote: Option<String>,
+    repository_remote: String,
 }
 
 async fn create_project(
@@ -1297,12 +1843,20 @@ async fn create_project(
     user: SettledUser,
     Json(body): Json<CreateProjectBody>,
 ) -> ApiResult<Json<Value>> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::invalid("project name cannot be empty"));
+    }
+    let repository_remote = body.repository_remote.trim();
+    if repository_remote.is_empty() {
+        return Err(ApiError::invalid("repository_remote cannot be empty"));
+    }
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
     sqlx::query("INSERT INTO projects (id, name, repository_remote) VALUES ($1, $2, $3)")
         .bind(id)
-        .bind(&body.name)
-        .bind(&body.repository_remote)
+        .bind(name)
+        .bind(repository_remote)
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)")
@@ -1311,51 +1865,13 @@ async fn create_project(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(json!({ "id": id, "name": body.name })))
+    Ok(Json(json!({ "id": id, "name": name })))
 }
 
-#[derive(Deserialize)]
-struct LookupQuery {
-    #[serde(default)]
-    remote: String,
-}
-
-/// A discovery *hint*. Returns only projects the caller may already see, and
-/// never links anything on its own (D14).
-///
-/// The doc comment above is what this was always documented to do. The query
-/// did not do it: it matched on `repository_remote` alone, with no reference to
-/// the caller at all. A git remote is not a secret — it is in every clone of
-/// the repository and often on a public forge — so any authenticated account
-/// could turn a remote URL into the project UUIDs behind it, which was exactly
-/// the input the join route needed. The membership join below is the fix; the
-/// comment needed no change, only the SQL.
-async fn lookup_projects(
+async fn list_projects(
     State(state): State<AppState>,
     user: SettledUser,
-    Query(q): Query<LookupQuery>,
-) -> ApiResult<Json<Value>> {
-    if q.remote.trim().is_empty() {
-        return Ok(Json(json!({ "projects": [] })));
-    }
-    let rows = sqlx::query(
-        "SELECT p.id, p.name FROM projects p
-         JOIN project_members m ON m.project_id = p.id
-         WHERE p.repository_remote = $1 AND p.deleted_at IS NULL AND m.user_id = $2
-         ORDER BY p.created_at",
-    )
-    .bind(q.remote.trim())
-    .bind(user.id())
-    .fetch_all(&state.pool)
-    .await?;
-    let projects: Vec<Value> = rows
-        .iter()
-        .map(|r| json!({ "id": r.get::<Uuid, _>("id"), "name": r.get::<String, _>("name") }))
-        .collect();
-    Ok(Json(json!({ "projects": projects })))
-}
-
-async fn list_projects(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<ProjectsResponse>> {
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.repository_remote, p.created_at
          FROM projects p
@@ -1378,7 +1894,7 @@ async fn list_projects(State(state): State<AppState>, user: SettledUser) -> ApiR
             })
         })
         .collect();
-    Ok(Json(json!({ "projects": projects })))
+    Ok(Json(ProjectsResponse { projects }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,836 +2067,6 @@ async fn list_members(
 }
 
 // ---------------------------------------------------------------------------
-// Sync (FR-055, FR-056)
-// ---------------------------------------------------------------------------
-
-pub use crate::global::{ratify_team, retire_team, sync_personal_changes, sync_team_changes};
-pub use crate::sync::{sync_batch, sync_changes};
-
-// ---------------------------------------------------------------------------
-// Migration and cutover (`contracts/migration-cutover.md`)
-// ---------------------------------------------------------------------------
-
-/// `POST /api/migration/register` — open or reopen this store's migration
-/// (`migration-cutover.md` §4, §12.1).
-///
-/// **One statement decides it**, the same compare-and-swap shape `ratify_team`
-/// and `retire_team` already establish. `ON CONFLICT (account_id, writer_id) DO
-/// UPDATE SET completed_at = NULL` covers every case in the contract at once:
-/// a fresh `(account_id, writer_id)` inserts a new token; re-registering while
-/// still open touches nothing but reports the same row back; and re-registering
-/// after completion clears `completed_at` and reopens it — which is exactly
-/// what `--retry-retained` running after completion needs (FR-876d). What the
-/// `DO UPDATE` clause never names is `migration_token` itself, so an existing
-/// row's token survives untouched in every branch; only a genuine insert uses
-/// the freshly generated one.
-///
-/// Deliberately **not** gated by `server_authority.mode`: a client migrating
-/// after its server has already cut over must still be able to register
-/// (FR-876d), and this route is the mechanism, not a bypass of it — see
-/// [`migration_drain`].
-#[derive(Debug, Deserialize)]
-struct MigrationRegisterBody {
-    writer_id: String,
-}
-
-async fn migration_register(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Json(body): Json<MigrationRegisterBody>,
-) -> ApiResult<Json<Value>> {
-    if body.writer_id.trim().is_empty() {
-        return Err(ApiError::invalid("`writer_id` is required"));
-    }
-    let token = auth::random_token();
-    let row: (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
-        "INSERT INTO client_migrations
-            (migration_token, account_id, writer_id, registered_at, completed_at)
-         VALUES ($1, $2, $3, now(), NULL)
-         ON CONFLICT (account_id, writer_id) DO UPDATE SET completed_at = NULL
-         RETURNING migration_token, registered_at",
-    )
-    .bind(&token)
-    .bind(user.id())
-    .bind(&body.writer_id)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(Json(json!({
-        "migration_token": row.0,
-        "registered_at": row.1.to_rfc3339(),
-    })))
-}
-
-/// Refuse a drain call whose token is unknown, belongs to another account, or
-/// has already completed (`migration-cutover.md` §12.1).
-///
-/// **One answer for all three**, deliberately: distinguishing "unknown token"
-/// from "somebody else's token" would let a caller enumerate other accounts'
-/// migrations one guess at a time, and distinguishing "completed" from
-/// "unknown" tells an attacker nothing they could not learn by trying to
-/// register their own token and comparing (FR-894a's enumeration-oracle
-/// reasoning, applied here to a token rather than a record id).
-async fn require_registered_migration(
-    pool: &PgPool,
-    user_id: Uuid,
-    migration_token: &str,
-) -> ApiResult<()> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT migration_token FROM client_migrations
-          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL",
-    )
-    .bind(migration_token)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    if row.is_some() {
-        Ok(())
-    } else {
-        Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "migration_not_registered",
-            "this migration token is unknown, belongs to another account, or has \
-             already completed; register before draining",
-        ))
-    }
-}
-
-/// One drained record, in the migration-scoped wire shape (`migration-cutover.md`
-/// §4.2). Distinct from `sync::SyncItem`: a drain item carries no
-/// `idempotency_key` of its own — every entity type this route accepts is
-/// already idempotent on redelivery by its own natural key, which is the same
-/// property `sync::SyncItem`'s upsert functions already have and exactly why
-/// they are reused rather than reimplemented.
-#[derive(Debug, Deserialize, Clone)]
-struct DrainItem {
-    entity_type: String,
-    /// A **string**, because not every drained record is named by a UUID: a
-    /// relation has no id of its own and travels as its `from|to|kind` natural
-    /// key (`migration-cutover.md` §4.2). Typing this as a `Uuid` rejected the
-    /// whole request body with a `422` and no error object, so a client
-    /// draining a relation could not tell a malformed request from an
-    /// unreachable server.
-    entity_id: String,
-    operation: String,
-    #[serde(default)]
-    payload: Value,
-}
-
-impl DrainItem {
-    /// The item's id, for the four record types that have one.
-    fn uuid(&self) -> ApiResult<Uuid> {
-        self.entity_id.parse().map_err(|_| {
-            ApiError::invalid(format!(
-                "`{}` is not an id a {} can be named by",
-                self.entity_id, self.entity_type
-            ))
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct DrainBody {
-    migration_token: String,
-    #[serde(default)]
-    items: Vec<DrainItem>,
-}
-
-/// The entity types the drain route accepts (`migration-cutover.md` §4.2,
-/// §12.0). The authoritative list, and it is deliberately the same five rows
-/// that table names — anything else answers `entity_type_not_drained` rather
-/// than being silently ignored, so a client can tell "this record type will
-/// never drain through this route" from "this one did, but was refused".
-const DRAINED_ENTITY_TYPES: &[&str] = &[
-    "memory",
-    "memory_relation",
-    "personal_knowledge",
-    "team_knowledge",
-    "pattern",
-];
-
-/// Matches `possession`'s own bound and `safe-events.md` §7's batch-bounding
-/// discipline — one number for "how big is one call allowed to be" rather than
-/// a fresh limit invented per route.
-const MAX_DRAIN_ITEMS: usize = 500;
-
-fn uuid_field(payload: &Value, key: &str) -> Option<Uuid> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .and_then(|s| Uuid::parse_str(s).ok())
-}
-
-/// `POST /api/migration/drain` — the migration-scoped ingest route
-/// (`migration-cutover.md` §12.1, FR-864, FR-864a).
-///
-/// **Exempt from the cutover refusal, by construction rather than by a
-/// bypass flag.** This handler never calls `sync::sync_batch` or consults
-/// `server_authority.mode` at all — it is a wholly separate route, gated only
-/// by an open migration registration, which is what keeps it from being a
-/// general escape hatch around `upgrade_required` (§12.1: "refused for a store
-/// that has not registered a migration").
-///
-/// **Reuses the same upserts `sync.rs` already has for project memory and
-/// relations** (`sync::upsert_memory`, `sync::upsert_relation`), by
-/// constructing the same `sync::SyncItem` those functions already take. A
-/// drained `memory`/`memory_relation` item carries its own `project_id` in the
-/// payload — unlike a `sync/batch` item, this request has no batch-level
-/// project — and membership is checked before the reused upsert runs, so a
-/// migrating store cannot deliver a record into a project it does not belong
-/// to merely by naming one in the payload.
-///
-/// Personal and team knowledge reuse `global::upsert_personal` /
-/// `global::upsert_team` **and** the same `global::screen_global_item` privacy
-/// screen `sync/batch` runs before them: the module doc on `global.rs` is
-/// explicit that this boundary must hold "wherever the client chooses to
-/// enforce it" or not at all, and a migration ingest path is exactly the kind
-/// of second entry point that guarantee has to cover.
-///
-/// A `pattern` item is not upserted through any existing function: its
-/// identity was already decided client-side, before delivery, by the local
-/// `legacy_pattern_claims` row this drain call has no visibility into
-/// (§4.1a) — `pattern_id` is the item's own `entity_id`, taken verbatim, and
-/// `owner_user_id` is the credential. Recomputing either here would be a
-/// second, possibly different, answer to a question migration already
-/// answered once.
-async fn migration_drain(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Json(body): Json<DrainBody>,
-) -> ApiResult<Json<Value>> {
-    if body.items.len() > MAX_DRAIN_ITEMS {
-        return Err(ApiError::invalid(format!(
-            "a drain call carries at most {MAX_DRAIN_ITEMS} items"
-        )));
-    }
-    require_registered_migration(&state.pool, user.id(), &body.migration_token).await?;
-
-    // Computed once for the whole call rather than once per item: the
-    // identity set depends only on the caller, not on any one record
-    // (`global::identities_for`).
-    let identities = crate::global::identities_for(&state.pool, user.id()).await?;
-
-    let mut results = Vec::with_capacity(body.items.len());
-    for it in &body.items {
-        match drain_one(&state, user.id(), &identities, it).await {
-            Ok(()) => results.push(json!({
-                "entity_id": it.entity_id,
-                "entity_type": it.entity_type,
-                "accepted": true,
-            })),
-            // Every item is answered, never failed as a batch: one record this
-            // store cannot deliver must not strand the rest (§4.3's
-            // blocked-row reporting is what a client does with this per item).
-            Err(e) => results.push(json!({
-                "entity_id": it.entity_id,
-                "entity_type": it.entity_type,
-                "accepted": false,
-                "reason": e.message,
-            })),
-        }
-    }
-    Ok(Json(json!({ "results": results })))
-}
-
-async fn drain_one(
-    state: &AppState,
-    user_id: Uuid,
-    identities: &[cairn_core::validate::ProjectIdentity],
-    it: &DrainItem,
-) -> ApiResult<()> {
-    if !DRAINED_ENTITY_TYPES.contains(&it.entity_type.as_str()) {
-        return Err(ApiError::invalid("entity_type_not_drained"));
-    }
-    if it.operation != "upsert" {
-        return Err(ApiError::invalid(format!(
-            "`{}` is not a drained operation; drain transfers records, it does not delete them",
-            it.operation
-        )));
-    }
-
-    // One transaction per item. A failure partway through — an unmet
-    // membership check, a privacy refusal — drops `tx` without committing, and
-    // a dropped `sqlx::Transaction` rolls back on its own; there is no path on
-    // which a partially-applied item is left committed.
-    let mut tx = state.pool.begin().await?;
-    match it.entity_type.as_str() {
-        "memory" => {
-            let project_id = uuid_field(&it.payload, "project_id")
-                .ok_or_else(|| ApiError::invalid("a drained memory must carry its `project_id`"))?;
-            auth::require_member(&state.pool, project_id, user_id).await?;
-            let sync_item = crate::sync::SyncItem {
-                idempotency_key: String::new(),
-                entity_type: it.entity_type.clone(),
-                entity_id: it.uuid()?,
-                operation: it.operation.clone(),
-                payload: it.payload.clone(),
-            };
-            crate::sync::upsert_memory(&mut tx, state.schema_version, project_id, &sync_item)
-                .await?;
-        }
-        "memory_relation" => {
-            let project_id = uuid_field(&it.payload, "project_id").ok_or_else(|| {
-                ApiError::invalid("a drained relation must carry its `project_id`")
-            })?;
-            auth::require_member(&state.pool, project_id, user_id).await?;
-            let sync_item = crate::sync::SyncItem {
-                idempotency_key: String::new(),
-                entity_type: it.entity_type.clone(),
-                // `upsert_relation` reads the triple out of the payload and
-                // never looks at this field, because a relation *is* its
-                // triple. Nil rather than a parsed endpoint id, so nothing
-                // downstream can start treating one endpoint as the edge's id.
-                entity_id: Uuid::nil(),
-                operation: it.operation.clone(),
-                payload: it.payload.clone(),
-            };
-            crate::sync::upsert_relation(&mut tx, project_id, &sync_item).await?;
-        }
-        "personal_knowledge" => {
-            crate::global::screen_global_item(&it.payload, identities)
-                .map_err(|refusal| refusal.into_api_error())?;
-            crate::global::upsert_personal(&mut tx, user_id, it.uuid()?, &it.payload).await?;
-        }
-        "team_knowledge" => {
-            crate::global::screen_global_item(&it.payload, identities)
-                .map_err(|refusal| refusal.into_api_error())?;
-            crate::global::upsert_team(&mut tx, user_id, it.uuid()?, &it.payload).await?;
-        }
-        "pattern" => drain_pattern(&mut tx, user_id, it).await?,
-        _ => unreachable!("checked by DRAINED_ENTITY_TYPES above"),
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-/// Promote one legacy pattern into `shared_patterns`, keyed exactly as
-/// `migration-cutover.md` §4.1a and §4.2 describe: `pattern_id` is the item's
-/// own `entity_id`, and `owner_user_id` is the credential — never recomputed,
-/// never anyone but the caller.
-///
-/// Conflict target is `(owner_user_id, content_key)` — the identity migration
-/// actually claimed — rather than `pattern_id`, so a redelivery is recognized
-/// by the same key its ownership claim was made against; `DO NOTHING` because a
-/// drained pattern is transferred once, not edited through this path.
-async fn drain_pattern(
-    tx: &mut Transaction<'_, Postgres>,
-    owner_user_id: Uuid,
-    it: &DrainItem,
-) -> ApiResult<()> {
-    let title = it
-        .payload
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let problem = it
-        .payload
-        .get("problem")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let root_cause = it
-        .payload
-        .get("root_cause")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let approach = it
-        .payload
-        .get("approach")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if title.is_empty() || problem.is_empty() || root_cause.is_empty() || approach.is_empty() {
-        return Err(ApiError::invalid(
-            "a drained pattern must carry title, problem, root_cause and approach",
-        ));
-    }
-    let content_key = it
-        .payload
-        .get("content_key")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::invalid("a drained pattern must carry its `content_key`"))?;
-    let constraints = it
-        .payload
-        .get("constraints")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let applicability = it
-        .payload
-        .get("applicability")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-
-    sqlx::query(
-        "INSERT INTO shared_patterns
-            (pattern_id, domain, owner_user_id, title, problem, root_cause, approach,
-             constraints, applicability, trust, content_key)
-         VALUES ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, 'sanitized', $9)
-         ON CONFLICT (owner_user_id, content_key) DO NOTHING",
-    )
-    .bind(it.uuid()?)
-    .bind(owner_user_id)
-    .bind(title)
-    .bind(problem)
-    .bind(root_cause)
-    .bind(approach)
-    .bind(&constraints)
-    .bind(&applicability)
-    .bind(content_key)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-/// One record `POST /api/migration/possession` was asked about, resolved from
-/// its own reference shape (`migration-cutover.md` §5, §12.5) rather than
-/// coerced into another domain's.
-#[derive(Debug, Clone)]
-enum PossessionRef {
-    Knowledge { domain: KnowledgeDomain, id: Uuid },
-    Pattern { id: Uuid },
-    Relation { from: Uuid, to: Uuid, kind: String },
-}
-
-/// Parse one possession record, or refuse the whole call (§5, §12.5).
-///
-/// **A malformed record is a `400` for the call, not a per-record answer** —
-/// unlike drain's per-item reporting, `held`/`missing`/`indeterminate` are the
-/// only three things this route says about a record it understood, and a
-/// malformed one is not one of those three. A `knowledge` record with no
-/// `domain` is malformed for the same reason `verifysummary.rs`'s
-/// `Reference::parse` refuses one: a bare id names a project memory, a
-/// personal note and a team entry at once, so on its own it names none of
-/// them.
-fn parse_possession_record(v: &Value) -> ApiResult<PossessionRef> {
-    let ref_kind = v
-        .get("ref_kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::invalid("a possession record must name its `ref_kind`"))?;
-    match ref_kind {
-        "knowledge" => {
-            let named = v.get("domain").and_then(Value::as_str).ok_or_else(|| {
-                ApiError::invalid(
-                    "a knowledge record needs its `domain`: the same id can name a \
-                         project memory, a personal note and a team entry at once",
-                )
-            })?;
-            let domain = KnowledgeDomain::from_str(named)
-                .map_err(|_| ApiError::invalid(format!("`{named}` is not a domain")))?;
-            let id = v
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| ApiError::invalid("a knowledge record needs a uuid `id`"))?;
-            Ok(PossessionRef::Knowledge { domain, id })
-        }
-        "pattern" => {
-            let id = v
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| ApiError::invalid("a pattern record needs a uuid `id`"))?;
-            Ok(PossessionRef::Pattern { id })
-        }
-        "relation" => {
-            let from = v
-                .get("from")
-                .and_then(Value::as_str)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `from`"))?;
-            let to = v
-                .get("to")
-                .and_then(Value::as_str)
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `to`"))?;
-            let kind = v
-                .get("kind")
-                .and_then(Value::as_str)
-                .ok_or_else(|| ApiError::invalid("a relation record needs its `kind`"))?
-                .to_string();
-            Ok(PossessionRef::Relation { from, to, kind })
-        }
-        other => Err(ApiError::invalid(format!("`{other}` is not a ref_kind"))),
-    }
-}
-
-/// The three answers `migration-cutover.md` §5 allows, and no fourth.
-enum Possession {
-    Held,
-    Missing,
-    Indeterminate,
-}
-
-/// Resolve one record's possession, per the table in §5 and §12.5.
-///
-/// **`indeterminate` exists only for team knowledge.** Every other domain's
-/// visibility question collapses cleanly into "held" or "missing" — a personal
-/// or pattern record either belongs to the caller or it does not, a project
-/// record either sits in a project the caller is a member of or it does not —
-/// and the contract's own table names no `indeterminate` condition for any of
-/// them. Team is different because a `proposed` row is visible to its author
-/// and to an administrator and to nobody else (`sync-namespaces.md` §1a): a
-/// caller who is neither must not be told `missing`, which the caller could
-/// act on by retaining a writable copy of a record the server may actually
-/// hold (§12.5).
-async fn classify_possession(
-    pool: &PgPool,
-    user_id: Uuid,
-    is_admin: bool,
-    r: &PossessionRef,
-) -> ApiResult<Possession> {
-    match r {
-        PossessionRef::Knowledge {
-            domain: KnowledgeDomain::Personal,
-            id,
-        } => {
-            let owner: Option<(Uuid,)> =
-                sqlx::query_as("SELECT owner_user_id FROM personal_knowledge WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await?;
-            Ok(match owner {
-                Some((owner,)) if owner == user_id => Possession::Held,
-                _ => Possession::Missing,
-            })
-        }
-        PossessionRef::Knowledge {
-            domain: KnowledgeDomain::Project,
-            id,
-        } => {
-            let row: Option<(Uuid,)> =
-                sqlx::query_as("SELECT project_id FROM memories WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await?;
-            match row {
-                None => Ok(Possession::Missing),
-                Some((project_id,)) => {
-                    let member: Option<(Uuid,)> = sqlx::query_as(
-                        "SELECT user_id FROM project_members
-                          WHERE project_id = $1 AND user_id = $2",
-                    )
-                    .bind(project_id)
-                    .bind(user_id)
-                    .fetch_optional(pool)
-                    .await?;
-                    Ok(if member.is_some() {
-                        Possession::Held
-                    } else {
-                        Possession::Missing
-                    })
-                }
-            }
-        }
-        PossessionRef::Knowledge {
-            domain: KnowledgeDomain::Team,
-            id,
-        } => {
-            let row: Option<(String, Uuid)> = sqlx::query_as(
-                "SELECT state, proposed_by_user_id FROM team_knowledge WHERE id = $1",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-            Ok(match row {
-                None => Possession::Missing,
-                Some((state, _)) if state != "proposed" => Possession::Held,
-                Some((_, proposer)) if proposer == user_id || is_admin => Possession::Held,
-                Some(_) => Possession::Indeterminate,
-            })
-        }
-        PossessionRef::Pattern { id } => {
-            let owner: Option<(Uuid,)> = sqlx::query_as(
-                "SELECT owner_user_id FROM shared_patterns
-                  WHERE pattern_id = $1 AND forgotten_at IS NULL",
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-            Ok(match owner {
-                Some((owner,)) if owner == user_id => Possession::Held,
-                _ => Possession::Missing,
-            })
-        }
-        PossessionRef::Relation { from, to, kind } => {
-            // `memory_relations` carries its own `project_id`, stamped at
-            // `upsert_relation` time from a call that already checked both
-            // endpoints belonged to it (`sync::all_in_project`) — so this one
-            // membership check is equivalent to checking both endpoints
-            // separately, without a second join to restate that guarantee.
-            let row: Option<(Uuid,)> = sqlx::query_as(
-                "SELECT project_id FROM memory_relations
-                  WHERE from_memory_id = $1 AND to_memory_id = $2 AND kind = $3",
-            )
-            .bind(from)
-            .bind(to)
-            .bind(kind)
-            .fetch_optional(pool)
-            .await?;
-            match row {
-                None => Ok(Possession::Missing),
-                Some((project_id,)) => {
-                    let member: Option<(Uuid,)> = sqlx::query_as(
-                        "SELECT user_id FROM project_members
-                          WHERE project_id = $1 AND user_id = $2",
-                    )
-                    .bind(project_id)
-                    .bind(user_id)
-                    .fetch_optional(pool)
-                    .await?;
-                    Ok(if member.is_some() {
-                        Possession::Held
-                    } else {
-                        Possession::Missing
-                    })
-                }
-            }
-        }
-    }
-}
-
-const MAX_POSSESSION_RECORDS: usize = 500;
-
-#[derive(Debug, Deserialize)]
-struct PossessionBody {
-    #[serde(default)]
-    records: Vec<Value>,
-}
-
-/// `POST /api/migration/possession` — "delivered" and "durably held" are
-/// different facts, and only the second authorizes demotion (`migration-cutover.md`
-/// §5, FR-865).
-///
-/// Registration is **not** required here, unlike `migration_drain`: a store
-/// may verify possession of records it already believed canonical, independent
-/// of whether it is mid-migration right now (§5's own wording).
-async fn migration_possession(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Json(body): Json<PossessionBody>,
-) -> ApiResult<Json<Value>> {
-    if body.records.is_empty() {
-        return Err(ApiError::invalid("`records` must name at least one record"));
-    }
-    if body.records.len() > MAX_POSSESSION_RECORDS {
-        return Err(ApiError::invalid(format!(
-            "a possession call carries at most {MAX_POSSESSION_RECORDS} records"
-        )));
-    }
-    // Parsed up front, entirely: one malformed record refuses the whole call
-    // rather than leaving a partially-answered response (see
-    // `parse_possession_record`).
-    let parsed: Vec<(Value, PossessionRef)> = body
-        .records
-        .iter()
-        .map(|v| parse_possession_record(v).map(|r| (v.clone(), r)))
-        .collect::<ApiResult<Vec<_>>>()?;
-
-    let is_admin = user.role() == cairn_core::domain::ServerRole::Admin;
-    let mut held = Vec::new();
-    let mut missing = Vec::new();
-    let mut indeterminate = Vec::new();
-    for (raw, r) in &parsed {
-        // The same reference object that was sent is what comes back — never
-        // reconstructed from the parsed fields — so a caller's own request
-        // shape round-trips exactly (§5).
-        match classify_possession(&state.pool, user.id(), is_admin, r).await? {
-            Possession::Held => held.push(raw.clone()),
-            Possession::Missing => missing.push(raw.clone()),
-            Possession::Indeterminate => indeterminate.push(raw.clone()),
-        }
-    }
-    Ok(Json(json!({
-        "held": held,
-        "missing": missing,
-        "indeterminate": indeterminate,
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct MigrationTokenBody {
-    migration_token: String,
-}
-
-/// `POST /api/migration/complete` — closes a migration token (`migration-cutover.md`
-/// §12.1: "closes when the migration completes, so a migrated store cannot
-/// keep using it").
-///
-/// Idempotent: completing an already-completed token answers with the
-/// `completed_at` already on record rather than refusing a caller that is
-/// simply retrying a response it never saw.
-async fn migration_complete(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Json(body): Json<MigrationTokenBody>,
-) -> ApiResult<Json<Value>> {
-    let completed: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
-        "UPDATE client_migrations SET completed_at = now()
-          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL
-        RETURNING completed_at",
-    )
-    .bind(&body.migration_token)
-    .bind(user.id())
-    .fetch_optional(&state.pool)
-    .await?;
-
-    let completed_at = match completed {
-        Some((at,)) => at,
-        None => {
-            let existing: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
-                "SELECT completed_at FROM client_migrations
-                  WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NOT NULL",
-            )
-            .bind(&body.migration_token)
-            .bind(user.id())
-            .fetch_optional(&state.pool)
-            .await?;
-            match existing {
-                Some((at,)) => at,
-                None => {
-                    return Err(ApiError::new(
-                        StatusCode::FORBIDDEN,
-                        "migration_not_registered",
-                        "this migration token is unknown or belongs to another account",
-                    ))
-                }
-            }
-        }
-    };
-    Ok(Json(json!({ "completed_at": completed_at.to_rfc3339() })))
-}
-
-/// Every `memories` row whose asserted verification the new authority model
-/// cannot substantiate, audited then demoted in one statement
-/// (`migration-cutover.md` §2 steps 2-3).
-///
-/// The audit insert and the demotion read the **same** `orphaned` CTE, which
-/// is what makes them agree on exactly which rows: the demotion cannot drift
-/// from what was audited, because there is only one computation of "orphaned"
-/// in this statement, not two that could disagree after being edited
-/// separately.
-const CUTOVER_DEMOTE_MEMORIES_SQL: &str = "
-WITH orphaned AS (
-    SELECT id, verification, verification_authority, last_verified_at
-      FROM memories
-     WHERE verification <> 'unverified'
-       AND NOT EXISTS (
-             SELECT 1 FROM verification_reports vr
-              WHERE vr.reference_key = 'knowledge:project:' || memories.id::text
-           )
-),
-audited AS (
-    INSERT INTO legacy_verification_audit
-        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
-    SELECT 'project', id, verification, verification_authority, last_verified_at
-      FROM orphaned
-    ON CONFLICT (domain, knowledge_id) DO NOTHING
-    RETURNING knowledge_id
-),
-demoted AS (
-    UPDATE memories
-       SET verification = 'unverified', verification_authority = NULL,
-           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
-           last_verified_at = NULL
-     WHERE id IN (SELECT id FROM orphaned)
-    RETURNING id
-)
-SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
-";
-
-/// The same operation as [`CUTOVER_DEMOTE_MEMORIES_SQL`], over
-/// `knowledge_verification` (`migration-cutover.md` §2 step 4).
-///
-/// `ref_kind = 'knowledge'` excludes pattern rows on purpose: `shared_patterns`
-/// is new in this same schema (server schema v4), so no pattern verification
-/// predates the cutover for there to be anything "legacy" about — and
-/// `legacy_verification_audit.domain` is `NOT NULL`, which a pattern row's
-/// null domain slot could never satisfy in the first place.
-const CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL: &str = "
-WITH orphaned AS (
-    SELECT reference_key, domain, knowledge_id, verification,
-           verification_authority, last_verified_at
-      FROM knowledge_verification
-     WHERE ref_kind = 'knowledge'
-       AND verification <> 'unverified'
-       AND NOT EXISTS (
-             SELECT 1 FROM verification_reports vr
-              WHERE vr.reference_key = knowledge_verification.reference_key
-           )
-),
-audited AS (
-    INSERT INTO legacy_verification_audit
-        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
-    SELECT domain, knowledge_id, verification, verification_authority, last_verified_at
-      FROM orphaned
-    ON CONFLICT (domain, knowledge_id) DO NOTHING
-    RETURNING knowledge_id
-),
-demoted AS (
-    UPDATE knowledge_verification
-       SET verification = 'unverified', verification_authority = NULL,
-           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
-           last_verified_at = NULL
-     WHERE reference_key IN (SELECT reference_key FROM orphaned)
-    RETURNING reference_key
-)
-SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
-";
-
-/// `POST /api/admin/cutover` — the one-way switch (`migration-cutover.md` §2,
-/// FR-876).
-///
-/// **One transaction, the compare-and-swap first.** Same shape as `ratify_team`
-/// / `retire_team`: the `UPDATE ... WHERE mode = 'pre_cutover'` decides whether
-/// this call is the one that flips the switch before anything else runs, so
-/// two concurrent calls race inside PostgreSQL rather than in this handler.
-/// Zero rows means already cut over — FR-876 gives no route back, so that is
-/// the existing decision restated, not an error, and steps 2-4 do not run at
-/// all: nothing is re-audited and nothing is re-demoted on a repeat call.
-async fn admin_cutover(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
-    let mut tx = state.pool.begin().await?;
-    let cas: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
-        "UPDATE server_authority SET mode = 'server_authoritative', cutover_at = now()
-          WHERE id = 1 AND mode = 'pre_cutover'
-        RETURNING cutover_at",
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some((cutover_at,)) = cas else {
-        // Nothing was written by the failed CAS, so there is nothing to
-        // commit — the transaction is simply dropped.
-        drop(tx);
-        let existing: (Option<chrono::DateTime<chrono::Utc>>,) =
-            sqlx::query_as("SELECT cutover_at FROM server_authority WHERE id = 1")
-                .fetch_one(&state.pool)
-                .await?;
-        return Ok(Json(json!({
-            "mode": "server_authoritative",
-            "cutover_at": existing.0.map(|t| t.to_rfc3339()),
-            "already": true,
-            "demoted": 0,
-            "audited": 0,
-        })));
-    };
-
-    let (memories_audited, memories_demoted): (i64, i64) =
-        sqlx::query_as(CUTOVER_DEMOTE_MEMORIES_SQL)
-            .fetch_one(&mut *tx)
-            .await?;
-    let (kv_audited, kv_demoted): (i64, i64) =
-        sqlx::query_as(CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL)
-            .fetch_one(&mut *tx)
-            .await?;
-    tx.commit().await?;
-
-    Ok(Json(json!({
-        "mode": "server_authoritative",
-        "cutover_at": cutover_at.to_rfc3339(),
-        "already": false,
-        "demoted": memories_demoted + kv_demoted,
-        "audited": memories_audited + kv_audited,
-    })))
-}
-
-// ---------------------------------------------------------------------------
 // Read API for the web UI
 // ---------------------------------------------------------------------------
 
@@ -2398,9 +2084,6 @@ async fn project_overview(
 
     let counts = sqlx::query(
         "SELECT
-            (SELECT COUNT(*) FROM tasks WHERE project_id = $1 AND deleted_at IS NULL) AS tasks,
-            (SELECT COUNT(*) FROM tasks WHERE project_id = $1 AND status != 'done'
-                AND deleted_at IS NULL) AS open_tasks,
             (SELECT COUNT(*) FROM sessions WHERE project_id = $1 AND deleted_at IS NULL) AS sessions,
             (SELECT COUNT(*) FROM memories WHERE project_id = $1 AND deleted_at IS NULL) AS memories",
     )
@@ -2434,8 +2117,6 @@ async fn project_overview(
             "repository_remote": project.get::<Option<String>, _>("repository_remote"),
         },
         "counts": {
-            "tasks": counts.get::<i64, _>("tasks"),
-            "open_tasks": counts.get::<i64, _>("open_tasks"),
             "sessions": counts.get::<i64, _>("sessions"),
             "memories": counts.get::<i64, _>("memories"),
         },
@@ -2448,62 +2129,11 @@ async fn project_overview(
     })))
 }
 
-#[derive(Deserialize)]
-struct TaskQuery {
-    #[serde(default)]
-    status: Option<String>,
-}
-
-async fn project_tasks(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Path(id): Path<Uuid>,
-    Query(q): Query<TaskQuery>,
-) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id()).await?;
-    let rows =
-        match &q.status {
-            Some(status) => sqlx::query(
-                "SELECT * FROM tasks WHERE project_id = $1 AND status = $2 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-            )
-            .bind(id)
-            .bind(status)
-            .fetch_all(&state.pool)
-            .await?,
-            None => {
-                sqlx::query(
-                    "SELECT * FROM tasks WHERE project_id = $1 AND deleted_at IS NULL
-                 ORDER BY created_at DESC",
-                )
-                .bind(id)
-                .fetch_all(&state.pool)
-                .await?
-            }
-        };
-
-    let tasks: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            json!({
-                "id": r.get::<Uuid, _>("id"),
-                "title": r.get::<String, _>("title"),
-                "goal": r.get::<String, _>("goal"),
-                "acceptance_criteria": r.get::<Value, _>("acceptance_criteria"),
-                "status": r.get::<String, _>("status"),
-                "updated_at": r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "tasks": tasks })))
-}
-
 fn sessions_json(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
     rows.iter()
         .map(|r| {
             json!({
                 "id": r.get::<Uuid, _>("id"),
-                "task_id": r.get::<Option<Uuid>, _>("task_id"),
                 "agent": r.get::<String, _>("agent"),
                 "branch": r.get::<String, _>("branch"),
                 "commit_sha": r.get::<Option<String>, _>("commit_sha"),
@@ -2520,7 +2150,7 @@ async fn project_sessions(
     State(state): State<AppState>,
     user: SettledUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SessionsResponse>> {
     auth::require_member(&state.pool, id, user.id()).await?;
     let rows = sqlx::query(
         "SELECT s.*, EXISTS (
@@ -2539,7 +2169,6 @@ async fn project_sessions(
         .map(|r| {
             let mut v = json!({
                 "id": r.get::<Uuid, _>("id"),
-                "task_id": r.get::<Option<Uuid>, _>("task_id"),
                 "agent": r.get::<String, _>("agent"),
                 "branch": r.get::<String, _>("branch"),
                 "status": r.get::<String, _>("status"),
@@ -2550,7 +2179,7 @@ async fn project_sessions(
             v
         })
         .collect();
-    Ok(Json(json!({ "sessions": sessions })))
+    Ok(Json(SessionsResponse { sessions }))
 }
 
 async fn session_detail(
@@ -2574,7 +2203,7 @@ async fn session_handoff(
     State(state): State<AppState>,
     user: SettledUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<HandoffResponse>> {
     let row = sqlx::query(
         "SELECT * FROM handoffs WHERE session_id = $1 AND deleted_at IS NULL
          ORDER BY created_at DESC LIMIT 1",
@@ -2587,7 +2216,9 @@ async fn session_handoff(
     let project_id: Uuid = row.try_get("project_id")?;
     auth::require_member(&state.pool, project_id, user.id()).await?;
 
-    Ok(Json(json!({ "handoff": handoff_json(&row) })))
+    Ok(Json(HandoffResponse {
+        handoff: handoff_json(&row),
+    }))
 }
 
 fn handoff_json(r: &sqlx::postgres::PgRow) -> Value {
@@ -2661,15 +2292,12 @@ async fn project_memories(
             )));
         }
     }
-    let limit = q
-        .limit
-        .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
-        .clamp(1, crate::global::VIEW_PAGE_MAX);
+    let limit = crate::global::view_page_limit(q.limit);
     let want_state = q.state.unwrap_or_else(|| "active".to_string());
 
     let rows = sqlx::query(
         "SELECT m.*,
-                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1
+                CASE m.scope WHEN 'session' THEN 0 WHEN 'branch' THEN 1
                              WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket,
                 CASE WHEN $2::text IS NULL OR $2 = '' THEN 0
                      ELSE ts_rank(to_tsvector('english', m.content),
@@ -2781,7 +2409,7 @@ async fn memory_detail(
     State(state): State<AppState>,
     user: SettledUser,
     Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<MemoryDetailResponse>> {
     let row = sqlx::query(
         "SELECT m.*,
                 (SELECT COUNT(*) FROM memory_relations rel
@@ -2854,7 +2482,7 @@ async fn memory_detail(
 
     value["relations"] = json!(memory_relations(&state.pool, id).await?);
     value["retrieval_usage"] = json!(retrieval_usage(&state.pool, project_id, id).await?);
-    Ok(Json(json!({ "memory": value })))
+    Ok(Json(MemoryDetailResponse { memory: value }))
 }
 
 /// Both halves of the relation graph around one memory (FR-884).
@@ -2967,26 +2595,7 @@ async fn delete_memory(
         .bind(id)
         .execute(&state.pool)
         .await?;
-    Ok((StatusCode::OK, Json(json!({ "deleted": id }))))
-}
-
-async fn project_sync_status(
-    State(state): State<AppState>,
-    user: SettledUser,
-    Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id()).await?;
-    let row = sqlx::query(
-        "SELECT COUNT(*) AS applied, MAX(applied_at) AS last_applied
-         FROM sync_state WHERE project_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(Json(json!({
-        "applied_items": row.get::<i64, _>("applied"),
-        "last_applied_at": row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_applied"),
-    })))
+    Ok((StatusCode::OK, Json(DeletedResponse { deleted: id })))
 }
 
 // ---------------------------------------------------------------------------
@@ -3347,10 +2956,7 @@ async fn project_activity(
 ) -> ApiResult<Json<Value>> {
     auth::require_member(&state.pool, project_id, user.id()).await?;
     let (events, decisions) = split_activity_kinds(q.kinds.as_deref())?;
-    let limit = q
-        .limit
-        .unwrap_or(ACTIVITY_PAGE_DEFAULT)
-        .clamp(1, crate::global::VIEW_PAGE_MAX);
+    let limit = crate::global::view_page_limit(q.limit.or(Some(ACTIVITY_PAGE_DEFAULT)));
     let (at, id) = crate::global::PageCursor::descending_bound(
         crate::global::PageCursor::decode_opt(q.cursor.as_deref()),
     );
@@ -3499,9 +3105,7 @@ struct PageQuery {
 
 impl PageQuery {
     fn page(&self) -> i64 {
-        self.limit
-            .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
-            .clamp(1, crate::global::VIEW_PAGE_MAX)
+        crate::global::view_page_limit(self.limit)
     }
 }
 
@@ -3639,10 +3243,7 @@ async fn project_retrieval_traces(
     Query(q): Query<TraceListQuery>,
 ) -> ApiResult<Json<Value>> {
     auth::require_member(&state.pool, project_id, user.id()).await?;
-    let limit = q
-        .limit
-        .unwrap_or(crate::global::VIEW_PAGE_DEFAULT)
-        .clamp(1, crate::global::VIEW_PAGE_MAX);
+    let limit = crate::global::view_page_limit(q.limit);
     let (at, id) = crate::global::PageCursor::descending_bound(
         crate::global::PageCursor::decode_opt(q.cursor.as_deref()),
     );

@@ -18,15 +18,11 @@
 //! assert the *missing-worktree* fallback would then pass without exercising
 //! it.
 
-use crate::state::{Daemon, Resolved, ServerCredentials};
-use cairn_core::domain::{ObservationType, Project, Session};
+use crate::state::{Daemon, ServerCredentials};
+use cairn_core::domain::{Project, Session};
 use cairn_core::CairnConfig;
-use cairn_git::RepoInstance;
-use cairn_store::outbox::SyncPolicy;
-use cairn_store::repo::NewObservation;
 use cairn_store::{repo, Store};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -74,24 +70,6 @@ fn isolate_home() -> &'static std::path::Path {
     })
 }
 
-/// Hold this for as long as a test is writing credentials.
-///
-/// `config.json` and the token file are one pair of paths for the whole
-/// process, so every test that writes them is writing the same two files. They
-/// are serialized rather than isolated per test because the paths come from
-/// `cairn_core::paths`, which reads the environment — and moving `CAIRN_HOME`
-/// per test would be a second process-global mutation racing the first.
-///
-/// Lives here rather than in one test module because more than one module now
-/// writes credentials, and two locks would serialize each module against itself
-/// and neither against the other.
-pub async fn credentials_serially() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await
-}
-
 /// A daemon with an empty in-memory store and no server configured.
 pub async fn daemon() -> Daemon {
     daemon_with(CairnConfig::default(), ServerCredentials::default()).await
@@ -107,7 +85,6 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         lifecycle_kinds: Arc::new(RwLock::new(HashMap::new())),
         run_id: Uuid::now_v7(),
         config: Arc::new(RwLock::new(config)),
-        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),
@@ -115,10 +92,10 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         last_activity: Arc::new(AtomicI64::new(chrono::Utc::now().timestamp_millis())),
         in_flight_captures: Arc::new(AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
-        last_observed_instance: Arc::new(RwLock::new(None)),
         outage_cache: Arc::new(tokio::sync::Mutex::new(
             crate::deliver::OutageCache::default(),
         )),
+        legacy_migration: serde_json::json!({ "status": "not_pending" }),
     }
 }
 
@@ -153,9 +130,7 @@ pub async fn session_in_run(d: &Daemon, p: &Project, key: &str, run: Uuid) -> Se
             branch: "main",
             commit_sha: Some("abc1234"),
             worktree_path: &worktree(&p.name),
-            task_id: None,
             daemon_run_id: run,
-            policy: SyncPolicy::from_project(p),
         },
     )
     .await
@@ -165,87 +140,6 @@ pub async fn session_in_run(d: &Daemon, p: &Project, key: &str, run: Uuid) -> Se
 /// A session belonging to this daemon's current run.
 pub async fn session(d: &Daemon, p: &Project, key: &str) -> Session {
     session_in_run(d, p, key, d.run_id).await
-}
-
-/// A session on a named branch, for the branch-scoped lookups.
-pub async fn session_on_branch(d: &Daemon, p: &Project, key: &str, branch: &str) -> Session {
-    repo::start_session(
-        &d.store,
-        repo::StartSession {
-            project_id: p.id,
-            user_id: d.user_id,
-            agent: "claude-code",
-            agent_session_key: key,
-            branch,
-            commit_sha: Some("abc1234"),
-            worktree_path: &worktree(&p.name),
-            task_id: None,
-            daemon_run_id: d.run_id,
-            policy: SyncPolicy::from_project(p),
-        },
-    )
-    .await
-    .expect("session")
-}
-
-/// End `s`, so it stops being active.
-pub async fn end(d: &Daemon, p: &Project, s: &Session) {
-    repo::end_session(
-        &d.store,
-        s.id,
-        cairn_core::domain::SessionStatus::Completed,
-        Some("done"),
-        SyncPolicy::from_project(p),
-    )
-    .await
-    .expect("end session");
-}
-
-/// Record one file edit against `session`.
-pub async fn observe_edit(d: &Daemon, s: &Session, path: &str) {
-    repo::insert_observation(
-        &d.store,
-        NewObservation {
-            session_id: s.id,
-            kind: ObservationType::FileChanged,
-            branch: "main",
-            commit_sha: Some("abc1234"),
-            path: Some(path),
-            command: None,
-            exit_code: None,
-            outcome: None,
-            summary: &format!("Edited {path}"),
-            details: None,
-            payload_bytes: 0,
-            truncated: false,
-        },
-    )
-    .await
-    .expect("observation");
-}
-
-/// A `Resolved` for `p`, as a request handler would receive it.
-///
-/// The worktree path points at a directory that does not exist. That is the
-/// interesting case rather than a shortcut: the daemon has to keep working when
-/// a checkout has been moved or deleted under it (FR-009).
-pub fn resolved(p: &Project) -> Resolved {
-    Resolved {
-        repo: RepoInstance {
-            git_common_dir: PathBuf::from(&p.git_common_dir),
-            worktree_path: PathBuf::from(worktree(&p.name)),
-            name: p.name.clone(),
-            remote: p.repository_remote.clone(),
-        },
-        policy: SyncPolicy::from_project(p),
-        project: p.clone(),
-    }
-}
-
-/// Re-read a project, so a test asserts on stored state rather than on the
-/// value it happened to be handed earlier.
-pub async fn reload(d: &Daemon, id: Uuid) -> Project {
-    repo::project(&d.store, id).await.expect("project reload")
 }
 
 /// A daemon plus a real Git repository, for the handlers that need one.
@@ -261,7 +155,7 @@ pub async fn reload(d: &Daemon, id: Uuid) -> Project {
 /// subprocess.
 pub struct Repo {
     pub daemon: Daemon,
-    pub dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
     pub cwd: String,
 }
 
@@ -291,11 +185,6 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 }
 
 impl Repo {
-    /// A daemon over a fresh repository with one commit on `main`.
-    pub async fn new() -> Self {
-        Self::with(CairnConfig::default()).await
-    }
-
     pub async fn with(config: CairnConfig) -> Self {
         let daemon = daemon_with(config, ServerCredentials::default()).await;
         let dir = tempfile::TempDir::new().expect("temp repo");
@@ -319,21 +208,11 @@ impl Repo {
             .await
             .insert(cwd.clone(), instance.clone());
 
-        Self { daemon, dir, cwd }
-    }
-
-    /// Check out a new branch, so branch-scoped behaviour can be driven.
-    pub fn checkout(&self, branch: &str) {
-        git(self.dir.path(), &["checkout", "-q", "-b", branch]);
-    }
-
-    /// Write a file into the working tree.
-    pub fn write(&self, rel: &str, contents: &str) {
-        let path = self.dir.path().join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir");
+        Self {
+            daemon,
+            _dir: dir,
+            cwd,
         }
-        std::fs::write(path, contents).expect("write");
     }
 }
 
@@ -356,47 +235,6 @@ mod isolation {
     /// directory, because the failure is precisely that the variable is absent:
     /// with it unset every path in this process resolves somewhere real.
     ///
-    /// **Falsified by** deleting the `isolate_home()` call in `daemon_with`.
-    #[tokio::test]
-    async fn a_fixture_writes_its_credentials_somewhere_disposable() {
-        // The same lock every other credential-writing test takes. Without it
-        // this mutation lands in the middle of theirs: between the logout
-        // test's removal and its assertion, or while the unwritable-config
-        // test has made the file read-only.
-        let _serial = credentials_serially().await;
-        let d = daemon().await;
-
-        let home = std::env::var_os("CAIRN_HOME").unwrap_or_default();
-        assert!(
-            !home.is_empty(),
-            "CAIRN_HOME is unset, so every credential this suite writes lands in \
-             the developer's real Cairn home"
-        );
-
-        // The write the sync tests make, made here on purpose: it is the one
-        // that reaches the filesystem.
-        d.mutate_credentials(|c| {
-            c.url = Some("https://isolation.example".into());
-            c.token = Some("isolation-token".into());
-        })
-        .await
-        .expect("store a credential");
-
-        let config = cairn_core::paths::config_path();
-        assert!(
-            config.starts_with(&home),
-            "a credential was written to {}, which is outside the temporary \
-             CAIRN_HOME at {}",
-            config.display(),
-            std::path::Path::new(&home).display()
-        );
-        assert!(
-            config.exists(),
-            "the credential write did not reach {}",
-            config.display()
-        );
-    }
-
     /// The redirect has to survive a `CAIRN_HOME` the platform allows but
     /// `std::env::var` cannot return.
     ///

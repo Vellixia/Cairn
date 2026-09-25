@@ -103,10 +103,9 @@ pub mod codes {
     /// The check ran and could not establish either outcome (FR-366).
     pub const VERIFICATION_INCONCLUSIVE: &str = "verification_inconclusive";
     /// Attested evidence was offered where a deterministic check is required —
-    /// a criterion's verification, or promotion (FR-370).
+    /// a deterministic verification or promotion (FR-370).
     pub const ATTESTED_NOT_SUFFICIENT: &str = "attested_not_sufficient";
-    /// An imported verification was offered for a criterion; readiness is a
-    /// local claim (FR-368).
+    /// An imported verification was offered where a local check is required.
     pub const IMPORTED_NOT_SUFFICIENT: &str = "imported_not_sufficient";
     /// The bounded pass hit a cap; remaining work is queued.
     pub const VERIFY_PASS_YIELDED: &str = "verify_pass_yielded";
@@ -119,13 +118,6 @@ pub mod codes {
     /// over the cap. Reported per path, never as unchanged (FR-432).
     pub const PATH_NOT_FINGERPRINTABLE: &str = "path_not_fingerprintable";
     pub const NO_BOUNDARY_RECORD: &str = "no_boundary_record";
-
-    // Task work state (`contracts/task-model.md`)
-    pub const REVISION_CONFLICT: &str = "revision_conflict";
-    pub const CRITERION_NOT_FOUND: &str = "criterion_not_found";
-    pub const BLOCKER_NOT_FOUND: &str = "blocker_not_found";
-    pub const BLOCKER_ALREADY_CLEARED: &str = "blocker_already_cleared";
-    pub const CRITERION_WAIVED: &str = "criterion_waived";
 
     // The ten promotion refusals, in the gate's fixed order so the reported
     // reason is stable (`contracts/patterns.md` §The promotion gate).
@@ -217,11 +209,6 @@ pub mod codes {
         CHECKPOINT_UNRESOLVABLE,
         PATH_NOT_FINGERPRINTABLE,
         NO_BOUNDARY_RECORD,
-        REVISION_CONFLICT,
-        CRITERION_NOT_FOUND,
-        BLOCKER_NOT_FOUND,
-        BLOCKER_ALREADY_CLEARED,
-        CRITERION_WAIVED,
         SOURCE_NOT_ACTIVE,
         SOURCE_UNVERIFIED,
         NO_EVIDENCE,
@@ -491,36 +478,11 @@ pub enum Request {
     Init {
         cwd: String,
     },
-    Status {
-        cwd: String,
-        /// Whether this caller is presenting the spool report and therefore
-        /// needs its blocked reason to be current (FR-792a).
-        ///
-        /// **A flag because the callers genuinely ask different questions.**
-        /// Answering "why is delivery not progressing" truthfully needs a fresh,
-        /// bounded peer sample, and taking one costs a network round trip.
-        /// `cairn status` and `cairn doctor` show that reason and must pay for
-        /// it. `cairn agents`, `connect`, `repair` and `disconnect` reach this
-        /// same request only for `sessions_awaiting_handoff`, and FR-105 forbids
-        /// detection from requiring network access — so they must not be made
-        /// to pay for an answer they never read.
-        ///
-        /// Defaulted, so an older CLI talking to a newer daemon asks the
-        /// cheaper question rather than failing to parse.
-        #[serde(default)]
-        spool_reason: bool,
-    },
-
     SessionStart {
         cwd: String,
         agent: String,
         #[serde(default)]
         agent_session_key: Option<String>,
-        #[serde(default)]
-        task_id: Option<Uuid>,
-    },
-    SessionList {
-        cwd: String,
     },
     SessionShow {
         cwd: String,
@@ -528,14 +490,6 @@ pub enum Request {
         session_id: Option<Uuid>,
         #[serde(default)]
         agent_session_key: Option<String>,
-    },
-    SessionBindTask {
-        cwd: String,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        task_id: Uuid,
     },
     SessionEnd {
         cwd: String,
@@ -555,13 +509,6 @@ pub enum Request {
         #[serde(default = "default_wait_for_handoff")]
         wait_for_handoff: bool,
     },
-    /// `Stop`: a turn boundary. Never ends the session (FR-032, D16).
-    TurnCheckpoint {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-    },
-
     /// One canonical lifecycle event, from an adapter (FR-112).
     ///
     /// The daemon's single lifecycle entry point. No vendor event name,
@@ -619,57 +566,6 @@ pub enum Request {
         output: crate::event::CaptureOutput,
     },
 
-    /// Read the local integration record for this machine (FR-182).
-    ///
-    /// Local only: nothing here has an outbox entity type and none of it ever
-    /// reaches the server (FR-183, FR-184).
-    IntegrationSnapshot {
-        cwd: String,
-    },
-    /// Record an agent's integration row.
-    IntegrationUpsertAgent {
-        cwd: String,
-        agent: String,
-        adapter_version: i64,
-        detected_version: Option<String>,
-        compatibility: String,
-        level: String,
-        completion_guarantee: String,
-    },
-    /// Record that this agent depends on a physical resource.
-    IntegrationBind {
-        cwd: String,
-        agent: String,
-        kind: String,
-        owner: String,
-        scope: String,
-        location: String,
-        #[serde(default)]
-        content_hash: Option<String>,
-        #[serde(default)]
-        artifact_schema: Option<i64>,
-        #[serde(default)]
-        artifact_revision: Option<String>,
-        activation: String,
-        #[serde(default)]
-        container_single_line: bool,
-        #[serde(default)]
-        created_container: bool,
-    },
-    /// Drop this agent's dependency on one resource kind.
-    ///
-    /// The resource itself goes only when no binding remains (FR-243).
-    IntegrationUnbind {
-        cwd: String,
-        agent: String,
-        kind: String,
-    },
-    /// Remove an agent's record, but only once its last binding is gone
-    /// (FR-244).
-    IntegrationForgetAgent {
-        cwd: String,
-        agent: String,
-    },
     /// Record that a capability was established here (FR-242, D19a).
     IntegrationEvidence {
         cwd: String,
@@ -681,56 +577,6 @@ pub enum Request {
         #[serde(default)]
         degraded: Option<bool>,
     },
-    /// Discard observation evidence a detected version change invalidated
-    /// (FR-245).
-    IntegrationInvalidateEvidence {
-        cwd: String,
-        agent: String,
-        #[serde(default)]
-        detected_version: Option<String>,
-    },
-    /// Record, resume, abort or complete an ownership migration (FR-228).
-    IntegrationMigration {
-        cwd: String,
-        agent: String,
-        kind: String,
-        action: MigrationAction,
-        #[serde(default)]
-        source_owner: Option<String>,
-        #[serde(default)]
-        source_scope: Option<String>,
-        #[serde(default)]
-        source_location: Option<String>,
-        #[serde(default)]
-        target_owner: Option<String>,
-        #[serde(default)]
-        target_scope: Option<String>,
-        #[serde(default)]
-        target_location: Option<String>,
-        #[serde(default)]
-        overlap_permitted: bool,
-        #[serde(default)]
-        phase: Option<String>,
-        #[serde(default)]
-        last_error: Option<String>,
-    },
-    /// Record a preserved recovery artifact's metadata (FR-222).
-    IntegrationRecovery {
-        cwd: String,
-        agent: String,
-        kind: String,
-        source_path: String,
-        artifact_path: String,
-        content_hash: String,
-    },
-
-    Observe {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        observation: ObservationInput,
-    },
-
     Context {
         cwd: String,
         #[serde(default)]
@@ -809,115 +655,6 @@ pub enum Request {
         #[serde(default)]
         agent_session_key: Option<String>,
         note: String,
-    },
-
-    TaskList {
-        cwd: String,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-    },
-    TaskGet {
-        cwd: String,
-        task_id: Uuid,
-    },
-    TaskCreate {
-        cwd: String,
-        title: String,
-        goal: String,
-        #[serde(default)]
-        acceptance_criteria: Vec<String>,
-    },
-    TaskUpdate {
-        cwd: String,
-        task_id: Uuid,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        goal: Option<String>,
-        #[serde(default)]
-        acceptance_criteria: Option<Vec<String>>,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-    },
-
-    // -----------------------------------------------------------------------
-    // Feature 003 task work state (`contracts/task-model.md`).
-    //
-    // Note what is absent from every one of these: any field in which a caller
-    // could store a completion percentage, and any sprint, epic, point,
-    // assignee, estimate, board or inter-task dependency (FR-486, FR-491).
-    // -----------------------------------------------------------------------
-    TaskCriterionAdd {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        task_id: Uuid,
-        text: String,
-    },
-    TaskCriterionSet {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-        #[serde(default)]
-        state: Option<CriterionState>,
-        #[serde(default)]
-        text: Option<String>,
-        /// What the caller read. Supplying it is how a caller is protected;
-        /// omitting it applies the write and records `blind_write` (FR-490).
-        #[serde(default)]
-        expected_revision: Option<i64>,
-    },
-    /// Ask Cairn to verify a criterion from its evidence. There is no field in
-    /// which a caller can *assert* a verification — that is the whole point.
-    TaskCriterionVerify {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-        #[serde(default)]
-        evidence_id: Option<Uuid>,
-    },
-    TaskCriterionRemove {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        criterion_id: Uuid,
-    },
-    TaskBlockerOpen {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        task_id: Uuid,
-        description: String,
-    },
-    TaskBlockerClear {
-        cwd: String,
-        #[serde(default)]
-        agent_session_key: Option<String>,
-        #[serde(default)]
-        session_id: Option<Uuid>,
-        blocker_id: Uuid,
-    },
-    TaskReadiness {
-        cwd: String,
-        task_id: Uuid,
-    },
-    TaskHistory {
-        cwd: String,
-        task_id: Uuid,
-        #[serde(default)]
-        limit: Option<i64>,
     },
 
     MemoryPin {
@@ -1004,10 +741,6 @@ pub enum Request {
         #[serde(default)]
         domain: Option<KnowledgeDomain>,
     },
-    MemoryGet {
-        cwd: String,
-        memory_id: Uuid,
-    },
     MemorySearch {
         cwd: String,
         #[serde(default)]
@@ -1018,263 +751,24 @@ pub enum Request {
         query: MemoryQuery,
     },
 
-    // ---- Reusable cross-project patterns (`contracts/patterns.md`) --------
-    //
-    // A pattern is local to the machine and has no project identity, so none of
-    // these carries a project — `cwd` is here only to resolve *this* project for
-    // the promotion source and for an application's attribution.
-    /// Recompute every derived value and report what differed (FR-478,
-    /// FR-518).
-    ///
-    /// A release where a derived value disagrees with its rebuild ships a known
-    /// inconsistency, so this exits non-zero when any of them does.
-    RebuildDerived {
-        cwd: String,
-    },
-
-    /// What this local store would lose if it were deleted, and what it would
-    /// not (FR-705, FR-710a, SC-714).
-    ///
-    /// A question about the store, not about a project, but `cwd` is still
-    /// carried: every request resolves a project, and a durability report that
-    /// silently answered for whichever store the daemon happened to have open
-    /// would be answering a question nobody asked.
-    Durability {
-        cwd: String,
-    },
-
-    /// List promoted patterns, with their counters.
-    PatternList {
-        cwd: String,
-        #[serde(default)]
-        trust: Option<PatternTrust>,
-        #[serde(default)]
-        signal: Option<String>,
-    },
-    /// One pattern in full: text, applications, counterexamples, and the
-    /// sanitization report.
-    PatternShow {
-        cwd: String,
-        id: Uuid,
-    },
-
-    // -----------------------------------------------------------------------
-    // Migration from Feature 004 (`contracts/migration-cutover.md` §4–§9)
-    // -----------------------------------------------------------------------
-    /// Count what the store holds, change nothing else (§4.1).
-    MigrateInspect {
-        cwd: String,
-    },
-    /// Claim ownership of legacy patterns for the authenticated account (§4.1a).
-    ///
-    /// `patterns` empty means "every eligible one": the surface still requires
-    /// an explicit `--claim-patterns`, so nothing is claimed by simply running
-    /// the migration, but a user who has read the inspect report and wants all
-    /// of them should not have to retype fourteen ids.
-    MigrateClaimPatterns {
-        cwd: String,
-        #[serde(default)]
-        patterns: Vec<Uuid>,
-    },
-    /// Run the migration, entering at the first phase that is not done (§7).
-    MigrateRun {
-        cwd: String,
-    },
-    /// Phases, and every retained record with its reason (§12.2).
-    MigrateStatus {
-        cwd: String,
-    },
-    /// Re-attempt every retained record, on demand.
-    MigrateRetryRetained {
-        cwd: String,
-    },
-    /// Propose a promotion. Runs the ten-check gate; `dry_run` reports the
-    /// outcome without writing (FR-395).
-    PatternPromote {
+    /// Capped relation view from authenticated server records. Read-only.
+    Graph {
         cwd: String,
         memory_id: Uuid,
         #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        problem: Option<String>,
-        #[serde(default)]
-        signals: Vec<String>,
-        #[serde(default)]
-        applicability: Vec<String>,
-        #[serde(default)]
-        root_cause: Option<String>,
-        #[serde(default)]
-        approach: Option<String>,
-        #[serde(default)]
-        constraints: Vec<String>,
-        #[serde(default)]
-        dry_run: bool,
-        /// What this promotes into. Absent means `pattern`, so a caller
-        /// naming none gets today's behaviour unchanged (FR-506, D415).
-        #[serde(default)]
-        target: Option<PromotionTarget>,
-        /// `(kind, value)` pairs the promoted record applies to, as
-        /// `"kind=value"` strings — `language=rust`, `tool=docker` — screened
-        /// against the closed `language | tool` vocabulary before this
-        /// reaches the promotion gate; a value naming neither is refused
-        /// rather than silently dropped (FR-434, FR-514). Meaningful only
-        /// when `target` is `personal` or `team`; ignored for `target:
-        /// pattern`, which keeps using `applicability` above for its own
-        /// free-text conditions.
-        #[serde(default)]
-        applicability_facts: Vec<String>,
-    },
-    /// Record what happened when a pattern was applied here (FR-401, FR-404).
-    PatternOutcome {
-        cwd: String,
-        id: Uuid,
-        outcome: PatternOutcome,
-        #[serde(default)]
-        signals: Vec<String>,
-        #[serde(default)]
-        alternative_cause: Option<String>,
-        #[serde(default)]
-        evidence_id: Option<Uuid>,
-        #[serde(default)]
-        session: Option<Uuid>,
-    },
-    /// Tombstone a pattern. Its applications survive as history.
-    PatternForget {
-        cwd: String,
-        id: Uuid,
+        hops: Option<i64>,
     },
 
-    // ---- Team knowledge (`contracts/global-memory.md` §5b, T133) ---------
-    //
-    // `list`/`propose` are reachable by any member; `ratify`/`retire` are
-    // reachable only by an admin, and only through this CLI surface or the
-    // server's own administration path — never through `cairn_remember`
-    // (FR-455). Only `propose` carries a `cwd`, and it carries one for a
-    // single reason: T123 requires the proposal to be screened against the
-    // identities of the project the proposer is working in, and there is no
-    // other way to learn which that is. Every *authorization* check on these
-    // four (project membership, admin standing) is still answered by the
-    // server from the caller's token, the same as `AdminUserCreate` and its
-    // siblings above — the `cwd` is an input to the privacy screen, never to a
-    // permission decision.
-    //
-    // Screening against an empty identity set would not have been a smaller
-    // version of this. `validate_global_content` passes the
-    // `project_identifying` class when it has no identities to compare against
-    // (FR-580, the one documented fail-open), so a proposal made with no `cwd`
-    // would be the one entry point of five at which naming a project is
-    // allowed — and content only has to get in once.
-    /// `authoritative` entries, plus the caller's own `proposed` ones. `all`
-    /// additionally asks for every state, honored only for an admin caller
-    /// (FR-464).
-    TeamList {
-        #[serde(default)]
-        all: bool,
-    },
-    /// Any member of at least one project may propose; the row lands
-    /// `proposed` and nothing else — no path from here ever reaches
-    /// `authoritative` (FR-451, FR-455).
-    TeamPropose {
-        cwd: String,
-        content: String,
-        #[serde(default)]
-        knowledge_type: Option<MemoryType>,
-        #[serde(default)]
-        topic_key: Option<String>,
-        #[serde(default)]
-        value_key: Option<String>,
-        /// `"kind=value"` strings, screened against the closed
-        /// `language | tool` vocabulary (FR-446).
-        #[serde(default)]
-        applicability: Vec<String>,
-    },
-    /// Admin only. Moves `proposed` to `authoritative` by compare-and-swap on
-    /// the entry's current state, never last-write-wins (D409, FR-454).
-    TeamRatify {
-        id: Uuid,
-        /// This ratification's own explicit `supersedes` relation (T127, §6,
-        /// D431) — the one place that relation kind is ever recorded, and
-        /// only on the ratifying admin's say-so, never inferred.
-        #[serde(default)]
-        supersedes: Option<Uuid>,
-    },
-    /// Admin only. Moves `authoritative` to `retired`; never reversible by
-    /// re-ratifying (FR-465).
-    TeamRetire {
-        id: Uuid,
-    },
-
-    // ---- Personal knowledge (`contracts/global-memory.md` §5a, T082) ------
-    //
-    // Reads and the one tombstone mutation, over `personal_knowledge`. No
-    // `cwd`: like team knowledge, personal knowledge follows the account,
-    // not any one project — `recall_personal` filters by applicability at
-    // read time inside briefing/search composition, but a caller's own
-    // listing here shows everything they hold, unfiltered by the project
-    // they happen to be standing in.
-    /// This account's own personal entries (T082, FR-434–FR-436).
-    PersonalList {
-        #[serde(default)]
-        query: Option<String>,
-        #[serde(default)]
-        limit: Option<i64>,
-    },
-    /// Tombstone one entry: content cleared, nothing else touched (FR-440,
-    /// FR-441). Scoped to the caller's own account by the store call this
-    /// forwards to — a caller cannot forget another account's entry, or
-    /// even learn that one exists at that id.
-    PersonalForget {
-        id: Uuid,
-    },
-
-    /// This project's derived stack traits — the same set applicability
-    /// matching reads at recall time (D413, FR-437, T082).
-    ProjectTraits {
+    /// Accepted safe-event metadata from authenticated server records only.
+    Replay {
         cwd: String,
     },
 
-    // ---- Shared-project membership (`contracts/identity-
-    // administration.md` §9a, T063) ---------------------------------------
-    //
-    // Every route below is addressed by email, resolved to a server-side row
-    // id the same way `AdminUserPatch` is (FR-418–FR-427) — the CLI never
-    // learns or holds a project member's uuid.
-    /// `POST /api/projects/{id}/members`. Grants membership; refused for
-    /// anyone but an existing member or a server admin (FR-418, FR-419).
-    ProjectMemberAdd {
-        project_id: Uuid,
-        email: String,
-    },
-    /// `DELETE /api/projects/{id}/members` (FR-420, FR-421).
-    ProjectMemberRemove {
-        project_id: Uuid,
-        email: String,
-    },
-    /// `GET /api/projects/{id}/members` (FR-427).
-    ProjectMemberList {
-        project_id: Uuid,
+    /// Read-only team-governance state. No MCP request can ratify or retire.
+    Governance {
+        cwd: String,
     },
 
-    /// Inspect a subject: its members, its canonical answer or answers, its
-    /// reconciliation state, and the decisions that produced it (FR-307).
-    MemorySubject {
-        cwd: String,
-        topic_key: String,
-        #[serde(default)]
-        scope: Option<MemoryScope>,
-        #[serde(default)]
-        scope_key: Option<String>,
-        /// Which domain's subject to read. Absent means `project`, so every
-        /// pre-004 caller is unaffected.
-        ///
-        /// A domain is not a scope, and this field is why: `scope`/`scope_key`
-        /// describe how long a *project* memory stays relevant and mean nothing
-        /// to the other two domains, which have no scope at all. Naming a domain
-        /// selects which corpus and which relations table the derivation reads,
-        /// and nothing else about the read changes (FR-442, FR-462; T078, T127).
-        #[serde(default)]
-        domain: Option<KnowledgeDomain>,
-    },
     /// A session confirms an existing memory is still true (FR-321).
     ///
     /// Explicit only. Cairn never infers a reinforcement from a matching value
@@ -1320,15 +814,6 @@ pub enum Request {
         #[serde(default)]
         role: Option<EvidenceRole>,
     },
-    EvidenceList {
-        cwd: String,
-        #[serde(default)]
-        memory_id: Option<Uuid>,
-    },
-    EvidenceShow {
-        cwd: String,
-        evidence_id: Uuid,
-    },
     /// Run verification on demand. Same caps, same verifiers, reported
     /// synchronously (FR-472).
     Verify {
@@ -1358,231 +843,9 @@ pub enum Request {
         #[serde(default)]
         rationale: Option<String>,
     },
-
-    PrivacyExclude {
-        cwd: String,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        command: Option<String>,
-    },
-    PrivacyUnexclude {
-        cwd: String,
-        #[serde(default)]
-        path: Option<String>,
-        #[serde(default)]
-        command: Option<String>,
-    },
-    PrivacyList {
-        cwd: String,
-    },
-
-    Delete {
-        cwd: String,
-        target: DeleteTarget,
-        id: Uuid,
-        #[serde(default)]
-        with_memories: bool,
-    },
-
-    Link {
-        cwd: String,
-        #[serde(default)]
-        server_project_id: Option<Uuid>,
-        #[serde(default)]
-        create: bool,
-    },
-    Unlink {
-        cwd: String,
-    },
-    AuthTokenSet {
-        token: String,
-        #[serde(default)]
-        server_url: Option<String>,
-    },
-    AuthLogout,
-    AuthStatus,
-    /// Change the caller's own password (FR-405, `contracts/identity-
-    /// administration.md` §5). Reachable regardless of `must_change_password`
-    /// — it is the one route that is.
-    AuthChangePassword {
-        new_password: String,
-    },
-    SyncStatus {
-        cwd: String,
-    },
-    SyncNow {
-        cwd: String,
-    },
-
-    // -----------------------------------------------------------------------
-    // Administration (`contracts/identity-administration.md` §2, §2a, §9).
-    //
-    // Every one of these is daemon-mediated exactly like `Link`/`AuthTokenSet`
-    // above: the CLI never holds a bearer token, and the daemon is what makes
-    // the HTTP call. None of these carries `cwd` — an account is server-wide,
-    // not project-scoped, so there is no repository to resolve.
-    // -----------------------------------------------------------------------
-    /// `POST /api/admin/users` (FR-401). Admin-only; the server enforces that,
-    /// this only carries the request. The response's `temporary_password` is
-    /// shown to the operator exactly once — there is no route that reads it
-    /// back (FR-403).
-    AdminUserCreate {
-        email: String,
-        display_name: String,
-    },
-    /// `GET /api/admin/users`: every account, its role and its status
-    /// (FR-411).
-    AdminUserList,
-    /// `PATCH /api/admin/users/{id}`: promote, demote, disable or enable one
-    /// account (FR-402, FR-408, FR-412), addressed by email — the CLI never
-    /// has to learn or hold a server-side row id.
-    AdminUserPatch {
-        email: String,
-        #[serde(default)]
-        role: Option<ServerRole>,
-        #[serde(default)]
-        status: Option<UserStatus>,
-    },
-    /// `POST /api/admin/users/{id}/reset-password` (FR-553–FR-559). The new
-    /// temporary password is returned exactly once, and never again by any
-    /// route (FR-554).
-    ResetPassword {
-        email: String,
-    },
 }
 
-/// Repository and project state for `cairn status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusPayload {
-    pub project: ProjectSummary,
-    pub repository: RepositoryState,
-    pub worktree_path: String,
-    pub sessions: Vec<SessionSummary>,
-    pub integration_mode: String,
-    pub daemon: String,
-    pub observation_count: i64,
-    pub memory_count: i64,
-    /// The server a linked project syncs to, when one is configured.
-    #[serde(default)]
-    pub server_url: Option<String>,
-    /// Whether a credential is stored for it.
-    #[serde(default)]
-    pub authenticated: bool,
-    /// The build answering this, so a bug report can name it.
-    #[serde(default)]
-    pub version: Option<String>,
-    /// The local database's schema version, so doctor can report it without
-    /// linking the store into the CLI.
-    #[serde(default)]
-    pub local_schema_version: i64,
-    /// Boundaries that acknowledged but have not produced their handoff yet.
-    ///
-    /// A terminal session never sits silently owing one: this is what makes
-    /// the debt visible (FR-240 clause 3).
-    #[serde(default)]
-    pub sessions_awaiting_handoff: i64,
-    /// How far subject identity has actually reached in this project, and what
-    /// the mechanism is currently reporting (FR-499). Defaulted, so a Feature
-    /// 001 consumer reading an older payload still parses.
-    #[serde(default)]
-    pub knowledge: Option<KnowledgeHealth>,
-    /// Boundaries whose synthesis has failed, with the redacted reason. They
-    /// stay retryable and actionable; this is not a terminal outcome.
-    #[serde(default)]
-    pub handoff_synthesis_failures: Vec<HandoffFailure>,
-    /// What capture did, and where its events currently are (FR-740, FR-749c).
-    ///
-    /// Defaulted so a client reading an older payload still parses.
-    #[serde(default)]
-    pub capture: Option<CaptureHealth>,
-}
-
-/// Capture's own state, reported truthfully rather than reassuringly.
-///
-/// Fail-soft describes what the agent experiences: a capture-class event that
-/// misses its deadline is dropped and the hook still exits successfully. It
-/// does not describe what Cairn is allowed to know about itself, and this is
-/// where the difference is visible (FR-749c, SC-706).
-///
-/// Every number here is a count. No field carries a path, a command, a token or
-/// any part of an event — a disposition record has nothing of the payload it
-/// was processing (FR-749d, FR-741), and neither does its summary.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CaptureHealth {
-    /// How often each disposition was recorded, keyed by its fixed name.
-    ///
-    /// A map rather than named fields, because the vocabulary is closed and
-    /// declared once in `data-model.md` §4; thirteen fields here would be a
-    /// second declaration of it that could fall behind the first.
-    #[serde(default)]
-    pub dispositions: std::collections::BTreeMap<String, i64>,
-    /// Where this machine's undelivered events are.
-    #[serde(default)]
-    pub events: SpoolHealth,
-    /// Where this machine's undelivered commands are.
-    #[serde(default)]
-    pub commands: SpoolHealth,
-}
-
-/// One spool, as a partition (`data-model.md` §3).
-///
-/// A queued row is in exactly one of these conditions and they cover every row
-/// the spool still holds, so the five sum to the table. `undelivered` is
-/// derived from the four non-terminal ones rather than counted separately, so
-/// it cannot disagree with them, and `terminal_retry_exhausted` is a subset of
-/// `terminal` rather than a sixth condition.
-/// No longer `Copy`: FR-792's two additions are an instant and a reason, and
-/// both are text on the wire. A status type that had to stay `Copy` would be a
-/// type that could never carry a reason.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SpoolHealth {
-    pub waiting: i64,
-    pub in_flight: i64,
-    pub retrying: i64,
-    /// Waiting for a server that cannot yet hold this contract version or kind.
-    /// Not a failure, and it spends no attempt budget.
-    pub deferred: i64,
-    pub terminal: i64,
-    pub terminal_retry_exhausted: i64,
-    pub undelivered: i64,
-    /// Whether the spool is at its bound and refusing new work.
-    pub saturated: bool,
-    /// Undelivered rows queued for a different server instance (FR-791).
-    ///
-    /// Intact, visible, and undeliverable under the deployment this store is
-    /// talking to now. Zero on any ordinary machine; a non-zero value means the
-    /// endpoint now answers as a server that did not queue this work.
-    #[serde(default)]
-    pub other_instance: i64,
-    /// When the oldest undelivered row was created (FR-792), RFC 3339, or
-    /// absent when nothing is waiting.
-    ///
-    /// A depth on its own does not say whether anything is wrong. Fifty rows
-    /// spooled in the last second is a busy minute; one row spooled last week is
-    /// an outage nobody noticed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oldest_at: Option<String>,
-    /// Why delivery is not progressing (FR-792), or absent when it is.
-    ///
-    /// One of `no_account`, `server_unreachable`, `server_instance_mismatch`,
-    /// `saturated`, `retry_exhausted`, `refused_by_server`,
-    /// `awaiting_capability`, `backing_off` — most severe first,
-    /// because a spool can be several at once and this reports one. A closed
-    /// vocabulary rather than a message, so a caller can branch on it and a
-    /// reader is not asked to parse prose.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocked_reason: Option<String>,
-}
-
-/// One boundary still owing a handoff, and why (FR-240 clause 3).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandoffFailure {
-    pub session_id: Uuid,
-    /// Redacted and bounded; never file or conversation content.
-    pub reason: String,
-}
-
+/// Project binding returned by setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSummary {
     pub id: Uuid,
@@ -1609,13 +872,11 @@ pub struct SessionSummary {
     pub agent: String,
     pub branch: String,
     pub commit: Option<String>,
-    pub task_id: Option<Uuid>,
     pub previous_session_id: Option<Uuid>,
     pub worktree_path: String,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub last_turn_ended_at: Option<DateTime<Utc>>,
-    /// Reported only. Idleness never reclassifies a session (FR-009).
     pub idle_seconds: i64,
 }
 
@@ -1627,7 +888,6 @@ impl SessionSummary {
             agent: s.agent.clone(),
             branch: s.branch.clone(),
             commit: s.commit_sha.clone(),
-            task_id: s.task_id,
             previous_session_id: s.previous_session_id,
             worktree_path: s.worktree_path.clone(),
             started_at: s.started_at,
@@ -1661,7 +921,19 @@ pub struct Provenance {
 pub struct RankInfo {
     pub scope_bucket: i64,
     pub relevance: f64,
+    /// Reserved explainable component. No vector backend exists yet, so every
+    /// result reports the stable neutral value rather than implying a score.
+    #[serde(default)]
+    pub vector: f64,
+    /// Relation expansion is not used by lexical search; normal results carry
+    /// its neutral component so score explanations stay complete.
+    #[serde(default)]
+    pub relation: f64,
     pub age_days: i64,
+    /// Deterministic tie-break contribution. Ranking aid only: never truth,
+    /// verification, ownership, evidence, or lifecycle state.
+    #[serde(default)]
+    pub recency: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1900,8 +1172,6 @@ pub struct Briefing {
     pub project: ProjectSummary,
     pub repository: RepositoryState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub task: Option<BriefingTask>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_handoff: Option<BriefingHandoff>,
     pub decisions: Vec<String>,
     pub known_failures: Vec<String>,
@@ -1981,50 +1251,11 @@ pub struct BriefingPattern {
     pub signal_overlap: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BriefingTask {
-    pub id: Uuid,
-    pub title: String,
-    pub goal: String,
-    pub acceptance_criteria: Vec<String>,
-    pub status: TaskStatus,
-    // ---- Feature 003 Tier 0a. Every one is O(1) in the size of the task, which
-    // is what makes the tier's guarantee keepable (FR-443).
-    /// Counts by state. Never a percentage — there is no field for one (FR-486).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<crate::tasks::Progress>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completion_readiness: Option<CompletionReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_blockers: Option<usize>,
-    /// The single most actionable open blocker, summarized to one line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blocker: Option<String>,
-    /// True when the goal was truncated to `goal_max_tokens`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub goal_truncated: bool,
-    /// Criterion labels admitted as Tier 0b detail, in action order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub criteria: Vec<BriefingCriterion>,
-    /// How many criteria did not fit, with the path that retrieves them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub criteria_omitted: Option<usize>,
-}
-
-/// One criterion as Level 0 renders it — both axes named, never collapsed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BriefingCriterion {
-    pub label: String,
-    pub text: String,
-    pub state: CriterionState,
-    pub verification: CriterionVerification,
-}
-
 /// A Level 0 warning. Content, not diagnostics: present whether or not
 /// `explain` was requested (FR-464).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextWarning {
-    /// `task_divergence` | `checkpoint` | `task` | `conflict` | `drift`.
+    /// `checkpoint` | `conflict` | `drift`.
     pub kind: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2086,7 +1317,7 @@ pub struct BriefingHandoff {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BriefingMemory {
-    pub task: Vec<String>,
+    pub session: Vec<String>,
     pub branch: Vec<String>,
     pub project: Vec<String>,
 }
@@ -2109,170 +1340,6 @@ pub struct ContextPayload {
     pub selection: Option<Selection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncStatusPayload {
-    pub linked: bool,
-    pub server_project_id: Option<Uuid>,
-    pub server_url: Option<String>,
-    pub pending: i64,
-    pub failed: i64,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub failures: Vec<SyncFailure>,
-    /// Work retained for a server that cannot hold it yet (FR-415, FR-418).
-    ///
-    /// Reported apart from `pending` and from `failed` because it is neither.
-    /// Defaulted so a Feature 001 consumer reading an older payload still
-    /// parses, and so this payload still satisfies an older consumer.
-    #[serde(default)]
-    pub degradation: Option<SyncDegradation>,
-}
-
-/// One synchronization namespace's outbox standing (FR-487,
-/// `contracts/sync-namespaces.md`).
-///
-/// Spliced onto `cairn sync status`'s response as a sibling `namespaces`
-/// array — the same way `patterns[]` rides alongside `SearchPayload` — rather
-/// than added to [`SyncStatusPayload`] itself, so that struct's existing
-/// project-scoped `pending`/`failed` keep meaning exactly what they meant
-/// before this feature. A project always has exactly one `project` row here;
-/// `personal`/`team` rows are present only once this store has ever queued
-/// something in that namespace (D426, D427, FR-486).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamespaceSyncStatus {
-    /// The cursor key, e.g. `project:<id>`, `personal:<instance>:<user>`,
-    /// `team:<instance>` (`SyncNamespace::key`).
-    pub namespace: String,
-    pub kind: KnowledgeDomain,
-    pub pending: i64,
-    pub failed: i64,
-    pub blocked: i64,
-    /// Holes in one writer's own sequence, as this store observes them
-    /// (FR-492, SC-450).
-    ///
-    /// **Diagnostic only, and reported here because nowhere else would say it.**
-    /// A gap nobody surfaces is indistinguishable from a stream that had no gap,
-    /// which is the whole reason `writer_seq` crosses the wire at all — it is
-    /// useless to the store that minted it and useful only to whoever receives
-    /// it. Nothing in recall, reconciliation or ordering reads this: `MemoryFacts`
-    /// has no `writer_seq` field, so a tiebreak that consulted one would not
-    /// compile (FR-583).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub gaps: Vec<WriterSequenceGap>,
-}
-
-/// One writer's missing sequence numbers, in the shape `cairn sync status`
-/// renders.
-///
-/// Carries no content and no identity beyond the opaque writer id: a gap says
-/// that something did not arrive, not what it was.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriterSequenceGap {
-    pub writer_id: Uuid,
-    pub missing: Vec<i64>,
-    pub highest_seen: i64,
-}
-
-/// What a server cannot hold, and what happens next.
-/// What `cairn status` says about the subject mechanism's reach.
-///
-/// Reported as counts and one share, never as a score. `subject_share_percent`
-/// is absent when the project has no project-scoped memory to have adopted
-/// anything.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeHealth {
-    pub project_memories: i64,
-    pub with_subject: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject_share_percent: Option<i64>,
-    pub conflicted_subjects: i64,
-    pub needs_recheck: i64,
-    pub drifted: i64,
-    /// Present only when this project is retaining work for an older server.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sync_degradation: Option<SyncDegradation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncDegradation {
-    pub blocked: i64,
-    /// What the server last said it could do.
-    pub server_capability: String,
-    /// The capabilities the retained work is waiting for, named.
-    pub missing_capabilities: Vec<String>,
-    /// One line for a person: what is still syncing, and what happens on
-    /// upgrade. Degradation must never read as data loss (FR-415).
-    pub note: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncFailure {
-    pub entity_type: OutboxEntityType,
-    pub entity_id: Uuid,
-    pub error: String,
-}
-
-// ---------------------------------------------------------------------------
-// Server sync wire types (contracts/server-api.md)
-// ---------------------------------------------------------------------------
-
-/// One item in a sync batch. There is no observation variant, so a payload
-/// carrying observation content cannot be constructed (FR-055, D9).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncItem {
-    pub idempotency_key: String,
-    pub entity_type: OutboxEntityType,
-    pub entity_id: Uuid,
-    pub operation: OutboxOperation,
-    pub payload: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncBatch {
-    pub project_id: Uuid,
-    pub items: Vec<SyncItem>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncItemStatus {
-    Applied,
-    Duplicate,
-    Rejected,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncItemResult {
-    pub idempotency_key: String,
-    pub status: SyncItemStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<WireError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncBatchResponse {
-    pub results: Vec<SyncItemResult>,
-}
-
-/// Fields the server rejects on a session payload: local-only, always
-/// (contracts/server-api.md).
-pub const REJECTED_SESSION_FIELDS: &[&str] = &[
-    "worktree_path",
-    "agent_session_key",
-    "daemon_run_id",
-    "last_event_at",
-    "last_turn_ended_at",
-];
-
-// `REJECTED_OBSERVATION_FIELDS` used to live here: seven names from Feature
-// 001, presented as if it were the same boundary as the server's live,
-// enforced `FORBIDDEN_OBSERVATION_FIELDS` (`crates/cairn-server/src/sync.rs`,
-// twenty-seven names as of Feature 003). Nothing in the workspace read it —
-// grepping for the identifier turns up only its own declaration and this
-// note — so it was documentation-shaped code that happened to compile, and a
-// twenty-item-short list presented as the boundary is worse than no list at
-// all. The server's list is the single source of truth for what the wire
-// rejects; see `cairn_server::sync::FORBIDDEN_OBSERVATION_FIELDS` (FR-534).
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2288,21 +1355,34 @@ mod tests {
 
     #[test]
     fn error_envelope_has_no_data_key() {
-        let s = serde_json::to_string(&Envelope::err(WireError::not_found("task"))).unwrap();
+        let s = serde_json::to_string(&Envelope::err(WireError::not_found("record"))).unwrap();
         assert!(!s.contains("\"data\""));
         assert!(s.contains("not_found"));
     }
 
     #[test]
-    fn request_is_tagged_by_op() {
-        let r = Request::Status {
-            cwd: "/tmp".into(),
-            spool_reason: true,
-        };
-        let s = serde_json::to_string(&r).unwrap();
-        assert!(s.contains("\"op\":\"status\""));
-        let back: Request = serde_json::from_str(&s).unwrap();
-        matches!(back, Request::Status { .. });
+    fn request_wire_inventory_rejects_removed_operations() {
+        for removed in [
+            serde_json::json!({ "op": "status", "cwd": "/tmp", "spool_reason": false }),
+            serde_json::json!({ "op": "session_list", "cwd": "/tmp" }),
+            serde_json::json!({ "op": "sync_now", "cwd": "/tmp" }),
+            serde_json::json!({ "op": "link", "cwd": "/tmp" }),
+            serde_json::json!({ "op": "privacy_list", "cwd": "/tmp" }),
+            serde_json::json!({ "op": "migrate_status", "cwd": "/tmp" }),
+            serde_json::json!({ "op": "admin_user_list" }),
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(removed.clone()).is_err(),
+                "removed operation unexpectedly deserialized: {removed}"
+            );
+        }
+
+        let init: Request = serde_json::from_value(serde_json::json!({
+            "op": "init",
+            "cwd": "/tmp"
+        }))
+        .unwrap();
+        assert!(matches!(init, Request::Init { .. }));
     }
 
     #[test]

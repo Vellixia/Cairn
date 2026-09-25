@@ -1,7 +1,7 @@
 //! The one canonical `skill_revision` algorithm (D29b).
 //!
 //! Everything that needs the number calls this module: the embedded metadata
-//! validation, direct installation, `cairn doctor`, the `skillref` binary the
+//! validation, direct installation, setup, the `skillref` binary the
 //! release workflow runs, and the release verification fetch. It is never
 //! reimplemented in shell, YAML or a script — two implementations of one
 //! number are guaranteed to drift.
