@@ -859,7 +859,7 @@ async fn project_analytics(
            (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1) AS retrieval,
            (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND delivery_state = 'transmitted') AS delivery,
            (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND latency_ms IS NOT NULL) AS latency_count,
-           (SELECT COALESCE(AVG(latency_ms), 0) FROM retrieval_traces WHERE project_id = $1 AND latency_ms IS NOT NULL) AS latency_avg_ms,
+           (SELECT COALESCE(AVG(latency_ms), 0)::DOUBLE PRECISION FROM retrieval_traces WHERE project_id = $1 AND latency_ms IS NOT NULL) AS latency_avg_ms,
            (SELECT COUNT(*) FROM retrieval_traces WHERE project_id = $1 AND delivery_state = 'failed') AS failures",
     )
     .bind(project_id)
