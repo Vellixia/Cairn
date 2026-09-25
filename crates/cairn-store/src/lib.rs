@@ -265,6 +265,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_reads_survive_fresh_schema_rebuild_on_one_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cairn.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        migrate::run_to(&pool, 12).await.unwrap();
+        let store = Store { pool };
+        let project_id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO projects
+                (id, name, git_common_dir, linked, created_at, updated_at)
+             VALUES (?1, 'fixture', '/fixture/.git', 0, ?2, ?2)",
+        )
+        .bind(project_id.to_string())
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        // Cache session metadata while the legacy task_id column still sits
+        // between project_id and user_id.
+        assert!(repo::session_by_key(&store, project_id, "missing")
+            .await
+            .unwrap()
+            .is_none());
+        migrate::run_fresh(store.pool()).await.unwrap();
+
+        let user_id = uuid::Uuid::now_v7();
+        let session = repo::start_session(
+            &store,
+            repo::StartSession {
+                project_id,
+                user_id,
+                agent: "claude_code",
+                agent_session_key: "rebuilt",
+                branch: "main",
+                commit_sha: None,
+                worktree_path: "/fixture",
+                daemon_run_id: uuid::Uuid::now_v7(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.user_id, user_id);
+    }
+
+    #[tokio::test]
     async fn refuses_a_newer_schema_than_this_build_supports() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cairn.sqlite3");

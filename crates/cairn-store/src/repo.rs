@@ -4,6 +4,11 @@ use crate::{rows, tx, Result, Store, StoreError};
 use cairn_core::domain::{new_id, Project, Session, SessionStatus};
 use uuid::Uuid;
 
+// Explicit projection keeps cached SQLite metadata valid when setup rebuilds
+// the legacy sessions table without task_id. `SELECT *` can otherwise decode
+// user_id from the next column (agent) on a pooled connection.
+const SESSION_COLUMNS: &str = "id, project_id, user_id, agent, branch, commit_sha, worktree_path, agent_session_key, previous_session_id, status, started_at, ended_at, last_event_at, last_turn_ended_at, daemon_run_id, end_reason, handoff_pending, handoff_attempts, handoff_error, deleted_at";
+
 pub async fn ensure_local_user(store: &Store) -> Result<Uuid> {
     if let Some(row) = sqlx::query("SELECT id FROM users ORDER BY created_at LIMIT 1")
         .fetch_optional(store.pool())
@@ -148,7 +153,8 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
 }
 
 pub async fn session(store: &Store, id: Uuid) -> Result<Session> {
-    let row = sqlx::query("SELECT * FROM sessions WHERE id = ?1")
+    let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?1");
+    let row = sqlx::query(&sql)
         .bind(id.to_string())
         .fetch_optional(store.pool())
         .await?
@@ -157,14 +163,21 @@ pub async fn session(store: &Store, id: Uuid) -> Result<Session> {
 }
 
 pub async fn session_by_key(store: &Store, project_id: Uuid, key: &str) -> Result<Option<Session>> {
-    let row = sqlx::query("SELECT * FROM sessions WHERE project_id = ?1 AND agent_session_key = ?2 AND deleted_at IS NULL")
-        .bind(project_id.to_string()).bind(key).fetch_optional(store.pool()).await?;
+    let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE project_id = ?1 AND agent_session_key = ?2 AND deleted_at IS NULL");
+    let row = sqlx::query(&sql)
+        .bind(project_id.to_string())
+        .bind(key)
+        .fetch_optional(store.pool())
+        .await?;
     row.as_ref().map(rows::session).transpose()
 }
 
 pub async fn list_sessions(store: &Store, project_id: Uuid) -> Result<Vec<Session>> {
-    let rows = sqlx::query("SELECT * FROM sessions WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY started_at DESC")
-        .bind(project_id.to_string()).fetch_all(store.pool()).await?;
+    let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY started_at DESC");
+    let rows = sqlx::query(&sql)
+        .bind(project_id.to_string())
+        .fetch_all(store.pool())
+        .await?;
     rows.iter().map(rows::session).collect()
 }
 
@@ -173,8 +186,12 @@ pub async fn active_sessions_in_worktree(
     project_id: Uuid,
     worktree: &str,
 ) -> Result<Vec<Session>> {
-    let rows = sqlx::query("SELECT * FROM sessions WHERE project_id = ?1 AND worktree_path = ?2 AND status = 'active' AND deleted_at IS NULL ORDER BY started_at DESC")
-        .bind(project_id.to_string()).bind(worktree).fetch_all(store.pool()).await?;
+    let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE project_id = ?1 AND worktree_path = ?2 AND status = 'active' AND deleted_at IS NULL ORDER BY started_at DESC");
+    let rows = sqlx::query(&sql)
+        .bind(project_id.to_string())
+        .bind(worktree)
+        .fetch_all(store.pool())
+        .await?;
     rows.iter().map(rows::session).collect()
 }
 
