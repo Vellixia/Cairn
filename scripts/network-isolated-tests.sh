@@ -51,6 +51,9 @@ docker run --rm --network none \
     echo "--- building the binaries under test ---"
     cargo build --offline -p cairn -p cairnd
     echo "--- local suites, no network ---"
+    # This target volume survives source checkouts. Rebuild the e2e harness so
+    # Cargo cannot run a cached test binary containing an older fixture.
+    cargo clean -p cairn-e2e
     cargo test --offline -p cairn -p cairn-core -p cairn-git -p cairn-store \
       -p cairn-sys -p cairnd -p cairn-e2e
   '

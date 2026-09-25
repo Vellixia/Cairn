@@ -172,6 +172,35 @@ fn an_accepted_event_is_persisted_and_enqueued_in_one_transaction() {
 }
 
 #[test]
+fn an_accepted_session_close_closes_the_canonical_session() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    let close = event(
+        session,
+        1,
+        "session_closed",
+        json!({ "SessionClose": { "close_reason": "clear" } }),
+    );
+
+    let (body, status) = post(&pg, &pg.owner, &batch(vec![close]));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(statuses(&body), vec!["accepted"]);
+    assert_eq!(
+        pg.server.text(&format!(
+            "SELECT status || ':' || end_reason FROM sessions WHERE id = '{session}'"
+        )),
+        "completed:clear"
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM sessions
+              WHERE id = '{session}' AND ended_at = '2026-09-02T10:00:00Z'"
+        )),
+        1
+    );
+}
+
+#[test]
 fn redelivering_an_event_is_a_duplicate_and_a_duplicate_is_a_success() {
     let pg = pg!();
     let session = pg.session_for(&pg.owner);

@@ -265,7 +265,6 @@ export async function seed(): Promise<Seeded> {
 // What it buys: every fact the browser tests read was produced by the pipeline
 // under test, so a chain that renders is a chain that exists.
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 
 /** `cairn_core::eventid::CAIRN_EVENT_NS`. */
@@ -380,7 +379,7 @@ async function account(label: string): Promise<Account> {
 }
 
 /**
- * Bring an administrator into existence, out of band.
+ * Sign in as the deployment's environment-defined administrator.
  *
  * **There is no route that can do this, and that is deliberate.** Account
  * creation is operator-only (`cairn-server users add`), and that subcommand
@@ -390,89 +389,41 @@ async function account(label: string): Promise<Account> {
  * fresh CI deployment is — migration 3's backfill has nobody to promote either,
  * so a stack started without those variables has **no administrator at all**.
  *
- * So the fixture performs the same deploy-time act the contract reserves for an
- * operator (`web-control-plane.md` §1.1): it runs the server binary once, on an
- * ephemeral port, with the environment account configured. `ensure_admin` is an
- * upsert, so this converges whether or not the account already exists, and the
- * process is killed the moment the credential authenticates against the *real*
- * server — which is also the proof that the account landed in the shared
- * database rather than somewhere the tests cannot see.
- *
- * If the stack was already started with those variables set, this is a no-op
- * that re-establishes the same password.
+ * CI starts the server with these variables. The fixture only authenticates;
+ * restarting another server must not overwrite a password managed in the web
+ * UI or make a later environment account an administrator.
  */
 async function bootstrapAdmin(): Promise<Account> {
-  const email = (
-    process.env.CAIRN_ADMIN_EMAIL ?? `us5-admin-${Date.now()}@example.test`
-  )
+  const email = (process.env.CAIRN_ADMIN_EMAIL ?? "e2e-admin@example.test")
     .trim()
     .toLowerCase();
   const password = process.env.CAIRN_ADMIN_PASSWORD ?? "hunter2hunter2";
-  const displayName = "US5 Administrator";
-
-  const args = ["--addr", "127.0.0.1:0"];
-  if (process.env.DATABASE_URL) {
-    args.push("--database-url", process.env.DATABASE_URL);
-  }
-  const child = spawn(SERVER_BIN, args, {
-    env: {
-      ...process.env,
-      CAIRN_ADMIN_EMAIL: email,
-      CAIRN_ADMIN_PASSWORD: password,
-      CAIRN_ADMIN_DISPLAY_NAME: displayName,
-    },
-    stdio: "ignore",
+  const displayName = process.env.CAIRN_ADMIN_DISPLAY_NAME ?? "E2E Administrator";
+  const login = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
   });
-
-  let stderr = "";
-  child.on("error", (error) => {
-    stderr = String(error);
-  });
-
-  try {
-    const deadline = Date.now() + 60_000;
-    for (;;) {
-      const login = await fetch(`${API}/api/auth/login`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      }).catch(() => null);
-      if (login?.ok) {
-        const pair = (login.headers.get("set-cookie") ?? "").split(";")[0];
-        const eq = pair.indexOf("=");
-        const session = eq === -1 ? "" : pair.slice(eq + 1);
-        if (!session) {
-          throw new Error(`admin login returned no ${SESSION_COOKIE} value`);
-        }
-        const token = await newToken(session, "us5-admin");
-        const me = await apiAs(token, "/api/auth/me");
-        if (me.role !== "admin") {
-          throw new Error(
-            `the environment account came back as ${me.role}, not admin: ${JSON.stringify(me)}`,
-          );
-        }
-        return {
-          email,
-          password,
-          displayName,
-          session,
-          token,
-          id: me.id as string,
-        };
-      }
-      if (Date.now() > deadline) {
-        throw new Error(
-          `no administrator after 60s. The bootstrap server did not seed ` +
-            `${email}${stderr ? `: ${stderr}` : ""}. ` +
-            `Start the stack with CAIRN_ADMIN_EMAIL and CAIRN_ADMIN_PASSWORD, ` +
-            `or check that ${SERVER_BIN} exists.`,
-        );
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  } finally {
-    child.kill();
+  if (!login.ok) {
+    throw new Error(
+      `admin login for ${email}: ${login.status}. Start the server with ` +
+        `CAIRN_ADMIN_EMAIL and CAIRN_ADMIN_PASSWORD before running Playwright.`,
+    );
   }
+  const pair = (login.headers.get("set-cookie") ?? "").split(";")[0];
+  const eq = pair.indexOf("=");
+  const session = eq === -1 ? "" : pair.slice(eq + 1);
+  if (!session) {
+    throw new Error(`admin login returned no ${SESSION_COOKIE} value`);
+  }
+  const token = await newToken(session, "us5-admin");
+  const me = await apiAs(token, "/api/auth/me");
+  if (me.role !== "admin") {
+    throw new Error(
+      `the environment account came back as ${me.role}, not admin: ${JSON.stringify(me)}`,
+    );
+  }
+  return { email, password, displayName, session, token, id: me.id as string };
 }
 
 /** One safe event, in the shape `POST /api/events/batch` accepts. */

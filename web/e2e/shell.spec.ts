@@ -34,7 +34,7 @@ async function signIn(
   await page.getByTestId("password").fill(f.password);
   await page.getByTestId("submit").click();
   await authenticated;
-  await expect(page.getByTestId("project-list")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
 }
 
 test("the sign-in page names the deployment and its version", async ({
@@ -102,7 +102,7 @@ test("compact navigation reaches project workflows and global governance", async
 
   await openNav(page, testInfo);
   await page.getByTestId("nav-projects").click();
-  await page.getByTestId("settings-projects").getByText("UI Fixture").first().click();
+  await page.getByTestId("project-list").getByText("UI Fixture").first().click();
 
   for (const [testid, heading] of [
     ["nav-overview", "UI Fixture"],
@@ -154,7 +154,7 @@ test("a token can be created, is shown once, and is revoked behind a confirmatio
 }, testInfo) => {
   await signIn(page, fixture);
   await page.goto("/settings");
-  await expect(page).toHaveTitle(/API tokens · Cairn/);
+  await expect(page).toHaveTitle(/Settings · Cairn/);
 
   const name = `e2e-${testInfo.project.name}-${Date.now()}`;
   await page.getByTestId("new-token").click();
@@ -164,8 +164,12 @@ test("a token can be created, is shown once, and is revoked behind a confirmatio
   // The plaintext exists exactly once, so the panel has to actually show it.
   const revealed = page.getByTestId("revealed-token");
   await expect(revealed).toBeVisible();
-  const plaintext = await page.getByTestId("token-plaintext").innerText();
-  expect(plaintext).toHaveLength(64);
+  const credential = JSON.parse(
+    await page.getByTestId("token-plaintext").innerText(),
+  ) as { server_token: string; server_url: string; web_url: string };
+  expect(credential.server_token).toHaveLength(64);
+  expect(credential.server_url).toBe("http://127.0.0.1:8080");
+  expect(credential.web_url).toBe("http://127.0.0.1:3100");
 
   const row = page.getByTestId("token-row").filter({ hasText: name });
   await expect(row).toContainText("Active");
@@ -217,7 +221,7 @@ test("settings exposes password and member controls without user enumeration", a
   await signIn(page, fixture);
   await page.goto("/settings");
   await expect(page.getByLabel("New password")).toBeVisible();
-  await page.getByText("UI Fixture").first().click();
+  await page.getByTestId("settings-projects").getByText("UI Fixture").first().click();
   await expect(page.getByTestId("project-members")).toBeVisible();
   await expect(page.getByLabel("Member user ID")).toBeVisible();
   await expect(page.getByTestId("account-table")).toHaveCount(0);

@@ -593,6 +593,22 @@ async fn persist(
         return Ok(EventOutcome::duplicate(event.event_id));
     }
 
+    if let (EventKind::SessionClosed, Some(EventContent::SessionClose { close_reason })) =
+        (event.kind, &event.content)
+    {
+        sqlx::query(
+            "UPDATE sessions
+                SET status = 'completed', ended_at = COALESCE(ended_at, $2),
+                    end_reason = COALESCE(end_reason, $3)
+              WHERE id = $1 AND status = 'active'",
+        )
+        .bind(event.session_id)
+        .bind(event.occurred_at)
+        .bind(close_reason)
+        .execute(&mut **tx)
+        .await?;
+    }
+
     // The conflict action is spelled out because all three obvious choices are
     // wrong in a different way.
     //

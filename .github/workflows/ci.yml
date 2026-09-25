@@ -303,6 +303,9 @@ jobs:
       DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
       NEXT_PUBLIC_CAIRN_API: http://127.0.0.1:8080
       CAIRN_WEB_URL: http://127.0.0.1:3100
+      CAIRN_ADMIN_EMAIL: e2e-admin@example.test
+      CAIRN_ADMIN_PASSWORD: hunter2hunter2
+      CAIRN_ADMIN_DISPLAY_NAME: E2E Administrator
       # Absolute, so seed.ts (running from `web/`) can find the release
       # binary built below regardless of working directory.
       CAIRN_SERVER_BIN: ${{ github.workspace }}/target/release/cairn-server
