@@ -2,434 +2,189 @@
 
 Persistent, project-aware memory for AI coding agents.
 
-> **Alpha.** Cairn was rebuilt around this architecture; `v0.1.0-alpha.1` started a new
-> release line, and the earlier v0.x releases have been retired. Pre-1.0, so APIs,
-> storage schemas, and the wire protocol can change without a deprecation period.
+Cairn helps later sessions reuse supported decisions, failed approaches, and procedures. Supported hooks capture screened structured events; a canonical server validates and consolidates knowledge, then returns bounded, explainable context. Humans inspect evidence and correct knowledge in web. Cairn does not store full conversations or guarantee useful memory from every session.
 
-An AI coding session starts blind. Everything the last session learned — the goal, what was
-tried, what failed, which decisions were already made, which conventions this repository
-follows — disappears when the context window ends. You re-explain, the agent re-discovers,
-and the same dead ends get walked twice.
+> **Alpha and version boundary:** this README describes the published **[v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8)** interface. This checkout's [Cargo.toml](Cargo.toml) still declares **0.1.0-alpha.7** and contains the older CLI. A local build here does not support alpha.8 `cairn setup`. Use a matching released archive or source tag. APIs, schemas, and wire contracts may change before 1.0.
 
-Cairn sits beside the agent and fixes that. It knows which repository, branch, and commit you
-are on. It captures what a session actually does as structured facts. It turns the important
-ones into scoped, durable memory. And it hands the next session a bounded briefing so work
-resumes instead of restarting.
+Product target: [PRD](docs/product/prd.md) (**Draft**), [roadmap](docs/product/roadmap.md), and [verification plan](docs/engineering/test-plan.md). Published implementation and proposed corrections are distinct; this documentation does not certify deployment or release gates.
 
-## Install and connect
-
-Download a release archive, verify it, and put the binaries on your PATH. `cairn` and
-`cairnd` must live in the same directory — `cairn` starts the daemon itself.
-
-```bash
-VERSION=0.1.0-alpha.4
-TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
-
-curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
-curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/SHA256SUMS
-sha256sum --ignore-missing -c SHA256SUMS
-
-tar -xzf cairn-v${VERSION}-${TARGET}.tar.gz
-sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
-```
-
-On Windows (PowerShell):
-
-```powershell
-$VERSION = "0.1.0-alpha.4"
-$TARGET = "x86_64-pc-windows-msvc"
-
-Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/cairn-v$VERSION-$TARGET.zip" -OutFile cairn.zip
-Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/SHA256SUMS" -OutFile SHA256SUMS
-
-Expand-Archive cairn.zip -DestinationPath .
-mkdir "$env:LOCALAPPDATA\Cairn" -Force
-Copy-Item "cairn-v$VERSION-$TARGET\cairn.exe","cairn-v$VERSION-$TARGET\cairnd.exe" "$env:LOCALAPPDATA\Cairn"
-setx PATH "$env:PATH;$env:LOCALAPPDATA\Cairn"
-```
-
-Or build from source — nothing is needed beyond the pinned toolchain:
-
-```bash
-cargo build --workspace --release          # cairn, cairnd, cairn-server
-export PATH="$PWD/target/release:$PATH"
-```
-
-Then, in a repository:
-
-```bash
-cd your-git-repo
-cairn init                                 # register this repository
-cairn connect claude-code                  # install hooks + the MCP server
-```
-
-**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64,
-Windows on x86_64. The CLI and daemon talk over a Unix domain socket on Unix and a
-named pipe on Windows — either way, nothing is exposed on the network.
-
-`cairn connect` shows exactly what it would change and asks before touching anything. See
-[docs/integrations.md](docs/integrations.md) for the whole surface: which agents are
-supported and what each one can actually do, where each resource is written and why,
-what `--shared` changes, and how to check, repair and remove an integration.
-
-Start a Claude Code session in that repository. Cairn starts its daemon on its own, opens a
-session, and begins capturing. When the session ends:
-
-```bash
-cairn handoff show          # what happened, what changed, what remains, what's next
-cairn context               # the briefing the next session will receive
-```
-
-Nothing leaves your machine unless you link the project to a server.
-
-## How it works
+## Published alpha.8 architecture
 
 ```text
-install → connect Claude Code → open a Git repository
-        → Cairn detects repository, branch, commit
-        → select or create a task
-        → session starts automatically
-        → agent receives relevant context
-        → agent works normally
-        → Cairn captures structured observations
-        → important facts and decisions become scoped memory
-        → session stops or compacts
-        → Cairn writes a structured handoff
-        → next session starts with the previous context restored
+Git repository + supported agent
+  → owned hooks / MCP
+  → native cairnd: SQLite delivery spools, receipts, identity, finite-age cache
+  → cairn-server + PostgreSQL: canonical knowledge, evidence, governance, retrieval
+  → later agent context and human web inspection
 ```
 
-Memory carries explicit scope — **project**, **branch**, **task**, or **session** — and
-provenance back to the session and observations that produced it. Recall ranks by scope
-first: a fact about *this task* beats an unrelated one, however well it matches.
+SQLite keeps edge delivery/binding/ownership metadata. Canonical knowledge lives on the server. The current runtime outage cache is in memory; do not assume it survives daemon restart.
 
-## Everyday commands
+The existing stack uses Rust/Tokio/Axum/SQLx, SQLite/PostgreSQL, and Next.js/React/TypeScript. No additional model, embedding, vector database, broker, or separate graph database is required. Existing server relations support bounded graph/replay views.
 
-| Command | What it does |
-|---|---|
-| `cairn status` | Project, branch, commit, working tree, active sessions, integration mode |
-| `cairn agents` | Which agents are installed, and what each integration actually provides |
-| `cairn connect [agent]` | Install or update an integration (preview first with `--dry-run`) |
-| `cairn doctor` | Check every installed resource and say what to run to fix it |
-| `cairn repair` | Restore what Cairn owns and nothing else |
-| `cairn disconnect <agent>` | Remove this agent's integration; your memory is untouched |
-| `cairn session list` | Every session, newest first |
-| `cairn task new --title T --goal G --criterion C` | Create a task |
-| `cairn memory add --type convention --scope project "…"` | Remember something |
-| `cairn memory search "tests"` | Recall, ranked task → branch → project |
-| `cairn handoff show` | Read the latest handoff |
-| `cairn privacy exclude --path "secrets/**"` | Never capture that path |
-| `cairn delete session <id>` | Remove a session; its memories survive |
-| `cairn link --create` | Opt this project into server sharing |
-| `cairn sync status` | Pending, failed, last successful sync |
-| `cairn doctor --durability` | What losing this machine would cost, category by category |
-| `cairn migrate --inspect` | What a Feature 004 store holds, and what would move. Writes nothing |
-| `cairn migrate --run` | Hand durable knowledge over to the server, resumably |
-| `cairn migrate --status` | Migration phases, and every record that stayed local, with its reason |
+**Offline:** agent continues; screened work may queue within explicit bounds. Eligible cached context is labelled with age/identity; fresh search is unavailable without server. Saturation can shed eligible capture rows with counted dispositions or explicitly refuse new work; capture is not lossless. Server retry produces one canonical effect, not exactly-once transport. Observed access denial invalidates matching cache.
 
-Every command takes `--json` and prints a stable envelope.
+## Install a matching release
 
-## Sharing with a team (optional)
+Archives contain `cairn`, `cairnd`, and `cairn-server`, with checksums/provenance. CLI and daemon must live in the same directory. Choose your actual target.
 
-The quickest route is the example stack — PostgreSQL, the server, and the web UI:
+macOS/Linux, using `curl` and either `sha256sum` or `shasum`:
 
 ```bash
-cp deploy/.env.example deploy/.env        # then edit the password
-docker compose -f deploy/docker-compose.yml up -d
-curl -fsS http://127.0.0.1:8080/api/health   # {"ok":true}
-open http://127.0.0.1:3100
+VERSION=0.1.0-alpha.8
+TARGET=aarch64-apple-darwin
+# Other targets: x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+ARCHIVE="cairn-v${VERSION}-${TARGET}.tar.gz"
+
+curl -fsSLO "https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/${ARCHIVE}"
+curl -fsSLO "https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/SHA256SUMS"
+EXPECTED=$(awk -v file="$ARCHIVE" '$2 == file {print $1}' SHA256SUMS)
+test "${#EXPECTED}" -eq 64 || { echo "Missing or invalid archive checksum"; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+else
+  ACTUAL=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+fi
+test "$ACTUAL" = "$EXPECTED" || { echo "Checksum mismatch"; exit 1; }
+
+tar -xzf "$ARCHIVE"
+sudo install -m 0755 "cairn-v${VERSION}-${TARGET}/cairn" "cairn-v${VERSION}-${TARGET}/cairnd" /usr/local/bin/
+cairn --version
 ```
 
-Images are published per release, for `linux/amd64` and `linux/arm64`:
+Windows PowerShell:
 
+```powershell
+$Version = "0.1.0-alpha.8"
+$Target = "x86_64-pc-windows-msvc"
+$Archive = "cairn-v$Version-$Target.zip"
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$Version/$Archive" -OutFile $Archive
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$Version/SHA256SUMS" -OutFile SHA256SUMS
+$ChecksumRows = @(Get-Content SHA256SUMS | Where-Object { ($_ -split '\s+')[1] -eq $Archive })
+if ($ChecksumRows.Count -ne 1) { throw "Missing or ambiguous archive checksum" }
+$Expected = ($ChecksumRows[0] -split '\s+')[0]
+if ($Expected -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid archive checksum" }
+if ((Get-FileHash $Archive -Algorithm SHA256).Hash -ne $Expected) { throw "Checksum mismatch" }
+
+Expand-Archive $Archive -DestinationPath .
+$InstallDir = Join-Path $env:LOCALAPPDATA "Cairn"
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+Copy-Item "cairn-v$Version-$Target/cairn.exe","cairn-v$Version-$Target/cairnd.exe" $InstallDir
+$env:Path = "$InstallDir;$env:Path"
+cairn --version
 ```
-ghcr.io/vellixia/cairn-server:0.1.0-alpha.4
-ghcr.io/vellixia/cairn-web:0.1.0-alpha.4
-```
 
-Only the shared components ship as containers. The local agent stays native.
+The PowerShell PATH change applies to the current session; add that folder to your user PATH in Windows Settings for future shells. Native advertised targets: macOS arm64/x86_64, Linux arm64/x86_64, Windows x86_64. Packaged availability and journey verification are separate claims; see roadmap support gates.
 
-The web image is not tied to a hostname. It calls the same origin that served the
-page, so behind a reverse proxy publishing the UI at `/` and the API at `/api` on
-one domain there is nothing to configure. For a split-origin deployment set
-`CAIRN_API_ORIGIN` on the web container — it is read at start, so no rebuild is
-needed to move domains.
+## Deploy and establish access
 
-To run the same thing from source instead:
+Self-hosted server/PostgreSQL is required for fresh canonical memory, including solo use. Native CLI/daemon runs on developer machine; server/web images run on deployment host.
+
+Use release-matching [alpha.8 deployment files](https://github.com/Vellixia/Cairn/tree/v0.1.0-alpha.8/deploy). In an alpha.8 checkout:
 
 ```bash
-docker compose up -d postgres
-cargo run --release --bin cairn-server -- --web-origin http://127.0.0.1:3100
-cd web && npm install && npm run build && npm run start
+cp deploy/.env.example deploy/.env
+# Edit deploy/.env before starting.
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
 ```
 
-There is no sign-up form. An administrator creates the account (see
-[Administering a server](#administering-a-server)), hands over the one-time
-temporary password, and the user changes it on first use. Then, on each machine:
+Set `CAIRN_VERSION=0.1.0-alpha.8`, database credentials, and initial admin credentials explicitly. Example files/version fallbacks must not choose an older image unintentionally.
+
+Published example exposes separate API/web ports. Empty `CAIRN_API_ORIGIN` sends browser calls to web origin, but example does not supply same-origin API routing. Configure a reverse proxy serving web at `/` and API at `/api`, or set browser-reachable `CAIRN_API_ORIGIN` and exact `CAIRN_WEB_ORIGIN` for supported split origin. API/DB exposure, TLS/cookies/CORS, and clean browser login need observed verification; `/api/health` returning `{"ok":true}` proves liveness, not complete readiness.
+
+Admin creates accounts and membership; there is no self-registration or self-join. Accounts are created by an administrator with `cairn user create`, and membership is granted with `cairn project member add`. Tokens come from web **Settings**. Published bootstrap-only admin behavior and old Compose/help restart wording disagree; do not rely on environment edits as routine password rotation. Follow candidate-verified web password/recovery behavior.
+
+For this checkout's older alpha.7 server, `CAIRN_ADMIN_EMAIL` and
+`CAIRN_ADMIN_PASSWORD` identify the environment-named break-glass account.
+Whoever can set those values and restart the server can always obtain administrator
+access; the account is restored to the `admin` role and `active`
+status on every start. The published alpha.8 target changes this to
+bootstrap/recovery-only behavior, so keep this paragraph scoped to the
+alpha.7 checkout and verify the exact release before deployment.
+
+**Repository provisioning gap:** published browser project form omits repository remote, while setup requires a matching registered normalized remote. Authorized `POST /api/projects` supports `repository_remote` and makes creator a member; registered remote must already use setup comparison form, for example:
+
+```json
+{"name":"Example repository","repository_remote":"github.com/example/repository"}
+```
+
+An operator can provision through this supported API and grant developer membership. Full browser-first remote validation/provisioning remains corrective work, not a completed published journey. Detailed [API/permission contract](docs/product/prd.md#7-api) and [roadmap N1/N2](docs/product/roadmap.md#fix--improve) describe the gap.
+
+## Connect the repository
+
+With matching registered remote, project membership, and token already established, run released alpha.8 CLI inside Git repository. Supply secret through protected environment input or JSON stdin; do not put token in repository files.
 
 ```bash
-cairn auth login --server http://127.0.0.1:8080   # change the temporary password
-cairn auth token set <token> --server http://127.0.0.1:8080
-cairn link --project <shared-project-id>          # or: cairn link --create
+CAIRN_SERVER_URL=https://cairn.example.com \
+CAIRN_SERVER_TOKEN="$CAIRN_INSTALL_TOKEN" \
+cairn setup
 ```
 
-Linking to an existing project needs a membership an administrator or an existing
-member granted first — naming the identifier is not enough:
+`CAIRN_INSTALL_TOKEN` above is a preexisting protected shell value. Setup verifies actor, binds authorized project, installs detected integration, launches daemon, and reports web URL/conflicts. It cannot create account/membership or grant access.
+
+Rerun `cairn setup` to refresh matching Cairn-owned resources. User edits and unrelated config remain untouched. Removal is manual and limited to verified owned resources named by setup. See [alpha.8 ownership guide](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/integrations.md).
+
+## Agent and human interfaces
+
+| Agent/client | Capture | Context |
+| --- | --- | --- |
+| Claude Code | Supported native hooks | Session/prompt delivery where installed capability/trust is observed |
+| Codex CLI | Supported native hooks | Session/prompt delivery where installed capability/trust is observed |
+| OpenCode | Supported native capture | Automatic delivery declined under published beta-surface contract |
+| Generic MCP | Manual supported tools | Explicit context/search; generic server-session lifecycle unsupported |
+
+Five MCP tools: `cairn_context`, `cairn_search`, `cairn_remember`, `cairn_session`, `cairn_handoff`. Explicit native session/handoff recovery uses exact caller identity. Tool presence does not guarantee every action for generic clients.
+
+Human interface is project selector plus **Overview**, **Memory**, **Sessions**, **Governance**, **Settings**. Alpha.8 removes task scope/`cairn_task` and former human CLI administration/search/repair surfaces. Hooks/MCP remain installed hidden machine adapters.
+
+## Privacy, durability, and upgrade
+
+Safe event union excludes raw prompts/transcripts/diffs/output/credentials/vendor payloads; edge and server independently screen bounded fields, including repository-relative tokens where permitted. Refusals name class without echoing unsafe content. Explicit remembering also obeys domain/privacy/evidence/actor checks.
+
+Personal knowledge is owner-private across projects; team guidance follows proposal/admin governance. Reusable sanitized patterns do not become verified in another project merely because they worked elsewhere. Scope/applicability never grants authorization.
+
+Local queued work can be lost with machine/disk before server acceptance. Accepted canonical data depends on server/database backups. Cache loss on restart does not erase server knowledge. Generated/selected/transmitted/confirmed context states remain distinct and never prove model understood guidance.
+
+Before upgrading, back up PostgreSQL; upgrade server before local agents and install CLI/daemon from same archive. Legacy setup preserves SQLite/WAL, creates fresh edge, and produces import/conservation records. Removed task/local-only/ambiguous records stay offline as `removed_feature`; scope is never widened. Web logical transfer excludes credentials and is not a full disaster-recovery backup. Snapshot consistency, bundle size, and exact upgrade/restore journey remain verification targets.
+
+## Known gaps and development
+
+Published/current evidence includes incomplete browser routing/remote provisioning, memory/session browsing limits, silent action/replay feedback, composed delivery-deadline risk, and live-export snapshot/capacity risk. Corrective recovery work has partial local validation; latest recorded required PostgreSQL gate/final journey rerun is unresolved. Varied usefulness and installed/published-artifact journeys are not certified by this README. See [roadmap](docs/product/roadmap.md) and [verification plan](docs/engineering/test-plan.md).
+
+**This alpha.7 checkout:** use [legacy integration guidance](docs/guides/integrations.md) for its CLI behavior. It still includes task/local-authority-era interfaces; those are not V1 product targets. [SECURITY.md](SECURITY.md) also describes this older source, not alpha.8 bootstrap/storage semantics.
+
+Current-checkout build/check prerequisites: pinned Rust toolchain, Git, Node/npm for web, and PostgreSQL for server suites.
 
 ```bash
-cairn project member add <project-id> dev@example.com
-cairn project member list <project-id>
-cairn project member remove <project-id> dev@example.com
+cargo build --locked --workspace
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ```
 
-`cairn link` with no `--project` auto-selects only when discovery returns exactly
-one project the caller already belongs to. It never joins anything.
+Configure `CAIRN_TEST_DATABASE_URL` to a disposable PostgreSQL before required server checks. Legacy optional suites may skip absent DB; a green local run without DB is not complete server acceptance. Strict prerequisite mode lives in corrective branch and must be used for candidate release evidence.
 
-Two clones of one repository at different paths link to the *same* shared project by
-identifier — path is never identity.
-
-## Personal and team knowledge
-
-Alongside project memory, which stays scoped to the repository it came from, a
-server carries two domains that are not:
-
-- **Personal** — yours, across every project and every machine you sign in from.
-  Create it directly, or promote a project memory into it.
-- **Team** — server-wide guidance every account sees. It cannot be authored
-  directly: someone proposes it, an administrator ratifies it, and only then does
-  it become visible. A retired entry stays retired; restoring its guidance means a
-  new proposal.
+Current alpha.7 web scripts:
 
 ```bash
-cairn team list
-cairn team propose "Prefer the workspace lockfile over a per-crate one"
-cairn team ratify <id>
-cairn team retire <id>
+cd web
+npm ci
+npm run typecheck
+npm run build
+# npm run test:e2e requires running server/DB/web and its fixture environment.
 ```
 
-Both domains are stripped of anything that identifies where they came from.
-Content carrying an absolute path, a home directory, a credentialed URL, an
-environment assignment, a secret-shaped run, a project-identifying token or a
-shell command invocation is refused — locally when you write it, and again at the
-server when it arrives, so a client that skips its own check gains nothing. A
-refusal names the class it tripped and never echoes the content back.
+Alpha.8 source additionally has `npm run api-contract:check`; this checkout does not. Build alpha.8 from its exact tag/isolated checkout when verifying V1. Follow [testing guidance](docs/engineering/testing.md), with version-specific commands and evidence.
 
-They never displace project context: personal and team sections come last, are
-capped at 15% of the budget, cannot touch the reserved level, and are excluded
-entirely at `depth: "minimum"`.
+| Path | Responsibility |
+| --- | --- |
+| `crates/cairn-core` | Domain/wire types, screening, configuration, bounds |
+| `crates/cairn-git` | Repository identity and remote matching |
+| `crates/cairn-store` | SQLite schemas/storage; alpha.7 canonical-era and alpha.8 thin-edge behavior differ |
+| `crates/cairn-integrate` | Native/generic/manager integration and byte ownership |
+| `crates/cairnd` | Native edge daemon |
+| `crates/cairn` | CLI and hidden machine adapters; visible CLI differs by version |
+| `crates/cairn-server` | Axum/PostgreSQL canonical server |
+| `web/`, `tests/` | Human application and existing verification harnesses |
 
-## When the server holds your memory
-
-Connect a server and it becomes the authority for durable knowledge: project
-memory, personal notes, team guidance and reusable patterns. Your machine keeps
-a copy, but the copy is a cache.
-
-**A queued command is not a durable one.** `cairn memory add`, `pattern promote`,
-`personal add`, `team propose` and the rest state an *intent*; the server decides
-the consequence. Until the server has accepted it, the change is queued, and
-Cairn says so rather than showing you a record that does not exist yet:
-
-```bash
-cairn sync status                # pending, failed, blocked, per namespace
-```
-
-A command that is queued behind an unreachable server is not lost and is not
-applied. It goes out when the server comes back.
-
-**Verification says only what was established.** A check Cairn ran on this
-machine reads `cairn`; a check a client reported over the network reads
-`remote_attested`, whichever route carried it and whatever the report was called.
-There is no way to assert a stronger one, because the server assigns it and the
-payload has no field for it. `unverified` means nothing has been established —
-not that something failed.
-
-**Health reports evidence, not configuration.** A hook Cairn wrote and read back
-is *introspection*; a hook that fired is an *observation*. A capability is
-`supported` only on an observation, so "configured" never reads as "working" and
-silence never reads as a failure.
-
-## What losing this machine costs
-
-`cairn doctor --durability` answers it in four groups, and prints a category
-even when it is empty, so an omission is never read as an assurance:
-
-- **lost for good** — this machine's writer identity, its migration and
-  authority state, its observations and evidence facts, its verification runs,
-  continuity checkpoints, pattern applications, local-only memory, task change
-  history, and any events still spooled at the moment of loss;
-- **restored from the server on the next pull** — projects, accounts, and every
-  durable record the server has accepted;
-- **queued, accepted for delivery, not yet durable** — the spool, which is the
-  one category whose loss is silent unless you look;
-- **caches** — project memory, personal knowledge, team guidance and cached
-  patterns, which refill.
-
-Destroying the local store is safe for everything in the second and fourth
-groups and only those. Cairn names the difference rather than reporting an
-unqualified success.
-
-## Migrating a Feature 004 store
-
-A store that predates server authority migrates explicitly, and resumably:
-
-```bash
-cairn migrate --inspect          # counts and reports. Changes nothing
-cairn migrate --claim-patterns   # legacy patterns have no recorded owner
-cairn migrate --run              # drain → possession → switch → recheck → demote
-cairn migrate --status           # phases, and what stayed local, record by record
-cairn migrate --retry-retained   # re-attempt the leftovers, on demand
-```
-
-Nothing local is demoted before the server is confirmed to hold it, and
-possession is re-checked again at the moment of demotion. A record the server
-cannot accept stays local, stays readable, and is reported individually rather
-than being dropped.
-
-Legacy patterns are the one thing migration cannot work out for itself: the old
-table has no owner column and a store may have been used with several accounts,
-so ownership is claimed once, explicitly, and never inferred from whoever
-happens to be signed in.
-
-When an operator cuts a server over (`POST /api/admin/cutover`, admin only), the
-old synchronization path closes for knowledge with `upgrade_required`. Reads
-keep working, non-knowledge sync keeps working, and a refused client's local
-store is not touched — it is out of date, not wrong.
-
-## What each agent actually does
-
-| Agent | Capture | Context delivery |
-|---|---|---|
-| Claude Code | hooks, automatic | session start **and** prompt time |
-| Codex CLI | hooks, automatic | session start **and** prompt time |
-| OpenCode | **capture only** | none — declined by Cairn |
-
-OpenCode's context hooks exist but are beta, and Cairn declines to rest an
-automatic guarantee on them. That is a Cairn decision, not a missing vendor
-feature, and the health matrix says `declined_by_cairn` rather than blaming
-OpenCode for something it does offer.
-
-## Privacy
-
-Cairn captures structured observations, never transcripts. What crosses to a
-server is narrower still: no prompt or assistant text, no tool output, no
-absolute paths, no credentials, no vendor JSON. A signal Cairn cannot map to a
-safe shape is declined and counted, not guessed at.
-
-```bash
-cairn privacy exclude --path "secrets/**"   # never captured at all
-cairn doctor --json | jq '.dispositions'    # what was declined, and why
-```
-
-One machine-scoped value does reach the server, and it is worth naming because
-it is the exception that proves the rule. Cairn mints a `writer_id` once per
-local store — a UUID from a random generator, with no hostname, hardware serial,
-OS machine id, MAC address, account name or filesystem path in it. It answers
-"did these two records come from the same writer" and "is there a gap in this
-writer's stream", which is what health and evidence need; it does not answer
-"which machine is this", and nothing compares one writer's stream against
-another's to decide anything.
-
-## Principles
-
-- **Fail-soft, not offline-authoritative.** Cairn never blocks the agent it is attached to:
-  capture hooks have a 250 ms deadline, always exit 0, and drop work rather than wait. An
-  unlinked project *is* fully local — its own store is the only authority there is, and
-  capture, recall, briefing, handoff and search need no network at all.
-
-  A **linked** project is different, and the difference is the point of the feature. Durable
-  knowledge belongs to the server, and what happens when the server cannot be reached is
-  spelled out rather than glossed:
-
-  - the agent keeps working, and every hook still exits 0;
-  - safe capture and knowledge commands queue as specified and go out when the server returns;
-  - a briefing already authorized for **this account and this session** may be served from the
-    bounded local cache, labelled cached;
-  - a cache miss, or a cache belonging to another account, does **not** promote local copies of
-    server-owned knowledge into authority — the briefing says durable memory is unavailable this
-    turn rather than serving something it cannot check the caller against;
-  - canonical knowledge the server has accepted survives losing this machine entirely, which is
-    the guarantee the arrangement buys.
-- **Private by default.** No conversation transcripts. No unbounded command output. Secrets
-  redacted before anything is written. **Raw observations never leave your machine** — a
-  shared memory carries evidence identifiers and a count, never the observation rows behind
-  them. A shared *handoff* does carry its own derived fields, including changed file paths
-  and short statements like "test failed: cargo test", because that is what a handoff is
-  for; nothing leaves at all until you link the project.
-- **Simple.** A local daemon with SQLite, a small Axum server with PostgreSQL, a Next.js UI.
-  No brokers, no vector databases, no knowledge graphs, no embeddings.
-- **Honest about what it knows.** Cairn cannot tell whether an agent is still alive — nothing
-  in the integration says so — so it does not guess. Sessions end at deterministic boundaries.
-
-## Layout
-
-Product direction: [PRD](docs/PRD.md) and [roadmap/checklist](docs/ROADMAP.md). They describe the published alpha.8 release; this `main` checkout still has alpha.7 source. Detailed 001–005 contracts in `specs/` are historical.
-
-| Path | What |
-|---|---|
-| `crates/cairn-core` | Domain types, redaction, budgeting, context and handoff synthesis |
-| `crates/cairn-git` | Git CLI adapter |
-| `crates/cairn-store` | SQLite schema, repositories, FTS5 search, outbox |
-| `crates/cairnd` | The local daemon |
-| `crates/cairn` | The CLI, the hook runtime, and the MCP server |
-| `crates/cairn-server` | Axum + PostgreSQL shared server |
-| `web/` | Next.js web UI |
-| `tests/` | End-to-end suite against real repositories, SQLite and PostgreSQL |
-
-Six MCP tools, no more: `cairn_context`, `cairn_search`, `cairn_remember`, `cairn_session`,
-`cairn_task`, `cairn_handoff`.
-
-## Development
-
-```bash
-cargo test --workspace                                   # local suite
-docker compose up -d postgres
-CAIRN_TEST_DATABASE_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test --workspace
-cd web && npx playwright test                            # UI acceptance
-```
-
-Specification, plan and task ledger live in [`specs/001-cairn-mvp/`](specs/001-cairn-mvp/);
-project principles in [the constitution](.specify/memory/constitution.md).
-
-## Administering a server
-
-Every account on a Cairn server is created by an administrator. There is no
-self-registration and no self-join — both were removed as security fixes, along
-with a project-discovery route that returned projects the caller was not a member
-of.
-
-```bash
-# On the server host, once, to bootstrap:
-CAIRN_ADMIN_EMAIL=you@example.com CAIRN_ADMIN_PASSWORD='...' cairn-server
-
-# Or create an account directly against the database:
-cairn-server users add --email dev@example.com --display-name "Dev" --password '...'
-
-# Thereafter, as an administrator:
-cairn user create --email dev@example.com --display-name "Dev"
-cairn user list
-cairn user promote dev@example.com
-cairn user disable dev@example.com
-cairn user reset-password dev@example.com
-```
-
-`cairn user create` prints a one-time temporary password. It is shown **once** —
-no route reads it back, not even for the administrator who created the account.
-If it is lost, reset it.
-
-**If your users relied on registering or joining themselves**, those two routes
-now answer `410 Gone` and name their replacement in the response body. The
-operator does the work instead:
-
-| A user who used to… | An administrator now runs |
-|---|---|
-| register an account | `cairn user create --email … --display-name …` (`POST /api/admin/users`) |
-| join a project by its identifier | `cairn project member add <project-id> <email>` (`POST /api/projects/{id}/members`) |
-
-A project-discovery lookup returns only projects the caller is already a member
-of, so discovery cannot be used to find something to join.
-
-**Whoever can set the server's environment and restart the process can always
-obtain administrator access.** The account named by `CAIRN_ADMIN_EMAIL` is
-restored to `admin` and `active` on every start, which is the break-glass path
-for an operator who has locked themselves out. It cannot be demoted, disabled or
-reset through the API. See [SECURITY.md](SECURITY.md) for what that means for a
-deployment.
+Start at [documentation index](docs/README.md). Release history remains in [CHANGELOG](CHANGELOG.md); the [alpha.8 tagged changelog](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/CHANGELOG.md) includes the published V1 reduction.
