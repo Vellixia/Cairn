@@ -12,7 +12,24 @@
 - [ ] Planned — proposed work, not an approved release commitment.
 - [!] Blocked — cannot finish until the named blocker is resolved.
 
-Current and Next describe recommended order. Unreleased versions and dates remain **TBD**. Requirements live in [PRD](prd.md); detailed checks and observed results live in [verification plan](../engineering/test-plan.md).
+**Release plan:** `v0.1.0-alpha.9` → `v0.1.0-alpha.10` → `v0.1.0-beta.1` → `v0.1.0-beta.2` → `v0.1.0-rc.1` → `v0.1.0`. These are concrete draft target versions, not published releases or promises of completion. Dates follow exit gates; a failed gate holds its release. Changed artifacts receive a new version; never replace alpha.8 assets or move its tag. Requirements live in [PRD](prd.md); each release must attach its own evidence report using the [published testing guidance](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/testing.md).
+
+### Version and scope contract
+
+| Target version | User outcome | Required scope | Exit gate |
+| --- | --- | --- | --- |
+| **v0.1.0-alpha.9** | Secure clean deployment, reliable setup, safe recall/recovery | N0–N5, N8–N12; primary-path N13; existing corrective recovery patch | All safety, migration, first-use, installed support and artifact gates below; five-scenario usefulness smoke |
+| **v0.1.0-alpha.10** | Complete inspection and everyday administration | N6, remaining N13, N14, N15 | Complete history traversal, actionable failures, authorized maintenance reflected in later recall |
+| **v0.1.0-beta.1** | Demonstrably useful memory across varied later work | N7, quality fixes driven by paired evaluation, topic guidance | Frozen 30-pair evaluation meets specified draft benefit/harm targets |
+| **v0.1.0-beta.2** | Known operating envelope and predictable data lifecycle | Capacity tests, supported recovery, retention/deletion | Declared load and restore targets pass; deletion preserves evidence/receipt invariants |
+| **v0.1.0-rc.1** | Installable release candidate with frozen supported contract | Versioned API/MCP/import compatibility, full support matrix, upgrade rehearsal | All supported combinations pass; 14-day pilot with no unresolved release-blocking defect |
+| **v0.1.0** | First stable 0.1 release for solo/small self-hosted teams | Same validated RC scope; final manuals and artifact verification | RC promotion gates and published-artifact smoke; maintenance/compatibility policy published |
+
+**Planning defaults:** solo developers and teams of 1–10, one self-hosted deployment, Claude Code/Codex primary native journeys. Same-origin web `/` and API `/api` is default; split-origin is opt-in with exact-origin tests. Preserve Rust/Axum/PostgreSQL canonical server, SQLite delivery edge, existing Next.js web, five MCP tools and one visible setup command. This is the proposed scope for review, not a new implementation or release approval.
+
+**Architecture boundary through v0.1.0:** finite-age identity-scoped cache stays in memory; daemon-restart cache persistence and model-assisted extraction remain outside planned scope. Remote matching uses authorized project UUID plus normalized Git remote; ambiguous authorized matches fail with actionable guidance. Alpha.9 must disclose current data growth/deletion/backup behavior; broader retention automation lands beta.2.
+
+**Release ownership:** maintainer owns candidate/version/support declarations; implementation owner links each N-item to PRs and checks; release verifier records source SHA, binaries, images, digests, environment and `PASS`/`FAIL`/`NOT RUN`. Required `NOT RUN` blocks publication. N8/N9 and applicable security, migration and delivery gates repeat every release; passing an earlier version never substitutes for candidate evidence.
 
 ### Planning decisions reviewed with Astra
 
@@ -28,7 +45,7 @@ Review used alpha.8 tagged source and the corrective worktree on 2026-09-27. Sou
 
 ## Past
 
-Complete inventory of documented alpha-line changes, fixes, removals, migration behavior, and historical limits. Checked items mean shipped implementation recorded for that version; they do not certify every release gate. Historical CLI/task/local-authority features are **not current interfaces**; alpha.8 removals are explicit below.
+Inventory of documented alpha-line changes, fixes, removals, migration behavior, and historical limits. Checked items mean shipped implementation recorded for that version; they do not certify every release gate. Historical CLI/task/local-authority features are **not current interfaces**; alpha.8 removals are explicit below.
 
 ### v0.1.0-alpha.1 — Local-first memory foundation
 
@@ -159,7 +176,7 @@ Evidence: [tagged changelog — 0.1.0-alpha.4](https://github.com/Vellixia/Cairn
 - Some SQLite memory constraints enforced at repository boundary; three sync tests serialized for shared PostgreSQL capacity; optional DB suites could silently skip.
 - Historical performance fixture uses one tenth of stated population; full-scale behavior and multi-platform measurements require separate evidence.
 
-Evidence: [tagged changelog — 0.1.0-alpha.5](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/CHANGELOG.md), [release](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.5), [historical follow-ups](../history/alpha7/intelligence-followups.md), [topic-key evaluation](../../evals/topic-key-effectiveness/RESULTS.md).
+Evidence: [tagged changelog — 0.1.0-alpha.5](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/CHANGELOG.md), [release](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.5), [historical follow-ups](https://github.com/Vellixia/Cairn/blob/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/docs/feature-003-followups.md), [topic-key evaluation](../../evals/topic-key-effectiveness/RESULTS.md).
 
 ### v0.1.0-alpha.6 — Withdrawn attempt
 
@@ -247,11 +264,11 @@ Evidence: [tagged changelog — 0.1.0-alpha.8](https://github.com/Vellixia/Cairn
 
 ## Current
 
-### Version TBD — Corrective stabilization and safe first use
+### v0.1.0-alpha.9 — Secure setup and reliable recall
 
 **Goal:** one pinned candidate supports browser → authorized project → setup → accepted event → inspectable memory → later recall, with honest recovery and release evidence.
 
-Recorded work on `codex/session-recovery-tests`, based on `4cbb2c6`:
+**Implementation lead:** reported uncommitted recovery patch on `codex/session-recovery-tests`, based on `4cbb2c6`. These statuses describe that patch, not this documentation branch or a committed release candidate:
 
 - [~] Recover hook failures through current MCP tools with exact caller key/directory; never imply registration succeeded when it did not.
 - [~] Render actual server budget/section envelopes, reduced/cached/empty replies, and outages; reject malformed populated sections.
@@ -261,27 +278,47 @@ Recorded work on `codex/session-recovery-tests`, based on `4cbb2c6`:
 - [~] Refresh installed skill/contract guidance to current commands/scopes while preserving user edits.
 - [~] Require database prerequisites in mandatory test lanes; optional missing infrastructure reports `NOT RUN`.
 
-These are branch implementation/partial-validation states, not completed release features. See [observed checks](../engineering/test-plan.md#observed-corrective-branch-checks--2026-09-27).
+**Candidate entry (N0):** choose alpha.8-derived source, commit the recovery patch separately, record reviewed SHA, then build matching CLI/daemon/server/web. This documentation branch declares alpha.7 and cannot serve as alpha.9 implementation source. Do not merge unrelated dirty work blindly.
+
+**Reported local evidence, 2026-09-27:** recovery patch had some successful local checks; final PostgreSQL/setup rerun was incomplete after test-container/storage failure. Patch and raw logs are not included in this PR. Treat this as an investigation lead, not a pinned candidate failure or acceptance result. Alpha.9 must produce a fresh evidence report; ordinary alpha.7 workspace tests cannot close this gate.
 
 ### Fix / Improve
 
 **Evidence labels:** **Source gap** = inspected implementation differs from intended outcome. **Validation gap/risk** = proof missing or failure needs reproduction. **Proposal** = usability/product improvement, not a confirmed defect.
 
-Order below is recommended. N0–N15 remain proposals unless marked In Progress/Blocked. A gate applies when the candidate makes its associated deployment, upgrade, or support claim.
+**Priority:** P0 = security, identity, data integrity, deadline or release-proof blocker; P1 = required first-use/product flow; P2 = conditional improvement. Prioritize P0; prerequisite P1 deployment work may proceed. No release ships with open P0.
 
-- [!] **Required PostgreSQL gate — blocked in latest recorded evidence.** Latest rerun had DB timeouts after the test container stopped, followed by Docker storage I/O errors. Restore infrastructure and rerun strict suites plus final setup/two-caller journey on exact candidate. Earlier passes do not close this gate.
-- [ ] **N0 — Establish canonical candidate source.** Choose development/merge path while preserving existing worktree and corrective changes. **Proof:** recorded clean candidate commit/artifact identities and baseline gates; missing infrastructure is `NOT RUN`. **PRD-09; validation gap.**
-- [ ] **N1 — Make documented browser deployment work.** Example stack exposes web/API separately while runtime API origin defaults empty. Choose supported topology and align Compose/environment/operator steps. **Depends on N0 and topology decision. Proof:** pinned images, clean DB, browser login/reload/authenticated read, and unrelated-origin denial without manual origin repair. **PRD-01, PRD-09; source gap.**
-- [ ] **N2 — Browser creates setup-ready projects.** Project form omits remote; API stores supplied remote unchanged while setup compares normalized remote. Validate/normalize at producer boundary. **Depends on N1. Proof:** browser remote → membership → token → setup → accepted event → memory → later recall; invalid/missing/duplicate/SCP remotes, mismatch, and nonmember cases have explicit outcomes. **PRD-01; source gap.**
-- [ ] **N4 — Validate secure deployment and credential lifecycle now.** Private/loopback API default, HTTPS cookies, exact-origin CORS including PATCH, revocation/disabled-account isolation, and bounded password hashing belong in corrective gates. Bootstrap-only behavior is partly implemented; stale Compose/CLI comments still say password is reapplied on restart. **Depends on N1 topology. Proof:** web password rotation survives restart, environment only bootstraps/recovers missing admin, permitted split-origin requests pass while other origins fail, and failed-login load does not stall unrelated requests. **PRD-05, PRD-09; mixed source/documentation and validation gaps.**
-- [ ] **N11 — Make first-use actions explain their outcome.** Password/project/member mutations lack visible failure/pending/success feedback; privacy fetch failure appears as perpetual loading. **Depends on N1/N2 interfaces. Proof:** denied/invalid/offline/duplicate submissions show actionable accessible feedback, values remain recoverable, repeated clicks do not duplicate operations, and successful changes are visible. Extend to related existing forms where inspection finds the same issue. **PRD-01, PRD-07; source gap.**
-- [ ] **N10 — Enforce one delivery deadline and test lane fairness.** Drain can wait half the configured deadline, then retrieval waits a full deadline. Event drain errors also skip command drain; shared drain lock spans serial network work. **Depends on N0. Proof:** stalled drain/retrieval/cold start respect one total budget with honest fallback; blocked event endpoint/slow command does not indefinitely prevent another lane/identity progressing; cancellation/restart leaves claims reclaimable. Fix demonstrated coupling without raising hook deadline. **PRD-04, PRD-06; deadline source gap, fairness/cancellation validation risk.**
-- [ ] **N12 — Publish actual limits and validate boundaries.** Inventory existing configurable defaults, hard safety caps, retention, overflow behavior, and measured performance separately. **Depends on N0. Proof:** candidate values below agree with source and operator docs; zero/near/full/overflow, expiry, contention, and recovery cases have runnable checks. Agree performance targets before measuring; do not invent guarantees from constants. **PRD-03, PRD-06; documentation/validation gap.**
-- [ ] **N5 — Prove upgrade, transfer, and recovery before promising them.** Include pinned alpha.7 WAL/pending data, backup, import, restore, interrupted retry, accept-before-ack, and every-row conservation. Logical export currently reads tables separately without one consistent snapshot and buffers the full bundle. **Depends on N3 artifact identity; design/reproduction can start on N0. Proof:** export during concurrent writes round-trips into clean destination with valid references/conservation; representative bundle sizes complete within declared memory/time limits; credentials and physical disaster recovery are documented separately from logical transfer. Unsupported/task data stays offline, without scope widening. **PRD-04, PRD-08; snapshot source gap and recovery/capacity validation risks.**
-- [ ] **N3 — Align all release identities.** Candidate source, archives/images, Compose fallback, env template, package versions, and docs must agree. **Depends on N1/N2. Proof:** deliberate mismatch fails release check; installed CLI/daemon/server identify the tested candidate. **PRD-09; validation gap.**
-- [ ] **N8 — Verify installed integrations and advertised platforms.** Setup/repair must install current hooks, MCP, contract, and skill with trust/capability guidance; preserve user edits, unrelated config, and manager ownership. **Depends on N0/N3; primary adapter journey also N1/N2. Proof:** actual packaged fresh setup/rerun/conflict/restart/compaction tests for primary supported agents; adapter mapping and platform transport checks for advertised targets. Generic manual tools and OpenCode declined delivery remain explicit; Intel macOS requires real execution evidence or an honest unverified support label. **PRD-02, PRD-06, PRD-09; validation gap.**
-- [ ] **N9 — Tie release gates and documentation to exact candidate.** Tag release verification currently runs Rust gates while web/browser checks live in separate CI jobs; packaged smoke mostly checks version/help. README also names nonexistent `npm run check:api-contract` instead of `npm run api-contract:check`. **Depends on N3 and applicable N4/N5/N8 gates. Proof:** Rust, strict PostgreSQL, web contract/type/build, browser/setup, image build, and installed-artifact checks gate same candidate before publication; retain results/digests and repeat smoke after publication. Version-correct setup/operations/upgrade/removal guides and embedded skill are checked by executing advice, not just searching strings. **PRD-02, PRD-09; workflow/documentation source gaps and artifact validation gap.**
-- [ ] **Early usefulness checkpoint.** Freeze a small paired set: remembered decision, repeated failed approach, useful procedure, stale/conflicting guidance, and benign work needing no memory. Agree benefit/harm thresholds, compare with/without Cairn, and use results to adjust priorities. Runs alongside Current/Next; larger N7 corpus stays in Future. **PRD-03, PRD-05, PRD-06; validation gap.**
+**All items below are alpha.9 requirements.** N13 minimum readiness is included here; its richer diagnostics continue in alpha.10. Work may run in parallel after its dependencies pass. Full N6/N14/N15 usability scope belongs to alpha.10; N7 broad evaluation belongs to beta.1.
+
+- [ ] **Required PostgreSQL gate — no current candidate verdict.** Run strict suites and final setup/two-caller journey on the committed alpha.9 candidate with disposable PostgreSQL. Missing infrastructure is `NOT RUN`; an observed candidate failure is `FAIL`. Earlier recovery-patch passes and local infrastructure failures establish neither current success nor a global release blocker.
+- [ ] **N0 — P0: Establish canonical candidate source.** Use alpha.8-derived corrective source, commit/review recovery changes, and record candidate SHA while preserving existing worktree changes. **Proof:** recorded clean candidate commit/artifact identities and baseline gates; missing infrastructure is `NOT RUN`. **PRD-09; validation gap.**
+- [ ] **N1 — P1: Make documented browser deployment work.** Example stack exposes web/API separately while runtime API origin defaults empty. Ship same-origin reverse-proxy deployment: web at `/`, API at `/api`; keep database/API private by default and align Compose/environment/operator steps. Split-origin remains opt-in, separately tested. **Depends on N0. Proof:** pinned images, clean DB, browser login/reload/authenticated read, and unrelated-origin denial without manual origin repair. **PRD-01, PRD-09; source gap.**
+- [ ] **N2 — P1: Browser creates setup-ready projects.** Project form omits remote; API stores supplied remote unchanged while setup compares normalized remote. Validate/normalize at producer boundary. **Depends on N1. Proof:** browser remote → membership → token → setup → accepted event → memory → later recall; invalid/missing/duplicate/SCP remotes, mismatch, and nonmember cases have explicit outcomes. **PRD-01; source gap.**
+- [ ] **N4 — P0: Validate secure deployment and credential lifecycle now.** Private/loopback API default, HTTPS cookies, exact-origin CORS including PATCH, revocation/disabled-account isolation, and bounded password hashing belong in corrective gates. Bootstrap-only behavior is partly implemented; stale Compose/CLI comments still say password is reapplied on restart. **Depends on N1 topology. Proof:** web password rotation survives restart, environment only bootstraps/recovers missing admin, permitted split-origin requests pass while other origins fail, and failed-login load does not stall unrelated requests. **PRD-05, PRD-09; mixed source/documentation and validation gaps.**
+- [ ] **N11 — P1: Make first-use actions explain their outcome.** Password/project/member mutations lack visible failure/pending/success feedback; privacy fetch failure appears as perpetual loading. **Depends on N1/N2 interfaces. Proof:** denied/invalid/offline/duplicate submissions show actionable accessible feedback, values remain recoverable, repeated clicks do not duplicate operations, and successful changes are visible. Extend to related existing forms where inspection finds the same issue. **PRD-01, PRD-07; source gap.**
+- [ ] **N10 — P0: Enforce one delivery deadline and test lane fairness.** Drain can wait half the configured deadline, then retrieval waits a full deadline. Event drain errors also skip command drain; shared drain lock spans serial network work. **Depends on N0. Proof:** stalled drain/retrieval/cold start respect one total budget with honest fallback; blocked event endpoint/slow command does not indefinitely prevent another lane/identity progressing; cancellation/restart leaves claims reclaimable. Fix demonstrated coupling without raising hook deadline. **PRD-04, PRD-06; deadline source gap, fairness/cancellation validation risk.**
+- [ ] **N12 — P0: Publish actual limits and validate boundaries.** Inventory existing configurable defaults, hard safety caps, retention, overflow behavior, and measured performance separately. **Depends on N0. Proof:** candidate values below agree with source and operator docs; zero/near/full/overflow, expiry, contention, and recovery cases have runnable checks. Use alpha.9 deadline/cap checks below and beta.2 workload targets; do not invent measured guarantees from constants. **PRD-03, PRD-06; documentation/validation gap.**
+- [ ] **N5 — P0: Prove upgrade, transfer, and recovery before promising them.** Include pinned alpha.7 WAL/pending data, backup, import, restore, interrupted retry, accept-before-ack, and every-row conservation. Logical export currently reads tables separately without one consistent snapshot and buffers the full bundle. **Depends on N3 artifact identity; design/reproduction can start on N0. Proof:** export during concurrent writes round-trips into clean destination with valid references/conservation; representative bundle sizes complete within declared memory/time limits; credentials and physical disaster recovery are documented separately from logical transfer. Unsupported/task data stays offline, without scope widening. **PRD-04, PRD-08; snapshot source gap and recovery/capacity validation risks.**
+- [ ] **N3 — P0: Align all release identities.** Candidate source, archives/images, Compose fallback, env template, package versions, and docs must agree. **Depends on N0; final installation proof also N1/N2. Proof:** deliberate mismatch fails release check; installed CLI/daemon/server identify the tested candidate. **PRD-09; validation gap.**
+- [ ] **N8 — P0: Verify installed integrations and advertised platforms.** Setup/repair must install current hooks, MCP, contract, and skill with trust/capability guidance; preserve user edits, unrelated config, and manager ownership. **Depends on N0/N3; primary adapter journey also N1/N2. Proof:** actual packaged fresh setup/rerun/conflict/restart/compaction tests for primary supported agents; adapter mapping and platform transport checks for advertised targets. Generic manual tools and OpenCode declined delivery remain explicit; Intel macOS requires real execution evidence or an honest unverified support label. **PRD-02, PRD-06, PRD-09; validation gap.**
+- [ ] **N9 — P0: Tie release gates and documentation to exact candidate.** Tag release verification currently runs Rust gates while web/browser checks live in separate CI jobs; packaged smoke mostly checks version/help. Published alpha.8 README names nonexistent `npm run check:api-contract` instead of `npm run api-contract:check`; this PR already corrects version-specific advice, but release source must do the same. **Depends on N3 and applicable N4/N5/N8 gates. Proof:** Rust, strict PostgreSQL, web contract/type/build, browser/setup, image build, and installed-artifact checks gate same candidate before publication; retain results/digests and repeat smoke after publication. Version-correct setup/operations/upgrade/removal guides and embedded skill are checked by executing advice, not just searching strings. **PRD-02, PRD-09; workflow/documentation source gaps and artifact validation gap.**
+- [ ] **N13 minimum — P0: Readiness and first failure diagnosis.** Separate process liveness from authenticated operator readiness. Server readiness requires reachable migrated database and required worker availability; an unavailable required worker fails readiness. Show worker last progress and consolidation backlog separately; pending eligible work with no progress for two configured worker intervals is a stalled-stage diagnostic. Individual offline edge, refused command or queue backlog does not make healthy server globally unready. Show affected event/command lane and safe recovery action. **Depends on N1/N4/N10. Proof:** stop DB/required worker and readiness fails; stall one edge lane and only its diagnostic changes, without exposing private content. New endpoint is optional; truthful supported deployment readiness is mandatory. **PRD-06, PRD-07, PRD-09.**
+- [ ] **Early usefulness checkpoint — five paired scenarios.** Freeze remembered decision, repeated failed approach, useful procedure, stale/conflicting guidance, and benign work needing no memory. **Exit:** expected supported claim recalled in all three positive scenarios; stale/conflicting case shows uncertainty, never unsupported certainty; benign case invents no memory; zero privacy/attribution defects. Record with/without outcomes and overhead. This is a smoke gate, not broad effectiveness proof. **PRD-03, PRD-05, PRD-06.**
+
+### Alpha.9 execution order and exit
+
+1. **Candidate foundation:** N0 + N3; reviewed alpha.8-derived source and matching versions.
+2. **Primary journey:** N1 → N2; N4 + N11 protect login, credentials and mutations.
+3. **Reliability:** N10 + N12 + minimum N13; single total deadline, isolated delivery, honest status.
+4. **Recovery:** N5; snapshot export, alpha.7 WAL/import conservation, restore and retry.
+5. **Ship proof:** N8 + N9 and five-scenario checkpoint; all applicable gates run on exact candidate.
+
+- [ ] Three independent fresh-deployment runs complete browser login → setup-ready project → membership/token → packaged setup → accepted memory → later recall without undocumented edits.
+- [ ] Draft usability target: repository setup finishes within 5 minutes once deployment/access exist; clean deployment to inspectable accepted memory within 20 minutes on documented supported host, excluding download time. Record operator steps and elapsed time; failing target requires workflow fix or explicit plan revision.
+- [ ] Total capture/context path honors configured 250ms/1,500ms default budgets within documented scheduler tolerance; stalled network cannot consume a fresh full budget after earlier wait. Report p95/p99 and each timeout disposition.
+- [ ] Zero cross-account/project leakage, duplicate canonical effects, false delivery confirmation or unaccounted source-record loss in declared adversarial corpus.
+- [ ] Snapshot export and recovery have explicit size limits and measured peak memory; alpha.9 documents tested ceiling instead of silently claiming arbitrary bundle support.
+- [ ] Required DB/browser/installed support gates all `PASS`; no known critical/high security or data-integrity defect. No alpha.10 feature may displace an alpha.9 safety gate.
 
 ### Existing source defaults to preserve and check
 
@@ -310,46 +347,61 @@ Sources: [configuration](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/c
 
 ## Next
 
-### Version TBD — Complete inspection and everyday operations
+### v0.1.0-alpha.10 — Complete history and everyday operations
 
-- [ ] **N6 — Browse complete memory/session history and explain delivery failures.** Memory starts at 25; sessions API returns latest 100 without cursor or truncation notice, ordered only by start time. Replay failure is not rendered. **Depends on N1. Proof:** traverse beyond 25 memories/100 sessions with stable tie ordering and no duplicate/skip under writes; disclose intentional replay bounds; loading/error/empty states are distinct. Queued/accepted/blocked/stale/unsupported delivery states show tested next actions. **PRD-06, PRD-07; source gaps.**
-- [ ] **N13 — Define operational readiness and safe diagnostics.** Existing `/api/health` reports process liveness; admin system health already has pipeline data. Choose the readiness contract required by supported deployment and reuse those diagnostics. **Depends on N1/N4/N12. Proof:** stop DB/consolidator or break delivery and show which check fails, last-report age, affected lane, and supported recovery action; output excludes credentials/raw agent material. **PRD-06, PRD-07, PRD-09; proposal/validation gap.**
-- [ ] **N14 — Reduce membership/project administration friction.** Current form expects a raw member UUID and provides minimal selection context. **Depends on N2/N11. Proof:** authorized operator selects intended user/project, understands permissions, recovers from invalid input, and completes membership changes using keyboard/mobile without accidental duplicate or wrong-project action. Use existing account/project lists; no new administration subsystem. **PRD-01, PRD-05, PRD-07; usability proposal.**
-- [ ] **N15 — Complete existing knowledge maintenance workflows.** Measure present memory/governance/evidence interfaces before adding controls; confirm reviewers can resolve stale/conflicting knowledge rather than only inspect it. **Depends on N6 and primary usefulness checkpoint. Proof:** review claim and evidence → reinforce/recheck/supersede/retire using supported action → observe correct later retrieval; denied roles cannot perform mutation, uncertainty/history remain visible. **PRD-05, PRD-07; workflow validation and usability proposal.**
+**Depends on alpha.9. Goal:** members understand what Cairn knows, what happened, and how authorized correction changes future recall.
+
+- [ ] **N6 — P1: Complete memory/session browsing.** Add stable cursor pagination to current APIs/UI; order ties by stable ID. Test 250 memories and 250 sessions, including identical timestamps, inserts and deletes between pages. Every fixture row appears once in stable snapshot traversal, or API explicitly reports snapshot expiry and UI offers restart; no silent skip/duplicate in a claimed same view. Newly inserted rows appear after refresh, and deletion behavior is documented. No silent 25/100-row ceiling. Detail/replay explains truncation and failure.
+- [ ] **N13 — P1: Actionable diagnostics.** Reuse existing health/receipts: pending, accepted, retrying, refused, stale cache, unsupported capability, last report time, affected lane. Test expired/revoked token, DB outage, saturation, blocked receipt and daemon restart; each state names safe next action. Readiness from alpha.9 stays mandatory.
+- [ ] **N14 — P1: Account/member selection.** Authorized operator chooses existing account through searchable label/identity instead of copying raw UUID. Show intended project and role before grant/removal. Test wrong-project, duplicate, nonmember and disabled-account cases, keyboard-only operation and 390px viewport.
+- [ ] **N15 — P1: Knowledge correction from existing detail/governance.** Inspect claim/evidence; reinforce, recheck, supersede or retire through supported action. Explain permissions and pending/error/success. Later retrieval reflects correction; original history remains inspectable. Never grant verified authority from an unsupported click/attestation.
+- [ ] Apply accessible loading/empty/error/success/pending feedback across Memory, Sessions, Governance and Settings; keep entered values on retryable failures and prevent repeated submission.
+
+**Exit:** three operators complete membership change, history lookup, failed-delivery diagnosis and knowledge correction without raw-UUID copying or undocumented API calls. All four tasks succeed for each operator; authorization negatives pass. Repeat alpha.9 release/security/recovery/support gates on alpha.10 candidate.
 
 Sources: [session API](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-server/src/api.rs), [Memory](<https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/app/(app)/projects/%5Bid%5D/memory/page.tsx>), [Sessions/replay](<https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/app/(app)/projects/%5Bid%5D/sessions/page.tsx>), [Settings](<https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/app/(app)/settings/page.tsx>).
-
-Next usability work does not postpone Current security, delivery, migration, or published-support gates.
 
 ---
 
 ## Future
 
-### Broader evidence of useful memory
+### v0.1.0-beta.1 — Prove useful recall and improve knowledge quality
 
-- [ ] **N7 — Evaluate varied real work.** **Depends on reproducible N1–N5; smaller checkpoint runs earlier. Proof:** frozen corpus/labels cover fixes, decisions, procedures, stale/conflicting claims, refusals, and work needing no memory. Report precision, useful recall, false positives/refusals, provenance defects, task success, repeated investigation, harm, and context overhead versus no-memory baseline. Pin repository/agent/model/rule versions; report per-scenario outcomes and uncertainty. **PRD-03, PRD-05, PRD-06.**
-- [ ] Extend evidence to supported agents and low-cost configurations after primary journey is stable; separate structural capture, semantic capture, and delivery capabilities instead of comparing raw record counts.
-- [ ] Fix measured weaknesses or narrow product claims when thresholds are missed. The earlier [acceptance record](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/tests/feature005/acceptance-results.md) repeats one fixture per agent and does not prove broad usefulness.
+**Priority P1; depends on alpha.10. Goal:** later work improves across varied projects, with bounded harm. These are draft acceptance targets, not observed results.
 
-### Knowledge quality and topic assistance
+- [ ] **N7 — P1: Freeze 30 paired scenarios** across at least three repositories and Claude Code/Codex, with five pairs per class: fixes, decisions/procedures, repeated failures, stale/conflicting guidance, privacy/refusal boundaries, and benign no-memory work. Each scenario runs with/without Cairn from equivalent repository state; counterbalance order and record agent/model/rule versions. Blind-score supported relevance where practical.
+- [ ] Prelabel relevant claims, tasks, harm and scoring method before running. **Targets:** useful recall ≥80% of eligible labelled claims; ≥90% of delivered claims relevant/supported; zero privacy leaks, wrong-actor attribution or high-impact harmful advice; ≥20% median reduction in repeated investigation steps on repeat-work scenarios; task-completion rate no lower than control. For repeat-work reduction, score only prelabelled pairs with control investigation count >0; report absolute counts for zero-control cases. Report Cairn-delivered tokens per pair and total agent input tokens where measurable, with median/p95; existing per-request context budget stays enforced. Report counts/denominators and uncertainty; 30 pairs do not establish universal performance.
+- [ ] Re-run topic-key consistency across sessions/agents. If fragmentation misses labelled same-subject claims, surface existing applicable topic keys/corroborating members and revise installed guidance. Never automatically merge different semantic claims. **Exit:** at least 20% fewer missed same-subject groupings versus frozen candidate baseline with zero false grouping in scored corpus; if baseline has no misses, no topic feature needed.
+- [ ] Fix measured retrieval/extraction weaknesses with current deterministic rules, evidence and query paths; add explicit remembering guidance for decisions hooks cannot observe. Publish no-memory and refusal outcomes alongside successes.
+- [ ] Carry missed benefit/harm targets as beta blockers; revise implementation or explicitly narrow supported scenarios before re-evaluation. No cosmetic feature substitutes for failed usefulness evidence.
 
-- [ ] Re-run cross-session/cross-agent topic-key/adoption evaluation on current candidate. Historical [12-of-26 sample](../../evals/topic-key-effectiveness/RESULTS.md) showed inconsistent topic namespaces and varied unprompted recording; it is motivation, not current defect proof.
-- [ ] If fragmentation persists, surface existing applicable topics/corroborating members and improve guidance so agents reuse them. **Proof:** fewer missed groupings without false grouping, fabricated evidence, or automatic semantic merging.
-- [ ] If stale/conflicting guidance remains harmful after N15, improve evidence freshness/review prioritization through existing governance; attested evidence must still require new supported observation.
+### v0.1.0-beta.2 — Supported capacity, retention and recovery
 
-### Guided recovery and supported scale
+**Priority P1; depends on beta.1. Goal:** small teams operate Cairn within explicit resource and data-lifecycle limits.
 
-- [ ] Use N13/paired-task findings to improve recovery guidance for expired/revoked credentials, stale cache, saturation, blocked receipts, and interrupted import. Add only actions supported by current APIs and ownership rules.
-- [ ] Measure retrieval/consolidation/export/import/spool ceilings on representative large datasets and Linux/macOS/Windows edge hardware; publish supported limits.
-- [ ] Improve query/index/batching behavior for measured bottlenecks. Streaming export or changed lane scheduling is conditional on demonstrated ceilings; new vector/graph infrastructure is not a default solution.
+- [ ] Benchmark **draft envelope:** 10 provisioned accounts, 10 concurrent active sessions, 20 projects, 100,000 canonical memories and 1,000,000 accepted events. Reference host: 4 vCPU/8GiB RAM, SSD, server/PostgreSQL/web together; native edge tested separately on supported platforms; LAN RTT ≤50ms. Record versions, dataset distribution and retained receipts/traces, not scaled-only fixtures.
+- [ ] **Draft targets:** ordinary authenticated list/detail/mutation p95 ≤500ms excluding export/import; usable main page p95 ≤2s; existing capture/context deadlines remain unchanged. Sustained 10 events/second for 30 minutes; once arrivals stop, processing backlog drains within 10 minutes with no duplicate effect or unexplained loss. Failures block capacity claim; optimize measured SQL/index/batching first.
+- [ ] Logical export/import of up to 256MiB serialized bundle completes each direction within 10 minutes with ≤1GiB additional process memory on reference host. Rehearse concurrent-write snapshot and interrupted import. Stream/chunk only if current buffering cannot satisfy cap; enforce limit and show safe refusal before resource exhaustion.
+- [ ] Rehearse physical PostgreSQL backup/restore independently: **draft RPO ≤24h, RTO ≤60min** within envelope, daily backup schedule and operator-run recovery. Logical transfer excludes credentials and is not physical disaster recovery.
+- [ ] Publish per-class retention: keep canonical knowledge/evidence until authorized retirement/deletion, 90-day traces as existing default; introduce explicit event/handoff/receipt cleanup only after dependency policy is defined. Dry-run counts and deletion tests preserve surviving evidence, unresolved retry identity, actor boundaries and backup disclosure. Never silently sweep accepted history merely because it is old.
+- [ ] Surface declared limits, actual queue/DB growth and actionable saturation/recovery states through existing diagnostics. Document supported ceiling and failures before increasing caps.
 
-### Retention and integration evolution
+### v0.1.0-rc.1 — Freeze contracts and rehearse release
 
-- [ ] Define retention/deletion policy by data class: accepted events, evidence/knowledge, handoffs, receipts, refused operations, and local diagnostics. Existing traces already have 90-day retention. **Proof:** expiration/deletion cannot fabricate confirmation, break retry identity, widen scope, or silently invalidate surviving evidence; document physical backup coverage.
-- [ ] Evaluate improved OpenCode delivery only when its supported stable contract can safely carry context. Keep manual MCP and honest declined capability until real-version integration tests prove more.
-- [ ] Revalidate vendor upgrades, manager distribution, trust, compaction, and removal behavior using smallest supported adapter/platform checks; avoid new CLI surface unless existing setup/web/manual ownership cannot cover measured need.
+**Priority P0; depends on beta.2. Goal:** exact supported installation and upgrade can be repeated by someone other than author.
 
-These are conditional product proposals. Versions, staffing, deadlines, performance promises, and expanded support remain uncommitted.
+- [ ] Freeze supported API/MCP actions, error envelope, schema/import format and installed contract/skill revisions. Add current/previous supported client-server compatibility checks and documented server-first upgrade order; do not freeze hidden vendor internals.
+- [ ] Publish evidence matrix for macOS arm64/x86_64, Linux arm64/x86_64, Windows x86_64 edge; amd64/arm64 server/web images; primary native agents, OpenCode capture/declined automatic delivery and generic manual MCP. Every advertised combination has actual installed proof or is explicitly outside supported matrix.
+- [ ] Test fresh install, setup rerun/user edits, daemon restart, session/compaction recovery, credential revoke, upgrade, import/restore and owned-resource removal using candidate archives/images. Chromium desktop/mobile is minimum browser gate; extra browser claims require their own execution.
+- [ ] Pilot for **14 consecutive days across three deployments**, at least one solo and one small team; record failures and named owner. Zero unresolved critical/high security or data-integrity defects and no unresolved primary-flow defect at exit. A release-blocking correction starts a new RC version and repeats affected gates/pilot; never replace rc.1 artifacts.
+- [ ] Finalize maintainer support/triage procedure, versioned upgrade guide, backup/removal runbooks and known limits. RC may contain bug fixes; new product features return to prerelease planning.
+
+### v0.1.0 — First stable 0.1 release
+
+- [ ] Promote validated RC scope with only version/metadata changes; rebuild and rerun applicable exact-artifact gates before publication and smoke after publication.
+- [ ] Publish 0.1 support/compatibility policy: additive API changes within 0.1.x; deprecate before planned breaking changes in 0.2.0; document any unavoidable security exception and migration. Schema upgrades remain forward-only; downgrade uses validated backup restore, not assumed reverse migration.
+- [ ] Publish complete onboarding, evidence/support matrix, operating envelope, usefulness results, retained limitations and recovery procedures with artifact digests/source identity.
+- [ ] Use **v0.1.1** onward for compatible fixes; larger feature or contract change belongs to **v0.2.0** planning. `v0.1.0` is not a claim of enterprise readiness or product `v1.0.0`.
 
 ---
 
@@ -357,10 +409,10 @@ These are conditional product proposals. Versions, staffing, deadlines, performa
 
 ### Product and release decisions
 
-- [ ] Confirm primary adoption scenario: proposed small self-hosted team, one operator, Claude Code or Codex CLI.
-- [ ] Select browser/API topology before N1; document supported alternatives.
-- [ ] Agree benefit/harm and measured performance targets before scoring; retain current safety caps while gathering evidence.
-- [ ] Choose successor versus alpha.8 artifact replacement, assign version, and finalize candidate scope. Recommendation: publish a successor for changed artifacts with immutable evidence.
+- [ ] Review draft primary audience (solo/1–10-person self-hosted team), default same-origin topology and explicit version sequence before approving implementation scope.
+- [ ] Assign implementation/release owners to alpha.9 N-items and attach PR/evidence links; optional split-origin support requires separate tests.
+- [ ] Ratify beta.1 scoring rubric and beta.2 reference envelope/targets before running measurements; revise targets transparently rather than after observing scores.
+- [ ] Implement immutable alpha.9 successor path; do not replace alpha.8 assets. Emergency extra prereleases receive new numbers, and roadmap is renumbered before publication.
 - [ ] Declare upgrade/support matrix and any unverified target honestly; do not silently turn absent infrastructure into acceptance.
 - [ ] Define retention/deletion expectations before implementing broader cleanup.
 
@@ -381,7 +433,7 @@ Historical records are evidence of earlier ceilings, not instructions to restore
 | Historical silent DB skip / scaled perf fixture | Strict DB prerequisite work is in progress; N7/N12 require current full-scale and platform-specific proof. |
 | OpenCode #49/#50 and manager evidence gaps | Revalidate against alpha.8 capability contract and tested vendor versions; no inherited automatic-delivery promise. |
 
-Sources: [foundation follow-ups](../history/alpha7/mvp-followups.md), [intelligence follow-ups](../history/alpha7/intelligence-followups.md), [tagged binary harness](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/tests/src/lib.rs).
+Sources: [foundation follow-ups](https://github.com/Vellixia/Cairn/blob/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/docs/feature-001-followups.md), [intelligence follow-ups](https://github.com/Vellixia/Cairn/blob/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/docs/feature-003-followups.md), [tagged binary harness](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/tests/src/lib.rs).
 
 **Product boundaries:** no task feature/scope, `cairn_task`, local canonical search, entity pull sync, or separate offline authority without a new product contract and migration. No embeddings/vector DB, separate graph DB, broad analytics, or new CLI surface without measured need. No self-registration/self-join or hosted SaaS commitment. Historical references do not automatically become current backlog.
 
@@ -389,10 +441,10 @@ Sources: [foundation follow-ups](../history/alpha7/mvp-followups.md), [intellige
 
 ## Release Checklist
 
-Applies to corrective candidate and later releases. No gate is checked by this planning pass. Record `PASS`, `FAIL`, or `NOT RUN` with reason, source commit, installed binary paths/versions, artifact digests, platform/DB, and commands in [verification plan](../engineering/test-plan.md). Required pre-publication gates pass before publishing; exact published-artifact smoke follows publication.
+Applies to corrective candidate and later releases. No gate is checked by this planning pass. Attach versioned candidate evidence report to release PR, recording `PASS`, `FAIL`, or `NOT RUN` with reason, source commit, installed binary paths/versions, artifact digests, platform/DB and commands. This checklist defines required gates; it does not contain execution results. Required pre-publication gates pass before publishing; exact published-artifact smoke follows publication.
 
 - [ ] **Core flow works:** fresh browser → normalized project/remote → membership/token → packaged setup → accepted event → inspectable memory → later recall, plus correct session recovery.
-- [ ] **Tests pass:** regression, format/Clippy/workspace, strict PostgreSQL/API, web contract/type/build, and browser checks tied to candidate. **Blocked in latest record:** server gate/final journey rerun.
+- [ ] **Tests pass:** regression, format/Clippy/workspace, strict PostgreSQL/API, web contract/type/build, and browser checks tied to candidate. **Candidate requirement:** strict server gate and final journey rerun; historical local infrastructure trouble is not a current candidate verdict.
 - [ ] **No known critical candidate bugs:** resolve critical failures and missing required reruns; reproduction outcomes documented separately from speculative risk.
 - [ ] **Security checked:** privacy corpus, authorization role matrix, disabled/revoked/cross-account/project isolation, origins/TLS/cookies, bootstrap/password restart behavior, and hashing responsiveness.
 - [ ] **Delivery bounded and durable:** total elapsed deadline, queue fairness, saturation/cancellation/reclaim, outage/expiry/cache isolation, accept-before-ack retry, and one canonical effect.
@@ -418,8 +470,11 @@ Applies to corrective candidate and later releases. No gate is checked by this p
 | v0.1.0-alpha.6 | Withdrawn — not published | Container build failed before artifacts; content/fix carried into alpha.7. |
 | v0.1.0-alpha.7 | Done — published | Autonomous capture/consolidation, personal/team memory, authorization/order/privacy fixes. |
 | v0.1.0-alpha.8 | Done — published baseline | Thin edge/canonical server, one setup command/five tools, consolidated web, removed tasks/local authority, import/conservation. |
-| TBD — corrective candidate | Current — partial validation; server gate blocked | Recovery plus proposed secure first-use, bounded delivery, migration/transfer, adapter/artifact/docs gates. |
-| TBD — usability/operations milestone | Planned | Complete browsing, readiness/diagnostics, member selection, knowledge-maintenance workflows. |
-| TBD — quality/scale milestones | Conditional proposals | Varied usefulness evidence, topic assistance, measured capacity, retention and supported integration evolution. |
+| v0.1.0-alpha.9 | Current target — recovery patch reported in progress; release gates open | Secure first-use, bounded delivery, upgrade/export recovery, primary readiness, installed/artifact proof. |
+| v0.1.0-alpha.10 | Planned — after alpha.9 | Complete history, diagnostics, account/member selection and knowledge correction. |
+| v0.1.0-beta.1 | Planned — after alpha.10 | Thirty-pair useful-recall evidence and measured topic/knowledge-quality fixes. |
+| v0.1.0-beta.2 | Planned — after beta.1 | Declared capacity, performance, retention and physical/logical recovery. |
+| v0.1.0-rc.1 | Planned — after beta.2 | Contract/support freeze, exact installed matrix and 14-day pilot. |
+| v0.1.0 | Planned — after validated RC | First stable 0.1 release, compatibility policy and operating/support evidence. |
 
 When work ships, record version/commit, artifact identity, validation result, and remaining limitation. Update statuses when scope/dependencies/evidence change. Source existence alone does not complete a proposed outcome.

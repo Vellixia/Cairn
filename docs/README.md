@@ -5,10 +5,10 @@ Start with product direction, then use guidance matching your source version. Th
 | Area | Document | Purpose |
 | --- | --- | --- |
 | Product | [Requirements](product/prd.md) | Draft V1 target: goals, architecture, user stories, requirements, data/API, and acceptance. |
-| Product | [Roadmap](product/roadmap.md) | Proposed next work and release history. |
-| Guides | [Agent integrations](guides/integrations.md) | Alpha.7 connection and ownership behavior. |
-| Engineering | [Testing](engineering/testing.md) | Test tiers, harness ownership, and citation guard. |
-| Engineering | [Verification plan](engineering/test-plan.md) | Positive, negative, recovery checks and observed gaps. |
-| History | [Alpha.7 references](history/README.md) | Earlier contracts retained for regression checks and provenance. |
+| Product | [Roadmap](product/roadmap.md) | Explicit alpha.9 → alpha.10 → beta.1 → beta.2 → rc.1 → 0.1.0 scope, exit gates and release history. |
+| Guides | [Agent integrations](https://github.com/Vellixia/Cairn/blob/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/docs/integrations.md) | Alpha.7 connection and ownership behavior. |
+| Engineering | [Testing](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/testing.md) | Published alpha.8 test tiers, database prerequisites and artifact checks. |
+| Engineering | [Release gates](product/roadmap.md#release-checklist) | Candidate checks and required evidence; attach results per release. |
+| History | [Alpha.7 references](https://github.com/Vellixia/Cairn/tree/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/specs) | Pinned earlier contracts for provenance; historical interfaces are not current scope. |
 
-Keep current requirements in `product/`, operator instructions in `guides/`, and implementation/verification guidance in `engineering/`. Historical documents explain old behavior; they do not define current setup or backlog. Record release changes in [CHANGELOG.md](../CHANGELOG.md). Update incoming links whenever a document moves.
+Current requirements live in `product/`; use version-pinned operator and testing references until repository documentation migration is committed separately. Historical documents explain old behavior; they do not define current setup or backlog. Record release changes in [CHANGELOG.md](../CHANGELOG.md). Update incoming links whenever a document moves.
