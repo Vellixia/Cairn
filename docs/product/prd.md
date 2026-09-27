@@ -1,13 +1,13 @@
 # Product Requirements Document
 
 > **Product:** Cairn
-> **Version:** V1 corrective target — release version TBD
+> **Version:** v0.1.0-alpha.9 target; staged through v0.1.0
 > **Status:** Draft
 > **Updated:** 2026-09-27
 
 **Evidence baseline:** published [v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8), tag `4cbb2c6`. This checkout's [Cargo.toml](../../Cargo.toml) declares `0.1.0-alpha.7`; building it does not produce the published V1 interface. Corrective work on `codex/session-recovery-tests` has partial validation, not release acceptance.
 
-This PRD is a proposed product contract reviewed with Astra. It covers intended outcomes, architecture, user stories, requirements, and acceptance. “Published” means source/artifact evidence; “Target” means behavior still requiring candidate proof. Every unchecked item below remains an acceptance obligation, not a claim the feature is absent. [Roadmap](roadmap.md) assigns order; [verification plan](../engineering/test-plan.md) records checks and gaps.
+This PRD is a proposed product contract reviewed with Astra. It covers intended outcomes, architecture, user stories, requirements, and acceptance. “Published” means source/artifact evidence; “Target” means behavior still requiring candidate proof. Every unchecked item below remains an acceptance obligation, not a claim the feature is absent. [Roadmap](roadmap.md) assigns explicit versions and [release gates](roadmap.md#release-checklist); candidate evidence reports record observed checks and gaps.
 
 `PRD-01`–`PRD-09` retain existing traceability. `US-xxx` and `FR-xxx` below belong to **this PRD revision**, not historical specifications with similarly named IDs. Historical test citations require explicit mapping before they count as proof.
 
@@ -66,7 +66,7 @@ Server owns application meaning; hooks, MCP, and web must not implement competin
 
 Deterministic extraction avoids an additional model dependency, cost, and data boundary while making rule behavior reproducible. It does not claim to understand every event or outperform model-assisted extraction. Any future model assistance needs measured benefit and the same validation/governance boundaries.
 
-Recommended supported browser topology is one origin with web at `/` and API at `/api`; exact-origin split deployment may remain supported if verified. Final topology is an open decision. Canonical server authority trades increased setup/network dependence for one shared authorization, evidence, and correction model.
+Draft planning decision: default browser topology is one origin with web at `/` and API at `/api`; split-origin is opt-in only after exact-origin verification. Canonical server authority trades increased setup/network dependence for one shared authorization, evidence, and correction model.
 
 Evidence: tagged [architecture](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/architecture.md), [Rust dependencies](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/Cargo.toml), [web dependencies](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/web/package.json), [runtime cache](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairnd/src/deliver.rs).
 
@@ -79,7 +79,7 @@ Evidence: tagged [architecture](https://github.com/Vellixia/Cairn/blob/v0.1.0-al
 - Need: relevant prior decisions, failures, and procedures at the right session boundary.
 - Problem: context resets; manual recording/setup can cost more than the memory helps.
 - Goal: resume useful work without repeating investigations or managing memory every task.
-- Solo developer may also be the operator; primary adoption scenario remains proposed pending product choice.
+- Solo developer may also be operator. Draft primary audience is solo developers and teams of 1–10 on one self-hosted deployment.
 
 ### Project member / knowledge reviewer
 
@@ -750,17 +750,17 @@ Source defaults are **not measured guarantees**. Candidate must establish effect
 | Event spool | 50,000 events / 256MiB undelivered payload | Precise shedding/rejection/row-state accounting; total disk/other retained data ceiling separately measured. |
 | Claims/network | 60s claim lease; 20s delivery request timeout | Startup/cancel/retry proof; per-request timeout does not waive context deadline. |
 | Traces | 90-day retention, 500-row sweep batch | Retention works without long locks or broken surviving evidence. |
-| General API / page load | No agreed general latency target | Agree p95 API and page usability target plus network/data/load profile before performance verdict. |
+| General API / page load | Not benchmarked | Beta.2 draft target: ordinary authenticated list/detail/mutation p95 ≤500ms; usable primary page p95 ≤2s on declared reference host/LAN, excluding export/import. |
 
 Sources: [configuration](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-core/src/config.rs), [event limits](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-core/src/event.rs), [cache/delivery](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairnd/src/deliver.rs), [spool](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-store/src/spool.rs), [retrieval](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/crates/cairn-server/src/retrieve.rs).
 
 ### Scale
 
-- Proposed first audience: solo developer or small team, one self-hosted deployment. No agreed user count, requests/day, project count, or growth target yet.
+- Draft beta.2 envelope: 10 accounts, 10 concurrent active sessions, 20 projects, 100,000 canonical memories and 1,000,000 accepted events. Reference host: 4 vCPU/8GiB RAM with SSD, server/PostgreSQL/web together, LAN RTT ≤50ms; native edge measured separately. Targets are proposed acceptance criteria, not observed supported capacity.
 - Measure retained events/knowledge/receipts, queue age and saturation, consolidation backlog, retrieval latency, export/import peak memory/time, and operational DB/disk cost.
 - Representative full-size fixtures must replace scaled-only evidence for scale claims. Export currently materializes complete bundle; supported ceiling/streaming need is unmeasured.
 - Optimize measured SQL/index/batching bottlenecks before introducing infrastructure. Source cap bounds queued payload, not lifetime DB/filesystem growth.
-- Recovery time/objectives and supported backup retention are open operating decisions; do not label logical export disaster recovery.
+- Beta.2 draft targets: sustain 10 events/second for 30 minutes; drain processing backlog within 10 minutes after arrivals stop. Up to 256MiB logical bundle imports/exports each within 10 minutes with ≤1GiB additional process memory. Physical backup policy targets RPO ≤24h and RTO ≤60min within envelope; rehearse daily PostgreSQL backup/restore independently. Logical export is not disaster recovery.
 
 ### Compatibility
 
@@ -802,7 +802,7 @@ Reuse existing pure/component/journey/hostile tiers and web harness. Add runnabl
 | PRD-08 upgrade | FR-040–044 | US-009 | N5, N12 |
 | PRD-09 release | FR-045–049 | US-001, US-009, US-010 | N0, N3, N8, N9 |
 
-Detailed environments/commands/results remain in [verification plan](../engineering/test-plan.md); do not duplicate stale pass totals here. Latest recorded required PostgreSQL gate/final journey rerun is unresolved. Browser deployment, upgrade/restore, packaged support, and varied usefulness are not accepted by this PRD rewrite. Historical repeated fixture and [topic-key sample](../../evals/topic-key-effectiveness/RESULTS.md) are narrow historical evidence, not current complete product proof.
+Attach detailed environments/commands/results to each candidate evidence report using [release gates](roadmap.md#release-checklist). Reported uncommitted recovery-patch results are historical local evidence; exact alpha.9 candidate PostgreSQL/setup gates need fresh execution. Browser deployment, upgrade/restore, packaged support, and varied usefulness are not accepted by this PRD rewrite. Historical repeated fixture and [topic-key sample](../../evals/topic-key-effectiveness/RESULTS.md) are narrow historical evidence, not current complete product proof.
 
 When implementing a group, map each FR and Given/When/Then acceptance to actual runnable check or explicit gap. New PRD-local IDs do not retroactively repurpose historical FR/SC tests.
 
@@ -816,17 +816,19 @@ When implementing a group, map each FR and Given/When/Then acceptance to actual 
 - [ ] No known unresolved critical candidate defect; required incomplete gates remain visible.
 - [ ] Effective deadline/resource limits hold; agreed API/page/workload targets met with evidence.
 - [ ] Upgrade/transfer/restore conservation accounts for every source record without widening scope.
-- [ ] Later-work benefit reaches pre-agreed threshold and harmful/stale guidance remains within pre-agreed tolerance; numerical targets are pending.
+- [ ] Beta.1 frozen evaluation meets draft targets: ≥80% useful recall of eligible labelled claims, ≥90% delivered claims relevant/supported, ≥20% median reduction in repeated investigation actions, task-completion rate no lower than control, and zero scored privacy/attribution/high-impact harmful-advice defects.
 
 | Product metric | Measurement | Target / decision |
 | --- | --- | --- |
-| First-use activation | Time and completion rate from clean deploy to inspectable accepted event, then first useful later recall | Baseline first; primary journey and acceptable friction to be agreed. |
-| Useful recall | Relevant evidence-backed decisions/procedures used in later task, per scenario | Agree useful-recall threshold before scoring. |
-| Avoided repeated work | Repeated investigation/failed approaches and task success with/without Cairn | Predeclare minimum benefit on frozen paired tasks. |
-| Harm / distraction | Stale/conflicting harmful guidance, false positives, false refusals, context overhead | Predeclare tolerated harm and consequence of failing. |
+| First-use activation | Time and completion rate from clean deploy to inspectable accepted event, then first useful later recall | Alpha.9: three fresh-deployment runs succeed; setup ≤5 minutes after prerequisites and clean deployment to inspectable accepted memory ≤20 minutes excluding downloads. |
+| Useful recall | Relevant evidence-backed decisions/procedures used in later task, per scenario | Beta.1: ≥80% eligible labelled claims usefully recalled; ≥90% delivered claims relevant/supported in frozen 30-pair corpus. |
+| Avoided repeated work | Repeated investigation/failed approaches and task success with/without Cairn | Beta.1: ≥20% median reduction in repeated investigation actions; task-completion rate no lower than control. |
+| Harm / distraction | Stale/conflicting harmful guidance, false positives, false refusals, context overhead | Zero scored privacy leaks, wrong-actor attribution or high-impact harmful advice; stale/conflict and benign cases cannot fabricate certainty/evidence. Misses block beta verdict until fixed or scope explicitly narrowed. |
 | Adoption/consistency | Supported fact recording and topic/value consistency across sessions/agents | Current candidate measurement; historical sample is not baseline guarantee. |
-| Reliability | Deadline misses, queue age/saturation/loss reasons, duplicate effects, recovery/restore outcome | Enforced safety invariants plus agreed workload target. |
+| Reliability | Deadline misses, queue age/saturation/loss reasons, duplicate effects, recovery/restore outcome | Alpha.9 deadline/identity/conservation invariants; beta.2 envelope and performance/restore targets in section 10. |
 | Support/evidence coverage | Advertised claims with exact-candidate installed/artifact evidence | Every shipped claim has proof or named limitation. |
+
+Freeze 30 paired scenarios across at least three repositories and both primary adapters, with five pairs per class: fixes, decisions/procedures, repeated failures, stale/conflicting guidance, privacy/refusal boundaries, and benign no-memory work. Prelabel expected claims and scoring, counterbalance execution order, record model/agent/rule versions, and publish counts/denominators/uncertainty. Score repeat-work reduction only for prelabelled pairs with control count >0; report absolute counts for zero-control pairs. Context overhead is Cairn-delivered tokens per pair plus total agent input tokens where measurable, reported at median/p95; existing per-request context budget remains enforced. Alpha.9 only requires five-scenario smoke; broad usefulness verdict belongs to beta.1. Targets are draft values for review and must be fixed before scoring, not tuned to observed results.
 
 Stored-record count is not primary success metric. If paired work does not improve or guidance is harmful, fix measured weakness or narrow claim before expanding features. Do not claim broad usefulness from repeated one-fixture trials.
 
@@ -853,23 +855,25 @@ Stored-record count is not primary success metric. If paired work does not impro
 
 ## 14. Open Questions
 
-Open choices do not grant implementation permission or turn draft targets into approved commitments.
+**Concrete draft decisions for review:** immutable `v0.1.0-alpha.9` successor; solo/1–10-person self-hosted audience; same-origin default; preserve current authority/technology; in-memory cache through 0.1.0. [Roadmap version contract](roadmap.md#version-and-scope-contract) assigns alpha.9 safety/first-use, alpha.10 operations, beta.1 quality, beta.2 capacity/retention, rc.1 compatibility/pilot, then stable 0.1.0. Planning versions do not imply release acceptance or implementation approval.
+
+Remaining choices are bounded decisions to settle before their named release gate.
 
 | Question | Needed before | Current draft recommendation |
 | --- | --- | --- |
-| Which adoption journey wins: solo/small team server, full offline solo, or larger organization? | Product approval | Solo/small self-hosted team on same canonical-server architecture; offline authority would require new contract/migration. |
-| Which browser/API topology is supported by default? | N1 acceptance | Same-origin web/API; optional split-origin only with complete exact-origin proof. |
-| What remote duplicate/fork/mirror ambiguity policy is appropriate? | FR-002 acceptance | Project UUID authority; validated normalized match, refuse ambiguous authorized selection. |
-| What benefit/harm/context-overhead thresholds justify Cairn? | Paired usefulness verdict | Agree before scoring; fix weakness or narrow claim if missed. |
-| What users/data/load/API/page/restore targets define supported ceiling? | Performance/scale/recovery claims | Measure representative baseline; separate safety constants from promises. |
-| What scope/version is corrective release, and successor or artifact replacement? | Publication | Immutable successor recommended; version/date TBD. |
+| Does review accept primary audience and architecture? | Alpha.9 scope approval | Solo/teams of 1–10; current canonical server. Full offline authority and enterprise expansion excluded through 0.1.0. |
+| Will split-origin be advertised as optional supported topology? | Alpha.9 N1/N4 | Same-origin default is selected; advertise split-origin only with its complete browser/origin evidence. |
+| Which fork/mirror/duplicate remote spellings require explicit selection? | Alpha.9 FR-002 tests | Project UUID authority and ambiguous-match refusal are selected; enumerate normalization/fork fixtures and actionable selection behavior. |
+| Does review accept beta.1 rubric/targets? | Freeze beta.1 corpus | Section 12 fixes numerical draft benefit/harm targets, zero-denominator rules and delivered/total-input token overhead metrics. |
+| Does reference host/envelope represent intended operators? | Beta.2 benchmark freeze | Section 10 declares users/data/load/API/page/transfer and physical recovery targets; record hot/cold results. |
+| Who owns each alpha.9 implementation and release gate? | Candidate work begins | Roadmap fixes successor/version/scope; assign named owners and exact source SHA. No alpha.8 asset replacement. |
 | What adapter/OS/browser combinations have current installed proof? | Advertised support | Primary native journey plus focused supported-platform checks; label unverified combinations. |
 | What retention/deletion rules apply beyond 90-day traces? | Broader cleanup | Per data class, preserve evidence and unresolved retry identity. |
-| Should cache persist across daemon restart? | Any persistence claim | No promise today; add only if measured continuity gap justifies storage/privacy complexity. |
+| Does evidence justify a later cache-persistence proposal? | Future scope beyond planned 0.1.0 | Cache stays in-memory through 0.1.0; any later change requires measured benefit and storage/privacy design. |
 | Is model-assisted extraction or expanded automatic delivery justified? | Future scope | Only measured benefit and stable supported data boundary; no automatic authority or unsafe vendor surface. |
 
-- [ ] Resolve product/adoption and topology choices.
-- [ ] Agree evaluation/operating targets and freeze evidence method.
+- [ ] Ratify declared audience/topology/version scope and assign implementation/release owners.
+- [ ] Ratify numerical draft evaluation/operating targets and freeze evidence method before scoring.
 - [ ] Approve candidate scope, support matrix, and release identity.
 - [ ] Resolve future retention/cache/integration choices only when their scope is pursued.
 
@@ -877,7 +881,7 @@ Open choices do not grant implementation permission or turn draft targets into a
 
 ## 15. Release Checklist
 
-This is a candidate checklist, not publication certification. [Roadmap release checklist](roadmap.md#release-checklist) and [verification plan](../engineering/test-plan.md) hold execution/evidence details.
+This is a candidate checklist, not publication certification. [Roadmap release checklist](roadmap.md#release-checklist) defines required gates. Attach versioned candidate evidence report with execution results to release PR.
 
 - [ ] Requirements complete: draft assumptions/decisions resolved for claimed scope; FR/acceptance/story mapping current.
 - [ ] Acceptance criteria pass: primary and failure journeys, benign absence, domain/permission and action outcomes observed.

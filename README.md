@@ -6,7 +6,9 @@ Cairn helps later sessions reuse supported decisions, failed approaches, and pro
 
 > **Alpha and version boundary:** this README describes the published **[v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8)** interface. This checkout's [Cargo.toml](Cargo.toml) still declares **0.1.0-alpha.7** and contains the older CLI. A local build here does not support alpha.8 `cairn setup`. Use a matching released archive or source tag. APIs, schemas, and wire contracts may change before 1.0.
 
-Product target: [PRD](docs/product/prd.md) (**Draft**), [roadmap](docs/product/roadmap.md), and [verification plan](docs/engineering/test-plan.md). Published implementation and proposed corrections are distinct; this documentation does not certify deployment or release gates.
+Planned releases: **alpha.9** secure setup/reliability → **alpha.10** operations UX → **beta.1** useful recall → **beta.2** capacity/retention → **rc.1** contract/support freeze → **0.1.0** stable. These are draft target versions with explicit scope and exit gates in roadmap, not published releases.
+
+Product target: [PRD](docs/product/prd.md) (**Draft**), [roadmap](docs/product/roadmap.md), and [release gates](docs/product/roadmap.md#release-checklist). Published implementation and proposed corrections are distinct; this documentation does not certify deployment or release gates.
 
 ## Published alpha.8 architecture
 
@@ -92,9 +94,9 @@ Set `CAIRN_VERSION=0.1.0-alpha.8`, database credentials, and initial admin crede
 
 Published example exposes separate API/web ports. Empty `CAIRN_API_ORIGIN` sends browser calls to web origin, but example does not supply same-origin API routing. Configure a reverse proxy serving web at `/` and API at `/api`, or set browser-reachable `CAIRN_API_ORIGIN` and exact `CAIRN_WEB_ORIGIN` for supported split origin. API/DB exposure, TLS/cookies/CORS, and clean browser login need observed verification; `/api/health` returning `{"ok":true}` proves liveness, not complete readiness.
 
-Admin creates accounts and membership; there is no self-registration or self-join. Accounts are created by an administrator with `cairn user create`, and membership is granted with `cairn project member add`. Tokens come from web **Settings**. Published bootstrap-only admin behavior and old Compose/help restart wording disagree; do not rely on environment edits as routine password rotation. Follow candidate-verified web password/recovery behavior.
+Admin creates accounts and membership; there is no self-registration or self-join. Accounts are administrator-created; published alpha.8 uses web administration. Tokens come from web **Settings**. Published bootstrap-only admin behavior and old Compose/help restart wording disagree; do not rely on environment edits as routine password rotation. Follow candidate-verified web password/recovery behavior.
 
-For this checkout's older alpha.7 server, `CAIRN_ADMIN_EMAIL` and
+For this checkout's older alpha.7 server, `cairn user create` replaces self-registration and `cairn project member add` replaces self-join. These legacy human commands are removed in alpha.8. `CAIRN_ADMIN_EMAIL` and
 `CAIRN_ADMIN_PASSWORD` identify the environment-named break-glass account.
 Whoever can set those values and restart the server can always obtain administrator
 access; the account is restored to the `admin` role and `active`
@@ -149,9 +151,9 @@ Before upgrading, back up PostgreSQL; upgrade server before local agents and ins
 
 ## Known gaps and development
 
-Published/current evidence includes incomplete browser routing/remote provisioning, memory/session browsing limits, silent action/replay feedback, composed delivery-deadline risk, and live-export snapshot/capacity risk. Corrective recovery work has partial local validation; latest recorded required PostgreSQL gate/final journey rerun is unresolved. Varied usefulness and installed/published-artifact journeys are not certified by this README. See [roadmap](docs/product/roadmap.md) and [verification plan](docs/engineering/test-plan.md).
+Published/current evidence includes incomplete browser routing/remote provisioning, memory/session browsing limits, silent action/replay feedback, composed delivery-deadline risk, and live-export snapshot/capacity risk. Corrective recovery work has reported partial local validation; exact alpha.9 candidate PostgreSQL/setup gates still need fresh evidence. Varied usefulness and installed/published-artifact journeys are not certified by this README. See [roadmap](docs/product/roadmap.md) and [release gates](docs/product/roadmap.md#release-checklist).
 
-**This alpha.7 checkout:** use [legacy integration guidance](docs/guides/integrations.md) for its CLI behavior. It still includes task/local-authority-era interfaces; those are not V1 product targets. [SECURITY.md](SECURITY.md) also describes this older source, not alpha.8 bootstrap/storage semantics.
+**This alpha.7 checkout:** use [legacy integration guidance](https://github.com/Vellixia/Cairn/blob/0af760163ef6c43e3bfee516f9760a88d5b6c8a6/docs/integrations.md) for its CLI behavior. It still includes task/local-authority-era interfaces; those are not V1 product targets. [SECURITY.md](SECURITY.md) also describes this older source, not alpha.8 bootstrap/storage semantics.
 
 Current-checkout build/check prerequisites: pinned Rust toolchain, Git, Node/npm for web, and PostgreSQL for server suites.
 
@@ -174,7 +176,7 @@ npm run build
 # npm run test:e2e requires running server/DB/web and its fixture environment.
 ```
 
-Alpha.8 source additionally has `npm run api-contract:check`; this checkout does not. Build alpha.8 from its exact tag/isolated checkout when verifying V1. Follow [testing guidance](docs/engineering/testing.md), with version-specific commands and evidence.
+Alpha.8 source additionally has `npm run api-contract:check`; this checkout does not. Build alpha.8 from its exact tag/isolated checkout when verifying V1. Follow [testing guidance](https://github.com/Vellixia/Cairn/blob/v0.1.0-alpha.8/docs/testing.md), with version-specific commands and evidence.
 
 | Path | Responsibility |
 | --- | --- |
