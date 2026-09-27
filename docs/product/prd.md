@@ -244,7 +244,7 @@ Use frozen paired tasks with and without Cairn for usefulness; include benign, s
 | Reduced repeat work | ≥20% median reduction in repeated investigation actions; task-completion rate no lower than control. | beta.1 |
 | Harm / trust | Zero scored privacy leaks, wrong-actor attribution or high-impact harmful advice; stale/conflicting cases cannot fabricate certainty/evidence. | Every release; broader beta.1 corpus |
 
-Beta.1 uses 30 paired scenarios across at least three repositories and both primary agents. Freeze labels/rubric before measurement; report counts, uncertainty and delivered/total-input token overhead. Score repeat-work reduction only where control investigation count is positive; report absolute counts otherwise. Full method lives in roadmap. These targets are not population-level safety proof. Missed benefit or harm targets require fixes or explicitly narrower claims, not more stored-record counts.
+Beta.1 uses 30 paired scenarios across at least three repositories and both primary agents. Freeze labels/rubric before measurement; report counts, uncertainty and delivered/total-input token overhead. Score repeat-work reduction only where control investigation count is positive; report absolute counts otherwise. Full method lives in roadmap. These targets are not population-level safety proof. Missed benefit targets require implementation fixes or a narrower supported use case, followed by fresh evaluation. Privacy leaks, wrong-actor attribution and high-impact harmful behavior block release until fixed or affected capability is disabled and remaining scope revalidated; documentation changes alone cannot close these gates. More stored-record counts do not establish value.
 
 ---
 
@@ -275,6 +275,6 @@ Version sequence, primary audience, self-hosted authority and default deployment
 - [ ] First-use and returning-session flows meet the claimed release scope.
 - [ ] Users can inspect origin/uncertainty and perform correction workflows included in the claimed release scope, with visible outcomes.
 - [ ] Privacy, permissions, safe absence, bounded interruption and recovery pass.
-- [ ] Appropriate activation/usefulness evidence meets declared targets or scope is explicitly revised.
+- [ ] Activation/usefulness targets pass or narrower supported use case is freshly evaluated; safety failures are fixed or affected capability is disabled and remaining scope revalidated under section 12.
 - [ ] Advertised support, guidance and operating limits match the delivered product.
 - [ ] Version-specific [roadmap gates](roadmap.md#release-checklist) pass and candidate evidence is attached before release acceptance.
