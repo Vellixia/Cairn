@@ -48,10 +48,16 @@ pub use model::{
 
 /// The MCP entry Cairn installs, in every agent's format.
 ///
-/// Deterministic and secret-free by construction: there is no field here that
-/// could carry a credential (FR-131, FR-162, SC-135).
+/// Secret-free by construction: only the local storage path may be passed to
+/// an agent that otherwise filters the setup process environment.
 pub fn mcp_entry() -> serde_json::Value {
-    serde_json::json!({ "command": "cairn", "args": ["mcp"] })
+    let mut entry = serde_json::json!({ "command": "cairn", "args": ["mcp"] });
+    if let Ok(home) = std::env::var("CAIRN_HOME") {
+        if !home.is_empty() {
+            entry["env"] = serde_json::json!({ "CAIRN_HOME": home });
+        }
+    }
+    entry
 }
 
 /// Cairn's MCP entry in **OpenCode's** schema.

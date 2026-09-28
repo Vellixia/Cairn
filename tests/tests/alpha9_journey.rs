@@ -28,6 +28,8 @@ fn installed_setup_remembers_and_recalls_across_callers() {
     assert_eq!(status, 200, "creating the linked project: {project}");
 
     let sandbox = Sandbox::new();
+    sandbox.install_agent("codex");
+    sandbox.install_agent("claude-code");
     sandbox.git(&["remote", "set-url", "origin", &remote]);
     let setup = sandbox.cairn_with_env(
         &["--json", "setup"],
@@ -39,6 +41,28 @@ fn installed_setup_remembers_and_recalls_across_callers() {
     assert!(setup.ok(), "setup failed: {}", setup.stderr);
     let setup_json: serde_json::Value = serde_json::from_str(&setup.stdout).expect("setup JSON");
     assert_eq!(setup_json["data"]["project"]["linked"], true);
+    let codex_path = sandbox.fake_home().join(".codex/config.toml");
+    let codex = std::fs::read_to_string(&codex_path).expect("installed Codex MCP config");
+    let codex_entry = cairn_integrate::edit::toml::get(
+        &codex_path.display().to_string(),
+        &codex,
+        &["mcp_servers", "cairn"],
+    )
+    .expect("valid Codex MCP config")
+    .expect("Cairn MCP entry");
+    assert_eq!(
+        codex_entry["env"]["CAIRN_HOME"],
+        sandbox.cairn_home().display().to_string()
+    );
+    let claude: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(sandbox.fake_home().join(".claude.json"))
+            .expect("installed Claude MCP config"),
+    )
+    .expect("valid Claude MCP config");
+    assert_eq!(
+        claude["mcpServers"]["cairn"]["env"]["CAIRN_HOME"],
+        sandbox.cairn_home().display().to_string()
+    );
 
     for key in ["alpha9-caller-a", "alpha9-caller-b"] {
         let hook = sandbox.hook_as(
