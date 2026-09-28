@@ -43,7 +43,10 @@ use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use cairn_core::domain::{KnowledgeDomain, RelationKind, UNATTRIBUTED_OWNER};
-use cairn_core::validate::{validate_global_content, validate_pattern_content, ProjectIdentity};
+use cairn_core::validate::{
+    validate_global_content, validate_pattern_content, validate_safe_event_text, ProjectIdentity,
+    SafeEventField,
+};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use std::str::FromStr;
@@ -160,7 +163,7 @@ fn memory_scope(body: &Value) -> ApiResult<String> {
         .unwrap_or("project")
         .to_string();
     match raw.as_str() {
-        "project" | "branch" | "task" | "session" => Ok(raw),
+        "project" | "branch" | "session" => Ok(raw),
         other => Err(ApiError::invalid(format!(
             "`{other}` is not a memory scope"
         ))),
@@ -187,6 +190,31 @@ async fn attributed_session(
     let Some(session_id) = optional_uuid(body, "session_id")? else {
         return Ok(UNATTRIBUTED_OWNER);
     };
+    match bind_session(pool, reader, session_id).await? {
+        Ok(binding) if binding.project_id == project_id => Ok(session_id),
+        Ok(_) => Err(ApiError::invalid(
+            "the session named belongs to a different project",
+        )),
+        Err(SessionBindingError::NotOwned) | Err(SessionBindingError::Unresolvable) => {
+            Err(ApiError::forbidden("no session you can write to was named"))
+        }
+    }
+}
+
+/// Resolve a handoff command's session from its envelope, never its identity.
+///
+/// Handoff recovery commands have no record target: their session is their
+/// target. The typed spool carries it separately from its intent payload, so
+/// the envelope folds it in and this gate verifies both project membership and
+/// ownership before any row is read or written.
+async fn handoff_session(
+    pool: &PgPool,
+    reader: &ReaderContext,
+    project_id: Uuid,
+    body: &Value,
+) -> ApiResult<Uuid> {
+    let session_id = optional_uuid(body, "session_id")?
+        .ok_or_else(|| ApiError::invalid("a handoff command needs its `session_id`"))?;
     match bind_session(pool, reader, session_id).await? {
         Ok(binding) if binding.project_id == project_id => Ok(session_id),
         Ok(_) => Err(ApiError::invalid(
@@ -1245,57 +1273,131 @@ pub struct PatternListQuery {
     cursor: Option<String>,
 }
 
-/// `GET /api/sync/changes/patterns` — the feed a local pattern cache refills
-/// from.
+// ---------------------------------------------------------------------------
+// Handoff recovery
+// ---------------------------------------------------------------------------
+
+fn handoff_trigger(body: &Value) -> ApiResult<String> {
+    match text(body, "trigger")?.as_str() {
+        "pre_compact" => Ok("pre_compact".to_owned()),
+        "session_end" => Ok("session_end".to_owned()),
+        "recovered" => Ok("recovered".to_owned()),
+        other => Err(ApiError::invalid(format!(
+            "`{other}` is not a handoff trigger"
+        ))),
+    }
+}
+
+/// Make one canonical handoff from server-held session state.
 ///
-/// Owner-scoped exactly as [`list_patterns`] is, and for the same reason: a
-/// promoted pattern is durability, not publication. The cursor convention is
-/// [`crate::global::PageCursor`] verbatim rather than a second one — the same
-/// `(changed_at, id)` pair, the same `since`, the same opaque encoding — so a
-/// client that already drains the personal and team feeds needs no new rule.
-///
-/// **Tombstones are included, and that is the whole point.** A forget has to
-/// reach a cache that already holds the pattern, and the only thing that can
-/// carry it is the row itself: a deleted row reaches nobody, and a feed
-/// filtered on `forgotten_at IS NULL` would leave every cache serving a pattern
-/// its owner had withdrawn. So a forgotten pattern travels once more, carrying
-/// its `forgotten_at` and no content.
-pub async fn pattern_changes(
+/// The daemon's recovery command carries a boundary trigger, not a handoff
+/// entity. Every persisted field below is therefore server-derived; the
+/// explicit annotation command is the sole path that may change `agent_note`.
+async fn generate_handoff(
     State(state): State<AppState>,
-    user: SettledUser,
-    Query(q): Query<crate::global::GlobalChangesQuery>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let since = crate::global::PageCursor::decode(q.since.as_deref());
-    // `GREATEST` over the row's own timestamps, for the reason
-    // `global::personal_changes` gives: ordering on `created_at` alone would
-    // make an in-place mutation unreachable to a cursor that had already passed
-    // the row's creation, so a forget could never arrive anywhere.
-    // `updated_at` moves on both an upsert and a tombstone, and `forgotten_at`
-    // is carried too so the ordering does not depend on the two being written
-    // in the same statement.
-    let rows = sqlx::query(&format!(
-        "WITH changed AS (
-             SELECT {PATTERN_WIRE_COLUMNS},
-                    pattern_id AS id,
-                    GREATEST(created_at, updated_at, forgotten_at) AS changed_at
-               FROM shared_patterns
-              WHERE owner_user_id = $1
-         )
-         SELECT * FROM changed
-          WHERE (changed_at, id) > ($2, $3)
-          ORDER BY changed_at ASC, id ASC LIMIT $4"
-    ))
-    .bind(user.id())
-    .bind(since.at)
-    .bind(since.id)
-    .bind(q.page())
-    .fetch_all(&state.pool)
+    reject_server_owned(&body)?;
+    require_member(&state.pool, project_id, user.id).await?;
+    let reader = ReaderContext::load(&state.pool, &user).await?;
+    let session_id = handoff_session(&state.pool, &reader, project_id, &body).await?;
+    let trigger = handoff_trigger(&body)?;
+    let command_id = optional_uuid(&body, "command_id")?;
+    let id = Uuid::now_v7();
+
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        tx.commit().await?;
+        return Ok(duplicate_reply(result_id));
+    }
+    let branch: String = sqlx::query_scalar("SELECT branch FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let accepted: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM safe_events WHERE project_id = $1 AND session_id = $2",
+    )
+    .bind(project_id)
+    .bind(session_id)
+    .fetch_one(&mut *tx)
     .await?;
-    let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, true)).collect();
-    Ok(Json(json!({
-        "patterns": patterns,
-        "cursor": crate::global::page_cursor(&rows, since).encode(),
-    })))
+    let progress = format!("{accepted} accepted safe event(s) recorded.");
+    let next_step = if accepted == 0 {
+        "Continue from the recorded session boundary.".to_owned()
+    } else {
+        "Review accepted session events.".to_owned()
+    };
+    sqlx::query(
+        "INSERT INTO handoffs
+             (id, project_id, session_id, trigger, goal, progress, completed_work,
+              remaining_work, changed_files, decisions, failures, tests_executed,
+              repository_state, next_step)
+         VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb,
+                 '[]'::jsonb, '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, $7)",
+    )
+    .bind(id)
+    .bind(project_id)
+    .bind(session_id)
+    .bind(trigger)
+    .bind(format!("Unbound session on branch {branch}"))
+    .bind(progress)
+    .bind(next_step)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "id": id, "applied": "accepted" })))
+}
+
+/// Attach bounded, privacy-screened recovery context to latest session handoff.
+async fn annotate_handoff(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    reject_server_owned(&body)?;
+    require_member(&state.pool, project_id, user.id).await?;
+    let reader = ReaderContext::load(&state.pool, &user).await?;
+    let session_id = handoff_session(&state.pool, &reader, project_id, &body).await?;
+    let note = text(&body, "note")?;
+    if note.is_empty() || note.chars().count() > 2_000 {
+        return Err(ApiError::invalid(
+            "`note` must contain at most 2000 characters",
+        ));
+    }
+    let identities = all_identities_for(&state.pool, &reader).await?;
+    validate_safe_event_text(SafeEventField::FailureNote, &note, &identities)
+        .map_err(|rejection| ApiError::invalid(rejection.to_string()))?;
+    let command_id = optional_uuid(&body, "command_id")?;
+
+    let mut tx = state.pool.begin().await?;
+    let handoff_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM handoffs
+          WHERE project_id = $1 AND session_id = $2 AND deleted_at IS NULL
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError::not_found("no handoff for that session"))?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, handoff_id).await?
+    {
+        tx.commit().await?;
+        return Ok(duplicate_reply(result_id));
+    }
+    sqlx::query("UPDATE handoffs SET agent_note = $2 WHERE id = $1")
+        .bind(handoff_id)
+        .bind(note)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "id": handoff_id, "applied": "accepted" })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1480,17 @@ pub async fn command_envelope(
 
     let project_id = optional_uuid(&envelope, "project_id")?;
     let target_id = optional_uuid(&envelope, "target_id")?;
+    let session_id = optional_uuid(&envelope, "session_id")?;
+    if let Some(session_id) = session_id {
+        if let Some(payload_session) = optional_uuid(&body, "session_id")? {
+            if payload_session != session_id {
+                return Err(ApiError::invalid(
+                    "envelope and payload `session_id` differ",
+                ));
+            }
+        }
+        body["session_id"] = json!(session_id);
+    }
     let needs_project = || {
         project_id
             .ok_or_else(|| ApiError::invalid(format!("`{kind}` needs the project it applies to")))
@@ -1417,6 +1530,12 @@ pub async fn command_envelope(
         }
         "verification_attestation" => {
             crate::verifysummary::report_attestation(state, SettledUser(user), Json(body)).await
+        }
+        "handoff_generate" => {
+            generate_handoff(state, user, Path(needs_project()?), Json(body)).await
+        }
+        "handoff_annotate" => {
+            annotate_handoff(state, user, Path(needs_project()?), Json(body)).await
         }
 
         other => Err(ApiError::invalid(format!(

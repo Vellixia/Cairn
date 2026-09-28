@@ -54,6 +54,10 @@ fn status(pg: &Pg, who: &Account, path: &str, body: &Value) -> u16 {
     post_status_bearer(&pg.server.base, path, body, &who.token)
 }
 
+fn queued(pg: &Pg, who: &Account, body: Value) -> (Value, u16) {
+    post(pg, who, "/api/commands", &body)
+}
+
 /// Seed a project memory the way the server will once commands exist, so a
 /// test about superseding does not depend on the create command it is not
 /// testing.
@@ -335,6 +339,93 @@ fn retrying_a_command_applies_it_once() {
         )),
         1
     );
+}
+
+// ---------------------------------------------------------------------------
+// Typed handoff recovery commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_handoff_commands_are_authorized_idempotent_and_validated() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    let generate_id = Uuid::now_v7();
+    let generate = json!({
+        "command_id": generate_id,
+        "kind": "handoff_generate",
+        "project_id": pg.project,
+        "session_id": session,
+        "payload": { "trigger": "session_end" },
+    });
+
+    let (first, code) = queued(&pg, &pg.owner, generate.clone());
+    assert_eq!(code, 200, "{first}");
+    let handoff: Uuid = first["id"]
+        .as_str()
+        .expect("handoff id")
+        .parse()
+        .expect("uuid");
+    assert_eq!(
+        pg.server.text(&format!(
+            "SELECT session_id::text FROM handoffs WHERE id = '{handoff}'"
+        )),
+        session.to_string()
+    );
+
+    // Lost acknowledgement: same durable operation receives its original receipt.
+    let (again, code) = queued(&pg, &pg.owner, generate);
+    assert_eq!(code, 200, "{again}");
+    assert_eq!(again["id"], first["id"]);
+    assert_eq!(again["applied"], "duplicate");
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM handoffs WHERE session_id = '{session}'"
+        )),
+        1
+    );
+
+    let annotation = json!({
+        "command_id": Uuid::now_v7(),
+        "kind": "handoff_annotate",
+        "project_id": pg.project,
+        "session_id": session,
+        "payload": { "note": "resume from server receipt" },
+    });
+    let (annotated, code) = queued(&pg, &pg.owner, annotation);
+    assert_eq!(code, 200, "{annotated}");
+    assert_eq!(
+        pg.server.text(&format!(
+            "SELECT agent_note FROM handoffs WHERE id = '{handoff}'"
+        )),
+        "resume from server receipt"
+    );
+
+    let (_, code) = queued(
+        &pg,
+        &pg.outsider,
+        json!({
+            "command_id": Uuid::now_v7(), "kind": "handoff_generate",
+            "project_id": pg.project, "session_id": session,
+            "payload": { "trigger": "session_end" },
+        }),
+    );
+    assert_eq!(code, 403);
+
+    for payload in [
+        json!("not an object"),
+        json!({}),
+        json!({ "trigger": "not_a_boundary" }),
+    ] {
+        let (_, code) = queued(
+            &pg,
+            &pg.owner,
+            json!({
+                "command_id": Uuid::now_v7(), "kind": "handoff_generate",
+                "project_id": pg.project, "session_id": session, "payload": payload,
+            }),
+        );
+        assert_eq!(code, 400);
+    }
 }
 
 #[test]

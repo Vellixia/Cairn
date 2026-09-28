@@ -26,6 +26,21 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "team_revision",
         include_str!("../migrations/0005_team_revision.sql"),
     ),
+    (
+        6,
+        "remove_tasks_and_legacy_authority",
+        include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql"),
+    ),
+    (
+        7,
+        "web_settings",
+        include_str!("../migrations/0007_web_settings.sql"),
+    ),
+    (
+        8,
+        "logical_transfer",
+        include_str!("../migrations/0008_logical_transfer.sql"),
+    ),
 ];
 
 /// The highest migration this build carries.
@@ -33,7 +48,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// Not what the server advertises: a deployment can be held at a lower schema
 /// deliberately, and what it can actually hold is the schema it **applied**.
 /// See [`applied_version`].
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -232,6 +247,43 @@ mod tests {
             SCHEMA_VERSION,
             MIGRATIONS.last().expect("a migration").0,
             "the version the server advertises must be the one it actually applied"
+        );
+    }
+
+    #[test]
+    fn task_removal_archive_rejects_a_conflicting_retry_before_dropping_live_rows() {
+        let sql = include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql");
+        assert!(sql.contains("archived_counts <> counts"));
+        assert!(sql.contains("archived_payload <> source_payload"));
+        assert!(sql.contains("RAISE EXCEPTION 'task archive conservation failed'"));
+        assert!(
+            sql.find("RAISE EXCEPTION").unwrap()
+                < sql.find("DELETE FROM memory_relations").unwrap()
+        );
+    }
+
+    #[test]
+    fn task_removal_archive_keeps_session_dependents_before_task_column_drop() {
+        let sql = include_str!("../migrations/0006_remove_tasks_and_legacy_authority.sql");
+        for table in [
+            "handoffs",
+            "safe_events",
+            "consolidation_session",
+            "consolidation_work",
+            "consolidation_runs",
+            "retrieval_traces",
+            "retrieval_trace_items",
+            "delivered_context",
+            "knowledge_candidates",
+            "candidate_source_events",
+        ] {
+            assert!(
+                sql.contains(&format!("'{table}'")),
+                "missing {table} archive"
+            );
+        }
+        assert!(
+            sql.find("'handoffs'").unwrap() < sql.find("DROP COLUMN IF EXISTS task_id").unwrap()
         );
     }
 

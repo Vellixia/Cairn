@@ -9,6 +9,38 @@ schemas, and the wire protocol without a deprecation period.
 
 ## [Unreleased]
 
+### Planned for 0.1.0-alpha.9 (not released)
+
+- Added a same-origin Compose entry point and setup-ready browser project creation with validated Git remotes and visible first-use feedback.
+- Bounded password verification, enforced authenticated database/worker readiness, and made operator backlog and worker progress visible.
+- Kept context delivery within one configured deadline, rendered the server's actual context envelope, and tightened session/caller attribution and recovery.
+- Made logical export a bounded repeatable-read snapshot that retains pending consolidation work; import remains idempotent and does not include credentials.
+- Added installed setup/recall, alpha.7 WAL upgrade, and browser regression journeys plus documented operating limits. Publication requires candidate-specific platform, usefulness, and artifact evidence.
+
+## [0.1.0-alpha.8] — 2026-09-24
+
+Cairn V1 is reduced to one human CLI command, five MCP tools, a delivery-only
+edge daemon, and a server-authoritative web application.
+
+### Changed
+
+- The visible CLI now exposes only `cairn setup`; hooks and MCP remain hidden machine adapters.
+- `cairnd` retains bounded capture, typed durable spools, retry receipts, session correlation, integration ownership, and a finite context cache. Canonical knowledge, retrieval, governance, graph, replay, and analytics now live exclusively on the server.
+- The web application is consolidated into Overview, Memory, Sessions, Governance, and Settings under a project selector.
+- Setup binds an existing server credential and project membership, launches the daemon, verifies connectivity, and owns only the integration bytes it installed.
+
+### Removed
+
+- Tasks, task-scoped retrieval, task synchronization, task APIs, and the `cairn_task` MCP tool.
+- Local canonical knowledge, local search/ranking, entity synchronization, namespace/cutover runtime, and account or administration daemon proxies.
+- Obsolete CLI commands and standalone web routes superseded by the V1 destinations.
+
+### Migration and reliability
+
+- Legacy SQLite migration preserves the source and WAL state, creates a fresh thin edge store, keeps safe pending operation identities, and emits an idempotent import bundle plus a conservation report. Unsupported, ambiguous, local-only, and task records remain offline as `removed_feature`.
+- PostgreSQL migration archives removed task data and dependent records before dropping live task schema, and rejects conflicting retries.
+- Setup credentials reload into an already-running daemon, event sessions are established atomically, and stale context is invalidated on authorization denial.
+
 ## [0.1.0-alpha.7] — 2026-09-13
 
 Autonomous memory. Cairn captures the work an agent is already doing,
@@ -257,7 +289,7 @@ free-form, searchable, briefable and syncable exactly as before.
 
 One documented approximation: `superseded_at` for supersessions that happened
 before this release is taken from `updated_at`. See
-`specs/003-project-intelligence/migration.md` §Step 2(b).
+`docs/history/alpha7/intelligence-migration.md` §Step 2(b).
 
 ### Continuity, verified against live agents
 

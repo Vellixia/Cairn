@@ -52,16 +52,15 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Cached executables can predate the checked-out server and end-to-end sources.
+      - run: cargo clean -p cairn-server -p cairn-e2e
+
       # The end-to-end suite drives the real binaries, and `cargo test` does not
       # build another package's binaries. Without these builds there is nothing
       # for it to drive.
       - run: cargo build --workspace
 
-      # **Built before the tests, not after, so the tests can use it.**
-      #
-      # This job already built a release workspace; it simply did so afterwards,
-      # for the capture-hook latency claim below. Moving it up costs no extra
-      # wall clock and buys the server the suite actually needs.
+      # Built before the tests so the suite can use the release server.
       - run: cargo build --workspace --release
 
       # `CAIRN_SERVER_BIN` is the only binary this job overrides, and the
@@ -84,9 +83,6 @@ jobs:
           test -x "$CAIRN_SERVER_BIN" || { echo "no release server at $CAIRN_SERVER_BIN"; exit 1; }
           echo "end-to-end server: $CAIRN_SERVER_BIN"
           cargo test --workspace --all-targets
-
-      - name: Capture-hook latency (SC-007 is a release-build claim)
-        run: cargo test --release -p cairn-e2e --test polish_performance -- --nocapture
 
       - name: Working tree is clean and free of conflict markers
         run: |
@@ -116,6 +112,7 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clean -p cairn-server -p cairn-e2e
       - run: cargo build --workspace
       - run: cargo test --workspace --all-targets
 
@@ -157,6 +154,7 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clean -p cairn-server -p cairn-e2e
       - run: cargo build --workspace
 
       # A tight timeout here, not just the job-level one: a hang should fail
@@ -272,6 +270,8 @@ jobs:
       # `e2e`, so the Playwright suite was linted by nothing and typechecked by
       # nothing while still reporting a green `web` job.
       - run: npm run lint
+      - name: API contract drift check
+        run: npm run api-contract:check
       - name: TypeScript check
         run: npm run typecheck
       - run: npm run build
@@ -301,6 +301,9 @@ jobs:
       DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
       NEXT_PUBLIC_CAIRN_API: http://127.0.0.1:8080
       CAIRN_WEB_URL: http://127.0.0.1:3100
+      CAIRN_ADMIN_EMAIL: e2e-admin@example.test
+      CAIRN_ADMIN_PASSWORD: hunter2hunter2
+      CAIRN_ADMIN_DISPLAY_NAME: E2E Administrator
       # Absolute, so seed.ts (running from `web/`) can find the release
       # binary built below regardless of working directory.
       CAIRN_SERVER_BIN: ${{ github.workspace }}/target/release/cairn-server
@@ -387,27 +390,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Guards: requirements that a passing test suite cannot demonstrate.
-  #
-  # Traceability is instant and belongs in its own job so it is never queued
-  # behind the container build below.
-  guards:
-    name: guards (traceability)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Every requirement is cited by a test, or excused with a reason
-        run: bash scripts/requirement-coverage.sh
-
-  # FR-045 / SC-006: the local product works with no network at all.
+  # Edge capture and durable spooling work with no external network.
   #
   # `--network none` leaves the container with loopback only, so a code path that
   # needed the network fails rather than quietly degrading. This existed as a
   # script from the start and nothing ran it, which meant Cairn's offline
-  # guarantee was asserted by a file nobody executed — and the `cairn link` bug
-  # in this release was an offline-correctness bug that reached a release.
+  # guarantee was asserted by a file nobody executed, allowing an
+  # offline-correctness bug to reach a release.
   offline:
-    name: offline (no network)
+    name: edge offline (no external network)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

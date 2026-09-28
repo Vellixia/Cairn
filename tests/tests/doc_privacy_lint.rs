@@ -31,10 +31,10 @@ fn workspace_root() -> PathBuf {
 /// The documents T183 corrected, plus the two others FR-550/FR-570 bind
 /// alongside them (`tasks.md` T184).
 const TARGET_DOCS: &[&str] = &[
-    "specs/004-collaborative-global-memory/contracts/promotion-privacy.md",
-    "specs/004-collaborative-global-memory/data-model.md",
-    "specs/004-collaborative-global-memory/compatibility.md",
-    "specs/004-collaborative-global-memory/contracts/global-memory.md",
+    "docs/history/alpha7/promotion-privacy.md",
+    "docs/history/alpha7/global-memory-data-model.md",
+    "docs/history/alpha7/global-memory-compatibility.md",
+    "docs/history/alpha7/global-memory.md",
 ];
 
 fn read_docs(paths: &[&str]) -> Vec<(String, String)> {
@@ -294,80 +294,4 @@ fn the_trust_statement_lint_fails_when_the_statement_is_absent() {
         ),
         "the lint passed on the environment variable alone, with no trust claim attached"
     );
-}
-
-// ---------------------------------------------------------------------------
-// The web client's handoff shape matches the Rust one (FR-532)
-// ---------------------------------------------------------------------------
-
-/// `web/lib/api.ts` must not name a field the wire denylist forbids, and must
-/// name the one the Rust type actually carries.
-///
-/// This exists because of a regression `cargo test` structurally could not see.
-/// Feature 004 renamed `TestRunRecord.command` to `runner` — the recursive wire
-/// check screens field *names*, so a `command` key anywhere inside a handoff
-/// payload is refused on sight, which would make every handoff carrying a
-/// completed test run undeliverable. The Rust side was updated and its tests
-/// passed. The web client still declared `command` and rendered `t.command`, and
-/// the e2e seed still *posted* `command` — so the server refused the seeded
-/// handoff, the session page had nothing to render, and the whole thing was
-/// invisible to the Rust workspace because the web app is not in it.
-///
-/// A file-text lint rather than a generated type: the two definitions live in
-/// different languages and different build graphs, and the cheapest honest link
-/// between them is an assertion that reads both.
-#[test]
-fn the_web_client_names_the_same_handoff_fields_the_rust_type_does() {
-    let root = workspace_root();
-    let api = std::fs::read_to_string(root.join("web/lib/api.ts")).expect("web/lib/api.ts");
-
-    // The Rust type is the authority for the name.
-    let domain =
-        std::fs::read_to_string(root.join("crates/cairn-core/src/domain.rs")).expect("domain.rs");
-    let struct_body = domain
-        .split("pub struct TestRunRecord")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect("TestRunRecord is declared");
-    assert!(
-        struct_body.contains("pub runner:"),
-        "TestRunRecord no longer has a `runner` field, so this lint is checking \
-         against a name that moved: {struct_body}"
-    );
-    assert!(
-        !struct_body.contains("pub command:"),
-        "TestRunRecord carries a `command` field again; the recursive wire check \
-         refuses that name and every handoff with a test run becomes undeliverable"
-    );
-
-    // The `tests_executed` declaration in the web client, and the render and
-    // seed sites that consume it.
-    let declared = api
-        .split("tests_executed:")
-        .nth(1)
-        .and_then(|rest| rest.split(';').next())
-        .expect("web/lib/api.ts declares tests_executed");
-    assert!(
-        declared.contains("runner"),
-        "the web client's `tests_executed` does not name `runner`: {declared}"
-    );
-    assert!(
-        !declared.contains("command"),
-        "the web client's `tests_executed` still names `command`, which the Rust \
-         type no longer carries: {declared}"
-    );
-
-    for path in [
-        "web/app/(app)/projects/[id]/sessions/[sessionId]/page.tsx",
-        "web/e2e/seed.ts",
-    ] {
-        let body = std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| {
-            panic!("{path} is not readable, so this lint cannot check it: {e}")
-        });
-        assert!(
-            !body.contains("t.command") && !body.contains("command: \"cargo"),
-            "{path} still reads or writes a test run's `command`; the field is \
-             `runner` (FR-532)"
-        );
-    }
 }

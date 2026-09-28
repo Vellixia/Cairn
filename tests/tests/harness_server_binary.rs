@@ -17,6 +17,9 @@
 //! have no PostgreSQL service and skip the server suites entirely.
 
 use cairn_e2e::server_binary;
+use std::sync::Mutex;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// The environment variable wins over the sibling-of-the-test-executable path.
 ///
@@ -25,6 +28,9 @@ use cairn_e2e::server_binary;
 /// debug one — green, and proving nothing.
 #[test]
 fn the_environment_names_the_server_that_gets_spawned() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A real file, because the resolver refuses a path that does not exist
     // rather than handing a spawn something that cannot run.
     let named = std::env::temp_dir().join(format!("cairn-server-probe-{}", std::process::id()));
@@ -54,6 +60,9 @@ fn the_environment_names_the_server_that_gets_spawned() {
 /// got, and the override is CI's choice rather than a new requirement.
 #[test]
 fn without_the_variable_the_binary_beside_the_tests_is_used() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os("CAIRN_SERVER_BIN");
     std::env::remove_var("CAIRN_SERVER_BIN");
     let resolved = std::panic::catch_unwind(server_binary);
@@ -108,6 +117,9 @@ fn without_the_variable_the_binary_beside_the_tests_is_used() {
 /// **Falsified by** removing the advisory lock from `db::migrate`.
 #[test]
 fn concurrent_migrations_of_one_database_all_succeed() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(url) = cairn_e2e::Server::fresh_database() else {
         eprintln!("skipped: CAIRN_TEST_DATABASE_URL is not set");
         return;

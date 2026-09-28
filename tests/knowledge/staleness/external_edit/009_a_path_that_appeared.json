@@ -5,8 +5,6 @@
       "assumed": {
         "branch": "main",
         "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_id": "01a00000-0000-7000-8000-000000000001",
-        "task_state_digest": "d0",
         "path_fingerprints": [
           {
             "path": "src/new.rs",
@@ -18,9 +16,7 @@
       "current": {
         "branch": "main",
         "commit": "abc123def456abc123def456abc123def456abcd",
-        "task_exists": true,
         "worktree_exists": true,
-        "task_state_digest": "d0",
         "path_fingerprints": [
           {
             "path": "src/new.rs",

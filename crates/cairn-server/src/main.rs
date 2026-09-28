@@ -13,14 +13,20 @@ mod events;
 mod extract;
 mod global;
 mod retrieve;
-mod sync;
+mod transfer;
 mod verifysummary;
 mod version;
+#[cfg(test)]
+mod web_contract_tests;
 
 use axum::http::{header, Method};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use sqlx::PgPool;
+use std::sync::{
+    atomic::{AtomicBool, AtomicI64, Ordering},
+    Arc,
+};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -51,6 +57,12 @@ pub struct AppState {
     /// both need to know which account it is. `None` when the operator seeded
     /// nothing — in which case no account is exempt.
     pub environment_account: Option<String>,
+    /// Readiness tracks required in-process maintenance independently from
+    /// request liveness. A queue backlog is diagnostic data, never this flag.
+    pub consolidation_worker: Arc<AtomicBool>,
+    /// Unix milliseconds of the most recent completed consolidation pass.
+    pub consolidation_last_progress_ms: Arc<AtomicI64>,
+    pub consolidation_required: bool,
 }
 
 impl AppState {
@@ -117,8 +129,7 @@ struct Args {
     admin_email: Option<String>,
     /// Password for the environment-defined account. At least 8 characters.
     ///
-    /// Re-applied on every start: this variable is the account's password, not
-    /// merely its initial one.
+    /// Bootstrap password for a deployment with no active administrator.
     #[arg(long, env = "CAIRN_ADMIN_PASSWORD")]
     admin_password: Option<String>,
     /// Display name for the environment-defined account.
@@ -148,12 +159,7 @@ enum Command {
 enum UserCommand {
     /// Create an account.
     ///
-    /// This exists because `POST /api/auth/register` was removed: it was an
-    /// unauthenticated route that let anyone who could reach the server create
-    /// an account, which was the first step of a complete compromise chain.
-    /// Creating accounts is an operator act, so it happens here — locally,
-    /// against the database, by whoever already controls the host. That is the
-    /// same trust boundary `--admin-email` already sits on.
+    /// Account creation is an operator act, local to database host control.
     Add {
         /// Email address. Lowercased and trimmed.
         #[arg(long)]
@@ -242,6 +248,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // A migrated database needs its maintenance worker even when the serving
+    // pool is too small to reserve a connection for it. That deployment is
+    // alive but not ready, which is more truthful than silently dropping the
+    // requirement from readiness.
+    let consolidation_required = schema_version >= consolidate::REQUIRED_SCHEMA;
     let state = AppState {
         pool,
         secure_cookies,
@@ -253,6 +264,9 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(|e| e.trim().to_lowercase())
             .filter(|e| !e.is_empty()),
+        consolidation_worker: Arc::new(AtomicBool::new(false)),
+        consolidation_last_progress_ms: Arc::new(AtomicI64::new(0)),
+        consolidation_required,
     };
 
     start_consolidation(&state, args.max_connections);
@@ -264,7 +278,13 @@ async fn main() -> anyhow::Result<()> {
             .allow_origin(origin.parse::<axum::http::HeaderValue>()?)
             .allow_credentials(true)
             .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]),
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::DELETE,
+                Method::OPTIONS,
+            ]),
         None => CorsLayer::new()
             .allow_origin(Any)
             .allow_headers(Any)
@@ -316,7 +336,26 @@ fn start_consolidation(state: &AppState, max_connections: u32) {
         );
         return;
     }
-    tokio::spawn(consolidate::Consolidator::new(state.pool.clone(), share).run());
+    let alive = state.consolidation_worker.clone();
+    let progress = state.consolidation_last_progress_ms.clone();
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        alive.store(true, Ordering::Release);
+        // Drop runs for cancellation and panic unwinding too, so readiness
+        // cannot retain a stale "available" worker after the task is gone.
+        let _worker_guard = WorkerGuard(alive);
+        consolidate::Consolidator::new(pool, share)
+            .run(progress)
+            .await;
+    });
+}
+
+struct WorkerGuard(Arc<AtomicBool>);
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Run one operator command and return.

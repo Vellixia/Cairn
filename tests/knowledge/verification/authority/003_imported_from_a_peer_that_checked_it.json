@@ -1,5 +1,5 @@
 {
-  "description": "A peer established this deterministically. It is reported as verified elsewhere, never as verified here, and it does not count toward local readiness (FR-368).",
+  "description": "A peer established this deterministically. It is reported as verified elsewhere, never as verified here, and it does not count as local authority (FR-368).",
   "input": {
     "extra": {
       "runs": []

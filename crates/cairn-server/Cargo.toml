@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cairn-core.workspace = true
+cairn-git.workspace = true
 # The health matrix vocabulary — `MatrixStatus`, `MatrixCapability` and the
 # coherence rule — is defined once in `cairn-integrate::capability` and used by
 # the reporter and by this server's validation. A second copy here would be a
@@ -37,3 +38,4 @@ sha2.workspace = true
 hex.workspace = true
 clap.workspace = true
 reqwest.workspace = true
+futures-util = "0.3"

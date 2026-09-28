@@ -1,4 +1,4 @@
-Every divergence class — branch, commit, task state, changed relevant path — alone and in
+Every divergence class — branch, commit, changed relevant path — alone and in
 combination.
 
 Rule: each class is detected in 100% of seeded cases, and a diverged checkpoint presents its recorded

@@ -14,23 +14,14 @@ import {
 } from "@/components/ui/breadcrumb";
 
 const SECTION_LABELS: Record<string, string> = {
-  tasks: "Tasks",
   sessions: "Sessions",
-  activity: "Activity",
   memory: "Memory",
-  retrievals: "Retrievals",
-  agents: "Agents",
-  domains: "Domains",
-  sync: "Sync",
-  tokens: "API tokens",
 };
 
 /** The deployment-wide screens, which hang off the root rather than a project. */
 const TOP_LEVEL_LABELS: Record<string, string> = {
-  tokens: "API tokens",
-  team: "Team knowledge",
-  system: "System health",
-  admin: "Accounts",
+  governance: "Governance",
+  settings: "Settings",
 };
 
 type Crumb = { label: string; href?: string };

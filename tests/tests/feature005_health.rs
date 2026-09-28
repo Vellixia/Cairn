@@ -137,20 +137,6 @@ fn report(pg: &Pg, writer: &str, cells: Vec<Value>) -> u16 {
     report_as(pg, owner, writer, cells)
 }
 
-/// `GET /health` — US6's own read.
-fn health_cells(pg: &Pg) -> Vec<Value> {
-    let (body, code) = get_json_status_bearer(
-        &pg.server.base,
-        &format!("/api/projects/{}/health", pg.project),
-        &pg.owner.token,
-    );
-    assert_eq!(code, 200, "{body}");
-    body["cells"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the health read has no `cells` array: {body}"))
-        .clone()
-}
-
 /// `GET /integration-health` — US5's agents screen, over the same query.
 ///
 /// Read here as well as `/health` because §5's rules are about what a *reader*
@@ -254,7 +240,7 @@ fn the_whole_declared_matrix_survives_the_round_trip_for_every_agent() {
     }
     assert_eq!(report(&pg, "laptop-a", cells), 200);
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 100, "a declared cell did not survive storage");
     assert_behavioural_rows_carry_observations(&rows, "declared matrix");
 
@@ -319,7 +305,7 @@ fn every_status_in_the_vocabulary_comes_back_as_itself() {
         .collect();
     assert_eq!(report(&pg, "laptop-a", cells), 200);
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 6);
     assert_behavioural_rows_carry_observations(&rows, "one cell per status");
     for (capability, status) in &wanted {
@@ -357,7 +343,7 @@ fn a_capability_nobody_reported_is_missing_rather_than_invented() {
     assert_eq!(cells.len(), 24);
     assert_eq!(report(&pg, "laptop-a", cells), 200);
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 24, "the read invented a cell nobody reported");
     assert!(
         rows_for(&rows, "codex", withheld).is_empty(),
@@ -396,7 +382,7 @@ fn a_configured_integration_that_never_fired_is_reported_as_not_capturing() {
         .collect();
     assert_eq!(report(&pg, "laptop-config", configured), 200);
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 3);
     for row in &rows {
         assert_eq!(
@@ -423,7 +409,7 @@ fn a_configured_integration_that_never_fired_is_reported_as_not_capturing() {
         ),
         200
     );
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_behavioural_rows_carry_observations(&rows, "configured versus observed");
     let working: Vec<&Value> = rows.iter().filter(|r| r["status"] == "supported").collect();
     assert_eq!(working.len(), 1, "configuration acquired a second success");
@@ -476,7 +462,7 @@ fn configuration_read_back_cannot_claim_support_at_any_stage() {
         );
     }
     assert!(
-        health_cells(&pg).is_empty(),
+        integration_rows(&pg).is_empty(),
         "a rejected overclaim reached the matrix anyway"
     );
 }
@@ -496,7 +482,7 @@ fn silence_is_neither_failure_nor_success_and_stays_silent() {
     // Falsified by: any row of a freshly reported complete matrix coming back
     // as anything but `no_evidence`.
     assert_eq!(report(&pg, "laptop-a", complete_cells("codex")), 200);
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 25);
     for row in &rows {
         assert_eq!(row["status"], "no_evidence", "{row}");
@@ -522,7 +508,7 @@ fn silence_is_neither_failure_nor_success_and_stays_silent() {
         ),
         200
     );
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 25, "a report changed the population");
     assert_eq!(status_of(&rows, "codex", "event:tool_failed"), "supported");
     let silent = rows
@@ -578,7 +564,7 @@ fn a_failure_claim_needs_an_observation_just_as_a_success_does() {
         );
     }
     assert!(
-        health_cells(&pg).is_empty(),
+        integration_rows(&pg).is_empty(),
         "an unevidenced failure reached the matrix"
     );
 
@@ -637,10 +623,9 @@ fn an_old_observation_keeps_its_timestamp_and_the_server_offers_no_verdict_on_it
     );
 
     let expected = chrono::DateTime::parse_from_rfc3339(long_ago).expect("a fixed timestamp");
-    for (label, rows) in [
-        ("health", health_cells(&pg)),
-        ("integration-health", integration_rows(&pg)),
-    ] {
+    {
+        let label = "integration-health";
+        let rows = integration_rows(&pg);
         let row = one_row(&rows, "claude_code", "event:file_changed");
         // Still `supported`. The row says "worked as of `observed_at`", and the
         // view is what turns that into "worked" rather than "working"; a server
@@ -735,7 +720,7 @@ fn a_failure_names_the_stage_it_failed_at_and_is_not_flattened_into_failing() {
         200
     );
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     let cells = rows_for(&rows, "claude_code", capability);
     assert_eq!(
         cells.len(),
@@ -852,7 +837,7 @@ fn one_machines_observation_is_never_attributed_to_another() {
             .collect()
     };
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(
         attribution(&rows),
         BTreeMap::from([
@@ -872,7 +857,7 @@ fn one_machines_observation_is_never_attributed_to_another() {
         ),
         200
     );
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows_for(&rows, "claude_code", capability).len(), 2);
     assert_eq!(
         attribution(&rows)["laptop-b"],
@@ -898,7 +883,7 @@ fn one_machines_observation_is_never_attributed_to_another() {
         ),
         200
     );
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     let seen = attribution(&rows);
     assert_eq!(seen.len(), 3);
     assert_eq!(seen["laptop-c"], "no_evidence");
@@ -957,10 +942,9 @@ fn two_accounts_behind_one_machine_label_stay_attributable() {
         "two accounts' observations were merged in the table"
     );
 
-    for (label, rows) in [
-        ("health", health_cells(&pg)),
-        ("integration-health", integration_rows(&pg)),
-    ] {
+    {
+        let label = "integration-health";
+        let rows = integration_rows(&pg);
         let cells = rows_for(&rows, "claude_code", capability);
         assert_eq!(
             cells.len(),
@@ -1006,7 +990,7 @@ fn opencodes_declines_stay_declines_in_both_directions() {
     // Falsified by: any of these statuses being rewritten between
     // `declared_matrix` and the read.
     assert_eq!(report(&pg, "laptop-a", declared_cells("opencode")), 200);
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_eq!(rows.len(), 25);
 
     // Cairn's decision. The v1 surfaces are undocumented and the v2 ones beta,
@@ -1110,7 +1094,7 @@ fn receipt_is_not_upgraded_by_the_absence_of_a_failure() {
         assert_eq!(report(&pg, "laptop-a", cells), 200);
     }
 
-    let rows = health_cells(&pg);
+    let rows = integration_rows(&pg);
     assert_behavioural_rows_carry_observations(&rows, "delivery observed, receipt not");
     for agent in ["claude_code", "codex"] {
         for point in [
@@ -1171,7 +1155,7 @@ fn receipt_is_not_upgraded_by_the_absence_of_a_failure() {
         400
     );
     assert_eq!(
-        status_of(&health_cells(&pg), "claude_code", "receipt"),
+        status_of(&integration_rows(&pg), "claude_code", "receipt"),
         "no_evidence",
         "a refused claim still moved the receipt cell"
     );

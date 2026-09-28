@@ -53,14 +53,13 @@ pub struct CairnConfig {
     /// Share of the context budget Level 1 and Level 2 may **not** take.
     ///
     /// A cap on the lower levels, not a floor Level 0 must spend: unspent
-    /// reserve returns to the general pool, so a project with no task, no
+    /// reserve returns to the general pool, so a project with no active session, no
     /// warnings and no pins delivers exactly what it delivers today (FR-442).
     pub min_safe_context_fraction: f64,
     /// Below this budget the briefing is still produced, truncated in Level 0's
     /// documented admission order. It is never rejected for size (FR-445).
     pub min_context_budget_tokens: usize,
-    /// A task goal is truncated to this in Tier 0a, which is what keeps the
-    /// guaranteed tier O(1) in the size of the task.
+    /// Reserved for compatibility with configured context budgets.
     pub goal_max_tokens: usize,
     /// Pins per project. Exceeding it refuses and names the current pins;
     /// nothing is ever silently unpinned (FR-454).

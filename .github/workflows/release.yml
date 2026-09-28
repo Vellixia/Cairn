@@ -1,8 +1,9 @@
-name: Release
+name: Release candidate
 
 on:
   push:
-    tags: ["v*"]
+    branches: ["main", "codex/alpha*-main"]
+  workflow_dispatch:
 
 # Least privilege by default; jobs widen only what they need.
 permissions:
@@ -13,15 +14,13 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # The tag must agree with the workspace version, and the tree must pass the
-  # same gates CI enforces. Everything downstream builds from this exact commit.
+  # Build and test one committed source revision before any public version tag.
   # --------------------------------------------------------------------------
   verify:
     name: verify
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      short_sha: ${{ steps.version.outputs.short_sha }}
     services:
       postgres:
         image: postgres:17-alpine
@@ -36,37 +35,121 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Tag version matches the workspace version
+      - name: Record candidate version
         id: version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          echo "tag=$tag crate=$crate"
-          if [ "$tag" != "$crate" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $crate"
-            exit 1
-          fi
-          echo "version=$tag" >> "$GITHUB_OUTPUT"
-          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
 
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clean -p cairn-server -p cairn-e2e
 
       # The end-to-end suite drives the real binaries, and `cargo test` does not
       # build another package's binaries.
-      - run: cargo build --workspace
+      - run: cargo build --locked --workspace
 
       - name: Test
         env:
           CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
+
+  # The exact source commit must pass every release-critical source gate. CI's
+  # green result may belong to another commit and cannot accept this candidate.
+  candidate-gates:
+    name: candidate gates
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: cairn
+          POSTGRES_DB: cairn
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
+      DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
+      NEXT_PUBLIC_CAIRN_API: http://127.0.0.1:8080
+      CAIRN_WEB_URL: http://127.0.0.1:3100
+      CAIRN_ADMIN_EMAIL: e2e-admin@example.test
+      CAIRN_ADMIN_PASSWORD: hunter2hunter2
+      CAIRN_ADMIN_DISPLAY_NAME: E2E Administrator
+      CAIRN_SERVER_BIN: ${{ github.workspace }}/target/release/cairn-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record exact candidate identity
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          mkdir -p candidate-evidence
+          printf 'version=%s\nsource_sha=%s\nworkflow_run=%s\n' "$VERSION" "$GITHUB_SHA" "$GITHUB_RUN_ID" > candidate-evidence/identity.txt
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release server for browser gate
+        run: cargo build --release --locked -p cairn-server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Web contract, types, and production build
+        working-directory: web
+        run: |
+          npm ci
+          npm run api-contract:check
+          npm run typecheck
+          npm run build
+      - name: Start candidate server
+        run: |
+          nohup ./target/release/cairn-server --addr 127.0.0.1:8080 --web-origin http://127.0.0.1:3100 > server.log 2>&1 &
+          for _ in $(seq 1 100); do curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1 && exit 0; sleep 0.5; done
+          cat server.log; exit 1
+      - name: Start candidate web
+        working-directory: web
+        run: |
+          nohup npm start > web.log 2>&1 &
+          for _ in $(seq 1 100); do curl -fsS http://127.0.0.1:3100/login >/dev/null 2>&1 && exit 0; sleep 0.5; done
+          cat web.log; exit 1
+      - name: Browser primary journey
+        working-directory: web
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Browser logs and traces
+        if: failure()
+        run: |
+          cat server.log || true
+          cat web/web.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-web-evidence
+          path: web/test-results/
+          if-no-files-found: ignore
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-identity
+          path: candidate-evidence/identity.txt
+          if-no-files-found: error
+          retention-days: 30
 
 
   # --------------------------------------------------------------------------
-  # Publish the Skill ref CC Switch will fetch (D29a).
+  # Compute the Skill ref the final publication must create (D29a).
   #
   # CC Switch's downloader builds `…/archive/refs/heads/{branch}.zip` and, on
   # any miss, silently retries `main` and then `master`. So a wrong or absent
@@ -82,17 +165,12 @@ jobs:
   #     recomputing the revision from the fetched tree, in both the created and
   #     the already-present case.
   #
-  # A mismatch fails the release rather than shipping a binary that points at
-  # a branch whose content is not what its name claims.
+  # Publication verifies this ref before tagging the tested candidate.
   # --------------------------------------------------------------------------
-  publish-skill:
-    name: publish the Skill ref
+  compute-skill:
+    name: compute the Skill ref
     needs: verify
     runs-on: ubuntu-latest
-    # The only job in this workflow that writes a ref, and the only one that
-    # can.
-    permissions:
-      contents: write
     outputs:
       skill_schema: ${{ steps.ref.outputs.skill_schema }}
       skill_revision: ${{ steps.ref.outputs.skill_revision }}
@@ -111,7 +189,7 @@ jobs:
         id: ref
         run: |
           set -euo pipefail
-          json=$(cargo run -q -p cairn-integrate --bin skillref -- --json)
+          json=$(cargo run -q --locked -p cairn-integrate --bin skillref -- --json)
           echo "$json"
           schema=$(echo "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_schema"])')
           revision=$(echo "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_revision"])')
@@ -120,60 +198,14 @@ jobs:
           echo "skill_revision=$revision" >> "$GITHUB_OUTPUT"
           echo "skill_branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - name: Create the branch, or leave the existing one exactly where it is
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRANCH: ${{ steps.ref.outputs.skill_branch }}
-        run: |
-          set -euo pipefail
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "$BRANCH already exists; it is named for its content and is never moved"
-          else
-            echo "creating $BRANCH at $GITHUB_SHA"
-            git push origin "HEAD:refs/heads/$BRANCH"
-          fi
-
-      - name: Verify the branch the way CC Switch fetches it
-        env:
-          BRANCH: ${{ steps.ref.outputs.skill_branch }}
-          REVISION: ${{ steps.ref.outputs.skill_revision }}
-        run: |
-          set -euo pipefail
-          # Exactly the URL CC Switch builds. A miss here is the silent
-          # `main` fallback, so a miss must fail loudly instead.
-          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/heads/${BRANCH}.zip"
-          tmp=$(mktemp -d)
-          for attempt in 1 2 3 4 5; do
-            if curl -fsSL "$url" -o "$tmp/skill.zip"; then break; fi
-            echo "attempt $attempt: the ref is not servable yet; waiting"
-            sleep 5
-            if [ "$attempt" = "5" ]; then
-              echo "::error::$url is not fetchable, so CC Switch would silently install main"
-              exit 1
-            fi
-          done
-          unzip -q "$tmp/skill.zip" -d "$tmp/tree"
-          root=$(find "$tmp/tree" -maxdepth 1 -mindepth 1 -type d | head -n1)
-          # Recompute from the *fetched* tree, not from the checkout.
-          fetched=$(cargo run -q -p cairn-integrate --bin skillref -- --json \
-            --dir "$root/skills/cairn" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_revision"])')
-          echo "expected $REVISION, fetched $fetched"
-          if [ "$fetched" != "$REVISION" ]; then
-            echo "::error::$BRANCH serves revision $fetched, not the $REVISION its name claims"
-            exit 1
-          fi
-
   # --------------------------------------------------------------------------
   # Native archives. Each target builds on a runner of its own architecture, so
   # nothing is cross-compiled and nothing needs a cross toolchain.
   # --------------------------------------------------------------------------
   binaries:
     name: ${{ matrix.target }}
-    # The Skill ref is a *build input*: `CAIRN_SKILL_BRANCH` reaches the
-    # compiler only after the verification fetch above passed, so a released
-    # binary can never point at a branch that does not exist (D29a).
-    needs: [verify, publish-skill]
+    # The computed Skill ref is embedded, then created at publication.
+    needs: [verify, candidate-gates, compute-skill]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -201,7 +233,7 @@ jobs:
       - name: Build release binaries
         shell: bash
         env:
-          CAIRN_SKILL_BRANCH: ${{ needs.publish-skill.outputs.skill_branch }}
+          CAIRN_SKILL_BRANCH: ${{ needs.compute-skill.outputs.skill_branch }}
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
             -p cairn -p cairnd -p cairn-server
@@ -245,8 +277,7 @@ jobs:
 
           Open a new terminal, then inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server.exe\` is only needed if you host shared project memory
           yourself. Most people do not need it.
@@ -262,8 +293,7 @@ jobs:
 
           Then, inside a Git repository:
 
-              cairn init
-              cairn connect claude-code
+              cairn setup
 
           \`cairn-server\` is only needed if you host shared project memory
           yourself. Most people do not need it.
@@ -307,6 +337,7 @@ jobs:
           "$bin/cairnd$ext" --version
           "$bin/cairn-server$ext" --version
           "$bin/cairn$ext" --help > /dev/null
+          "$bin/cairn$ext" setup --help > /dev/null
           "$bin/cairn$ext" --version | grep -q "${VERSION}"
           "$bin/cairnd$ext" --version | grep -q "${VERSION}"
 
@@ -314,7 +345,7 @@ jobs:
         with:
           name: archive-${{ matrix.target }}
           path: ${{ steps.package.outputs.archive }}
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
@@ -361,16 +392,50 @@ jobs:
         with:
           name: release-assets
           path: dist/*
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
+
+  # This is intentionally an archive, not a workspace binary. It starts the
+  # packaged server/daemon, creates an authorized project, then runs packaged
+  # `cairn setup` in a disposable Codex home and Git checkout.
+  archive-journey:
+    name: installed archive journey
+    needs: [verify, candidate-gates, binaries]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: cairn
+          POSTGRES_DB: cairn
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: archive-x86_64-unknown-linux-gnu
+          path: dist
+      - name: Packaged setup journey
+        env:
+          CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          name="cairn-v${VERSION}-x86_64-unknown-linux-gnu"
+          tmp=$(mktemp -d)
+          tar -C "$tmp" -xzf "dist/$name.tar.gz"
+          scripts/release-archive-journey.sh "$tmp/$name"
 
   # --------------------------------------------------------------------------
   # Server and web images, multi-platform, pushed to GHCR with the release
-  # version and an immutable sha- tag. No `latest` for a pre-release.
+  # candidate run ID only. Version tags are promoted after evidence approval.
   # --------------------------------------------------------------------------
   images:
     name: image (${{ matrix.component }})
-    needs: verify
+    needs: [verify, candidate-gates]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -408,8 +473,7 @@ jobs:
           provenance: mode=max
           sbom: true
           tags: |
-            ghcr.io/vellixia/cairn-${{ matrix.component }}:${{ needs.verify.outputs.version }}
-            ghcr.io/vellixia/cairn-${{ matrix.component }}:sha-${{ needs.verify.outputs.short_sha }}
+            ghcr.io/vellixia/cairn-${{ matrix.component }}:candidate-${{ github.run_id }}
           labels: |
             org.opencontainers.image.title=cairn-${{ matrix.component }}
             org.opencontainers.image.version=${{ needs.verify.outputs.version }}
@@ -426,33 +490,58 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
+      - name: Record image digest
+        env:
+          COMPONENT: ${{ matrix.component }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p image-digest
+          printf '%s %s\n' "$COMPONENT" "$DIGEST" > "image-digest/$COMPONENT.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.component }}
+          path: image-digest/${{ matrix.component }}.txt
+          retention-days: 30
+          if-no-files-found: error
+
   # --------------------------------------------------------------------------
-  # Publish. Pre-release for anything carrying a pre-release suffix.
+  # Seal the candidate's artifact identity for the separate publish workflow.
   # --------------------------------------------------------------------------
-  release:
-    name: publish
-    needs: [verify, assets, images]
+  manifest:
+    name: candidate manifest
+    needs: [verify, candidate-gates, compute-skill, assets, archive-journey, images]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: release-assets
           path: dist
-
-      - name: Publish the GitHub Release
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          merge-multiple: true
+          path: image-digest
+      - name: Seal manifest
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
+          SKILL_BRANCH: ${{ needs.compute-skill.outputs.skill_branch }}
+          SKILL_REVISION: ${{ needs.compute-skill.outputs.skill_revision }}
+          SKILL_SCHEMA: ${{ needs.compute-skill.outputs.skill_schema }}
         run: |
           set -euo pipefail
-          prerelease=""
-          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Cairn v$VERSION" \
-            --notes-file .github/release-notes/v${VERSION}.md \
-            $prerelease \
-            dist/*
+          test "$(wc -l < dist/SHA256SUMS)" -eq 5
+          (cd dist && sha256sum -c SHA256SUMS)
+          test -s image-digest/server.txt
+          test -s image-digest/web.txt
+          mkdir -p candidate
+          printf 'source_sha=%s\nrun_id=%s\nversion=%s\nskill_schema=%s\nskill_revision=%s\nskill_branch=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$VERSION" "$SKILL_SCHEMA" "$SKILL_REVISION" "$SKILL_BRANCH" > candidate/manifest.txt
+          cat dist/SHA256SUMS >> candidate/manifest.txt
+          cat image-digest/*.txt >> candidate/manifest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-manifest
+          path: candidate/manifest.txt
+          retention-days: 30
+          if-no-files-found: error

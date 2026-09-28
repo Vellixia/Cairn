@@ -484,11 +484,6 @@ async fn wait_for_daemon(mark: &DaemonLogMark) -> Result<IpcStream, WireError> {
     Err(mark.diagnose("cairnd did not start"))
 }
 
-/// True when a daemon is currently listening.
-pub async fn daemon_running() -> bool {
-    connect().await.is_some()
-}
-
 // ---------------------------------------------------------------------------
 // Blocking fast path (SC-007)
 // ---------------------------------------------------------------------------

@@ -16,11 +16,192 @@
 
 use crate::state::{storage_err, Daemon};
 use cairn_core::lifecycle::{CanonicalEvent, CanonicalLifecycleEvent};
-use cairn_core::wire::{MigrationAction, WireError};
+use cairn_core::wire::WireError;
 use cairn_store::integrations as rec;
 use serde_json::json;
 
 type Reply = Result<serde_json::Value, WireError>;
+
+/// Install or refresh detected integrations during explicit setup.
+///
+/// Instructions stay user-owned: setup never edits `AGENTS.md`, `CLAUDE.md`,
+/// or committed `.claude/settings.json`. Existing Cairn-owned resources are
+/// updated only when inspection still matches their recorded ownership.
+pub async fn setup(d: &Daemon, cwd: &str) -> serde_json::Value {
+    setup_at(d, &cairn_integrate::scope::Env::discover(cwd)).await
+}
+
+async fn setup_at(d: &Daemon, env: &cairn_integrate::scope::Env) -> serde_json::Value {
+    use cairn_integrate::desired::{Choices, DesiredIntegrationState, RecordedResource};
+    use cairn_integrate::model::{
+        ActivationState, AgentId, ArtifactVersion, InstallationScope, ResourceKind, ResourceOwner,
+    };
+    use cairn_integrate::plan::{plan_agent, ChangeAction, RecordedInstall};
+
+    let mut applied = Vec::new();
+    let mut warnings = Vec::new();
+    for agent in AgentId::ALL
+        .into_iter()
+        .filter(|agent| *agent != AgentId::GenericMcp)
+    {
+        let adapter = cairn_integrate::adapter_for(agent);
+        let detection = adapter.detect(env);
+        if !detection.detected {
+            continue;
+        }
+
+        let records = match rec::bound_resources(&d.store, agent.as_str()).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    Some(RecordedInstall {
+                        agent,
+                        kind: ResourceKind::parse(&row.resource.kind)?,
+                        owner: ResourceOwner::parse(&row.resource.owner)?,
+                        scope: InstallationScope::parse(&row.resource.scope)?,
+                        location: row.resource.location.into(),
+                        content_hash: row.resource.content_hash,
+                        artifact_schema: row.resource.artifact_schema.map(|v| v as u32),
+                        artifact_revision: row.resource.artifact_revision,
+                        activation: ActivationState::parse(&row.resource.activation)?,
+                        serves: row
+                            .serves
+                            .iter()
+                            .filter_map(|value| AgentId::parse(value))
+                            .collect(),
+                        container_single_line: row.resource.container_single_line,
+                        created_container: row.resource.created_container,
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "detail": format!("could not read integration ownership: {error}"),
+                }));
+                continue;
+            }
+        };
+        let recorded = records
+            .iter()
+            .map(|row| RecordedResource {
+                agent: row.agent,
+                kind: row.kind,
+                owner: row.owner,
+                scope: row.scope,
+                activation: row.activation,
+            })
+            .collect::<Vec<_>>();
+        let desired = DesiredIntegrationState::compose(
+            &Choices {
+                agents: vec![agent],
+                only: vec![
+                    ResourceKind::Mcp,
+                    ResourceKind::Lifecycle,
+                    ResourceKind::Skill,
+                ],
+                ..Default::default()
+            },
+            &[agent],
+            &recorded,
+            cairn_integrate::render::Contract::canonical().version(),
+            ArtifactVersion::new(
+                cairn_integrate::revision::embedded_schema(),
+                cairn_integrate::revision::embedded_revision(),
+            ),
+        );
+        let observed = adapter.inspect(env, &records);
+        let plan = plan_agent(agent, &desired, &observed);
+        if plan.is_blocked() {
+            warnings.extend(plan.blocking.into_iter().map(|blocked| {
+                json!({
+                    "agent": agent.as_str(),
+                    "kind": blocked.kind.as_str(),
+                    "detail": blocked.detail,
+                })
+            }));
+            continue;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = rec::upsert_agent(
+            &d.store,
+            &rec::AgentIntegration {
+                agent: agent.as_str().into(),
+                adapter_version: 1,
+                detected_version: detection.version.clone(),
+                compatibility: "compatible_unverified".into(),
+                level: "mcp_plus".into(),
+                completion_guarantee: "not_demonstrated".into(),
+                connected_at: now.clone(),
+                last_verified_at: None,
+            },
+        )
+        .await;
+
+        for change in plan
+            .changes
+            .into_iter()
+            .filter(|change| matches!(change.action, ChangeAction::Add | ChangeAction::Update))
+        {
+            let materialized = match cairn_integrate::install::materialize_install(
+                env,
+                agent,
+                change.kind,
+                change.scope,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    warnings.push(json!({
+                        "agent": agent.as_str(),
+                        "kind": change.kind.as_str(),
+                        "detail": error.to_string(),
+                    }));
+                    continue;
+                }
+            };
+            if let Err(error) = cairn_integrate::install::commit(&materialized) {
+                warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "detail": error.to_string(),
+                }));
+                continue;
+            }
+            let resource = rec::InstalledResource {
+                id: uuid::Uuid::now_v7(),
+                kind: change.kind.as_str().into(),
+                owner: ResourceOwner::Direct.as_str().into(),
+                scope: change.scope.as_str().into(),
+                location: materialized.location.display().to_string(),
+                content_hash: materialized.content_hash,
+                artifact_schema: materialized
+                    .artifact
+                    .as_ref()
+                    .map(|value| value.schema as i64),
+                artifact_revision: materialized.artifact.map(|value| value.revision),
+                activation: ActivationState::NotApplicable.as_str().into(),
+                installed_at: now.clone(),
+                last_verified_at: Some(now.clone()),
+                container_single_line: materialized.container_single_line,
+                created_container: materialized.created_container,
+            };
+            match rec::bind(&d.store, agent.as_str(), &resource).await {
+                Ok(_) => applied.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "target": resource.location,
+                })),
+                Err(error) => warnings.push(json!({
+                    "agent": agent.as_str(),
+                    "kind": change.kind.as_str(),
+                    "detail": format!("installed but ownership was not recorded: {error}"),
+                })),
+            }
+        }
+    }
+    json!({ "applied": applied, "warnings": warnings })
+}
 
 /// Ingest one canonical lifecycle event.
 ///
@@ -159,29 +340,9 @@ async fn dispatch(
                     cwd: cwd.clone(),
                     agent: event.agent.clone(),
                     agent_session_key: key.clone(),
-                    task_id: None,
                 },
             )
             .await?;
-
-            // A session that opens with an unrestored compaction checkpoint is
-            // the *same* session coming back from a compaction, not a new one.
-            // That is the first boundary the model reads afterwards, and it is
-            // the only place Cairn can hand the checkpoint back without being
-            // asked -- `context_compacted` is capture class and returns before
-            // anything is emitted.
-            //
-            // Detected from Cairn's own recorded state rather than a vendor
-            // string, so it holds for any agent that re-opens a session after
-            // compacting. `source` is consulted only as corroboration where the
-            // vendor supplies it: Claude Code sends `compact`, and the others
-            // send nothing at all.
-            let after_compaction = post_compaction_reopen(d, &cwd, key.as_deref(), &event).await;
-            let reason = if after_compaction {
-                cairn_core::wire::ContextReason::PostCompaction
-            } else {
-                cairn_core::wire::ContextReason::SessionStart
-            };
 
             // Context delivery is the one canonical event whose handling
             // produces something the agent consumes (D19a).
@@ -199,7 +360,7 @@ async fn dispatch(
                     cwd,
                     agent_session_key: key,
                     session_id: None,
-                    reason: Some(reason),
+                    reason: Some(cairn_core::wire::ContextReason::SessionStart),
                     token_budget,
                     explain: false,
                     // A lifecycle-delivered briefing has always been the full
@@ -212,46 +373,17 @@ async fn dispatch(
             )
             .await;
 
-            // `context_after_compaction` is delivery, not capture, so it is
-            // established only where a checkpoint was actually restored *into*
-            // a briefing the agent consumes. A compaction Cairn merely heard
-            // about establishes `lifecycle_post_compaction` and nothing more --
-            // which is the whole point of them being two capabilities.
-            if after_compaction {
-                if let Ok(payload) = &delivered {
-                    if payload.get("checkpoint").is_some() {
-                        write_evidence(d, &event.agent, "context_after_compaction").await;
-                    }
-                }
-            }
             delivered
         }
         CanonicalEvent::ToolSucceeded | CanonicalEvent::ToolFailed => {
             let observation = event
                 .observation
                 .ok_or_else(|| WireError::invalid("a tool event must carry its observation"))?;
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::Observe {
-                    cwd,
-                    agent_session_key: key,
-                    observation,
-                },
-            )
-            .await
+            crate::handlers::observe(d, &cwd, key, observation).await
         }
         // Flush pending capture, record the checkpoint, leave the session
         // active, write no handoff (FR-032, FR-230).
-        CanonicalEvent::AgentQuiesced => {
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::TurnCheckpoint {
-                    cwd,
-                    agent_session_key: key,
-                },
-            )
-            .await
-        }
+        CanonicalEvent::AgentQuiesced => crate::handlers::turn_checkpoint(d, &cwd, key).await,
         CanonicalEvent::ContextCompacting => {
             crate::handlers::handle(
                 d,
@@ -307,116 +439,6 @@ async fn dispatch(
     }
 }
 
-/// Everything the CLI needs to know about what is installed here.
-pub async fn snapshot(d: &Daemon) -> Reply {
-    let agents = rec::list_agents(&d.store).await.map_err(storage_err)?;
-    let mut out = Vec::new();
-    for agent in agents {
-        let row = rec::agent(&d.store, &agent).await.map_err(storage_err)?;
-        let resources = rec::bound_resources(&d.store, &agent)
-            .await
-            .map_err(storage_err)?;
-        let evidence = rec::evidence(&d.store, &agent).await.map_err(storage_err)?;
-        out.push(json!({
-            "agent": agent,
-            "record": row,
-            "resources": resources,
-            "evidence": evidence,
-        }));
-    }
-    let migrations = rec::list_migrations(&d.store).await.map_err(storage_err)?;
-    Ok(json!({ "agents": out, "migrations": migrations }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_agent(
-    d: &Daemon,
-    agent: String,
-    adapter_version: i64,
-    detected_version: Option<String>,
-    compatibility: String,
-    level: String,
-    completion_guarantee: String,
-) -> Reply {
-    rec::upsert_agent(
-        &d.store,
-        &rec::AgentIntegration {
-            agent: agent.clone(),
-            adapter_version,
-            detected_version,
-            compatibility,
-            level,
-            completion_guarantee,
-            connected_at: chrono::Utc::now().to_rfc3339(),
-            last_verified_at: Some(chrono::Utc::now().to_rfc3339()),
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    Ok(json!({ "agent": agent }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn bind(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    owner: String,
-    scope: String,
-    location: String,
-    content_hash: Option<String>,
-    artifact_schema: Option<i64>,
-    artifact_revision: Option<String>,
-    activation: String,
-    container_single_line: bool,
-    created_container: bool,
-) -> Reply {
-    let id = rec::bind(
-        &d.store,
-        &agent,
-        &rec::InstalledResource {
-            id: uuid::Uuid::now_v7(),
-            kind,
-            owner,
-            scope,
-            location,
-            content_hash,
-            artifact_schema,
-            artifact_revision,
-            activation,
-            installed_at: chrono::Utc::now().to_rfc3339(),
-            last_verified_at: None,
-            container_single_line,
-            created_container,
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    Ok(json!({ "resource_id": id }))
-}
-
-pub async fn unbind(d: &Daemon, agent: String, kind: String) -> Reply {
-    let outcome = rec::unbind(&d.store, &agent, &kind)
-        .await
-        .map_err(storage_err)?;
-    // The caller does the filesystem half only when the last binding went
-    // (FR-243). Saying which happened is the whole point of the reply.
-    Ok(match outcome {
-        rec::Unbound::Nothing => json!({ "outcome": "nothing" }),
-        rec::Unbound::ResourceKept { remaining } => {
-            json!({ "outcome": "resource_kept", "remaining": remaining })
-        }
-        rec::Unbound::ResourceRemoved => json!({ "outcome": "resource_removed" }),
-    })
-}
-
-pub async fn forget_agent(d: &Daemon, agent: String) -> Reply {
-    let removed = rec::remove_agent_if_unbound(&d.store, &agent)
-        .await
-        .map_err(storage_err)?;
-    Ok(json!({ "removed": removed }))
-}
-
 pub async fn record_evidence(
     d: &Daemon,
     agent: String,
@@ -425,12 +447,6 @@ pub async fn record_evidence(
     agent_version: Option<String>,
     degraded: Option<bool>,
 ) -> Reply {
-    // Observation evidence is version-bound, and the version it is bound to is
-    // the one recorded for the agent — not whatever the caller happened to
-    // know. A hook reporting a delivery has no idea what version the agent is;
-    // leaving the row versionless would make the next upgrade discard it as
-    // belonging to some other build, which is how a capability that is working
-    // perfectly well disappears from the report (FR-245).
     let agent_version = match agent_version {
         Some(v) => Some(v),
         None if evidence == "observation" => rec::agent(&d.store, &agent)
@@ -456,172 +472,41 @@ pub async fn record_evidence(
     Ok(json!({ "recorded": true }))
 }
 
-pub async fn invalidate_evidence(
-    d: &Daemon,
-    agent: String,
-    detected_version: Option<String>,
-) -> Reply {
-    let discarded =
-        rec::invalidate_observation_evidence(&d.store, &agent, detected_version.as_deref())
-            .await
-            .map_err(storage_err)?;
-    Ok(json!({ "discarded": discarded }))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[allow(clippy::too_many_arguments)]
-pub async fn migration(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    action: MigrationAction,
-    source: (Option<String>, Option<String>, Option<String>),
-    target: (Option<String>, Option<String>, Option<String>),
-    overlap_permitted: bool,
-    phase: Option<String>,
-    last_error: Option<String>,
-) -> Reply {
-    match action {
-        MigrationAction::Start => {
-            let state = rec::MigrationState {
-                id: uuid::Uuid::now_v7(),
-                agent: agent.clone(),
-                kind: kind.clone(),
-                source_owner: source.0.unwrap_or_default(),
-                source_scope: source.1.unwrap_or_default(),
-                source_location: source.2.unwrap_or_default(),
-                target_owner: target.0.unwrap_or_default(),
-                target_scope: target.1.unwrap_or_default(),
-                target_location: target.2.unwrap_or_default(),
-                phase: "planned".into(),
-                overlap_permitted,
-                started_at: chrono::Utc::now().to_rfc3339(),
-                last_error: None,
-            };
-            rec::start_migration(&d.store, &state)
-                .await
-                .map_err(storage_err)?;
-            Ok(serde_json::to_value(state).unwrap_or(json!({})))
-        }
-        MigrationAction::Advance => {
-            let phase = phase.ok_or_else(|| WireError::invalid("advance needs a phase"))?;
-            rec::set_migration_phase(&d.store, &agent, &kind, &phase, None)
-                .await
-                .map_err(storage_err)?;
-            read_migration(d, &agent, &kind).await
-        }
-        MigrationAction::Fail => {
-            rec::set_migration_phase(&d.store, &agent, &kind, "failed", last_error.as_deref())
-                .await
-                .map_err(storage_err)?;
-            read_migration(d, &agent, &kind).await
-        }
-        MigrationAction::Clear => {
-            rec::clear_migration(&d.store, &agent, &kind)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "migration": null }))
-        }
-        MigrationAction::Read => read_migration(d, &agent, &kind).await,
-    }
-}
+    #[tokio::test]
+    async fn setup_installs_owned_resources_is_idempotent_and_blocks_edits() {
+        let d = crate::testsupport::daemon().await;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let repo = root.path().join("repo");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let env = cairn_integrate::scope::Env::new(&home, &repo);
 
-async fn read_migration(d: &Daemon, agent: &str, kind: &str) -> Reply {
-    let state = rec::migration(&d.store, agent, kind)
-        .await
-        .map_err(storage_err)?;
-    Ok(json!({ "migration": state }))
-}
+        let first = setup_at(&d, &env).await;
+        assert_eq!(first["warnings"], json!([]));
+        assert_eq!(first["applied"].as_array().unwrap().len(), 3);
+        assert!(home.join(".claude.json").exists());
+        assert!(repo.join(".claude/settings.local.json").exists());
+        assert!(!repo.join("CLAUDE.md").exists());
+        assert!(!repo.join("AGENTS.md").exists());
+        assert!(!repo.join(".claude/settings.json").exists());
 
-pub async fn record_recovery(
-    d: &Daemon,
-    agent: String,
-    kind: String,
-    source_path: String,
-    artifact_path: String,
-    content_hash: String,
-) -> Reply {
-    rec::record_recovery_artifact(
-        &d.store,
-        &rec::RecoveryArtifact {
-            id: uuid::Uuid::now_v7(),
-            agent,
-            kind,
-            source_path,
-            artifact_path: artifact_path.clone(),
-            content_hash,
-            created_at: chrono::Utc::now().to_rfc3339(),
-        },
-    )
-    .await
-    .map_err(storage_err)?;
-    // Only the path is ever returned, never the content (FR-239).
-    Ok(json!({ "artifact_path": artifact_path }))
-}
+        let second = setup_at(&d, &env).await;
+        assert_eq!(second["warnings"], json!([]));
+        assert_eq!(second["applied"], json!([]));
 
-/// Whether this session-open is the same session returning from a compaction.
-///
-/// True when Cairn holds a `context_compacting` checkpoint for the session that
-/// has never been restored. That is a fact about Cairn's own records, so it does
-/// not depend on a vendor naming the boundary; where a vendor does name it --
-/// Claude Code's `SessionStart` source is `compact` -- it agrees, and is used
-/// only as corroboration.
-///
-/// Deliberately conservative: a checkpoint already restored is not restored
-/// twice, and no checkpoint at all means an ordinary session start.
-async fn post_compaction_reopen(
-    d: &Daemon,
-    cwd: &str,
-    key: Option<&str>,
-    event: &CanonicalLifecycleEvent,
-) -> bool {
-    // A vendor that names the boundary is believed immediately.
-    let named = event
-        .source
-        .as_deref()
-        .is_some_and(|s| s.eq_ignore_ascii_case("compact"));
-
-    let Ok(r) = d.resolve(cwd).await else {
-        return named;
-    };
-    let Some(key) = key else { return named };
-    let session = match cairn_store::repo::session_by_key(&d.store, r.project.id, key).await {
-        Ok(Some(s)) => s,
-        _ => return named,
-    };
-    match cairn_store::continuity::latest(&d.store, session.id).await {
-        // An **unrestored** compaction checkpoint is the signal, and the
-        // `restore_count` is what makes a second session open harmless: once the
-        // first has restored it, a duplicate finds it consumed and delivers
-        // nothing again. A vendor naming the boundary is deliberately *not* ORed
-        // in here -- an agent that re-emits `SessionStart` twice would then
-        // restore twice, and `restore_count` would stop meaning "delivered once".
-        Ok(Some(c)) => {
-            c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
-                && c.restore_count == 0
-        }
-        // Only where Cairn has no checkpoint to reason about at all does the
-        // vendor's own naming decide. Nothing can be restored in that case, so
-        // it costs a briefing reason and no more.
-        _ => named,
-    }
-}
-
-/// One capability-evidence row, recorded as an observation.
-async fn write_evidence(d: &Daemon, agent: &str, capability: &str) {
-    let version = rec::agent(&d.store, agent)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|a| a.detected_version);
-    let row = rec::CapabilityEvidence {
-        agent: agent.to_string(),
-        capability: capability.to_string(),
-        evidence: "observation".into(),
-        established_at: chrono::Utc::now().to_rfc3339(),
-        agent_version: version,
-        degraded: None,
-    };
-    if let Err(e) = rec::record_evidence(&d.store, &row).await {
-        tracing::debug!(error = %e, "could not record capability evidence");
+        let edited = r#"{"mcpServers":{"cairn":{"command":"user-edit"}}}"#;
+        std::fs::write(home.join(".claude.json"), edited).unwrap();
+        let conflict = setup_at(&d, &env).await;
+        assert_eq!(conflict["applied"], json!([]));
+        assert_eq!(conflict["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(home.join(".claude.json")).unwrap(),
+            edited
+        );
     }
 }

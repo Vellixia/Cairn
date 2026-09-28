@@ -165,7 +165,7 @@ impl IntegrationManager for CcSwitch {
                     published_skill_branch().ok_or_else(|| ImportRefusal::UnpublishedSkillRef {
                         revision: revision::embedded_revision(),
                         manual: format!(
-                            "install the Skill directly with `cairn connect`, or use a released \
+                            "install the Skill manually, or use a released \
                              Cairn build whose Skill revision has a published \
                              `{}` branch",
                             revision::embedded_branch()
@@ -224,7 +224,7 @@ pub fn removal_action(kind: ResourceKind, apps: &[String]) -> ManagerActionRequi
             },
             apps.join(", ")
         ),
-        verify_with: "cairn doctor".into(),
+        verify_with: "cairn setup".into(),
         status: "awaiting_user".into(),
     }
 }
@@ -242,7 +242,7 @@ pub fn import_action(kind: ResourceKind, apps: &[String], uri: String) -> Manage
         instructions: "Confirm the import inside CC Switch. Cairn does not attempt to pass its \
                        confirmation dialog."
             .into(),
-        verify_with: "cairn doctor".into(),
+        verify_with: "cairn setup".into(),
         status: "awaiting_user".into(),
     }
 }

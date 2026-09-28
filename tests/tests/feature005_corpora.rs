@@ -6,11 +6,9 @@
 //! if something fails when a corpus is smaller or narrower than its entry — so
 //! this file is what makes `manifest.json` binding.
 //!
-//! Entries marked `owed` are deliberately not failures. They record a corpus a
-//! later task must supply, with the size and coverage fixed *now* so that task
-//! cannot quietly satisfy itself with whatever cases its implementation
-//! happens to handle. What would be a failure is an `owed` entry with no
-//! `owed_by`, or a `present` entry whose corpus is missing.
+//! Entries marked `owed` record coverage gaps with fixed size and scope.
+//! Incomplete entries require an explicit gap reason; a present entry whose
+//! corpus is missing always fails.
 
 use serde_json::Value;
 
@@ -58,9 +56,8 @@ fn every_corpus_entry_is_complete_enough_to_hold_someone_to() {
         );
         if status != "present" {
             assert!(
-                entry["owed_by"].as_str().is_some_and(|o| !o.is_empty()),
-                "{name} is not present and names no task that owes it, which is \
-                 how a corpus goes missing without anyone noticing"
+                entry["gap_reason"].as_str().is_some_and(|o| !o.is_empty()),
+                "{name} is not present and gives no gap_reason"
             );
         }
     }
@@ -150,28 +147,4 @@ fn the_privacy_corpus_covers_every_class_the_manifest_lists() {
         entry["minimum_classes"].as_u64().unwrap() as usize,
         "the validator has a class count the manifest does not know about"
     );
-}
-
-#[test]
-fn a_corpus_owed_by_a_later_task_names_a_task_that_still_exists() {
-    let m = manifest();
-    let tasks = std::fs::read_to_string(workspace(
-        "specs/005-server-authoritative-autonomous-memory/tasks.md",
-    ))
-    .expect("read tasks.md");
-    for (name, entry) in m["corpora"].as_object().expect("corpora") {
-        let Some(owed) = entry["owed_by"].as_str() else {
-            continue;
-        };
-        // The first task id in the range, which is enough to catch an entry
-        // pointing at work that no longer exists.
-        let first = owed
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .find(|t| t.starts_with('T') && t.len() == 4)
-            .unwrap_or_else(|| panic!("{name} owed_by {owed:?} names no task"));
-        assert!(
-            tasks.contains(first),
-            "{name} is owed by {first}, which is not in tasks.md"
-        );
-    }
 }

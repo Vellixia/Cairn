@@ -61,7 +61,7 @@ pub fn mcp_entry() -> serde_json::Value {
 /// whole invocation in one `command` array and an explicit `enabled`. Writing
 /// the generic shape did not merely fail to register Cairn: OpenCode rejects
 /// the entire configuration file over one bad server entry, so
-/// `cairn connect opencode` left OpenCode unable to start at all with
+/// setup left OpenCode unable to start at all with
 /// `Missing key mcp.cairn.enabled`. An integration must never be able to break
 /// the tool it integrates with.
 pub fn mcp_entry_opencode() -> serde_json::Value {

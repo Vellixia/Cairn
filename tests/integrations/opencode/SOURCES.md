@@ -1,8 +1,7 @@
 # Sources
 
 `opencode.ai` is blocked by this environment's egress policy, so these shapes were recorded
-**2026-08-11** from the `sst/opencode` repository at `dev`, as cited in
-`specs/002-agent-integration-platform/research.md` §D32. Values are realistic but invented.
+**2026-08-11** from the `sst/opencode` repository at `dev`. Values are realistic but invented.
 
 Each file records one vendor event, the payload, and what the adapter must make of it:
 `expect` is the canonical event name, or `null` where the adapter must decline.

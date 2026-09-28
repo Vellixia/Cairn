@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SC-006 / FR-045: prove the local product works with no network at all.
+# Prove edge capture and durable spooling work with no external network.
 #
 # `--network none` leaves the container with loopback only, so any code path
 # that needed the network would fail rather than quietly degrade. The server
@@ -20,13 +20,14 @@ if [[ "${CAIRN_ISOLATED_PREPARE:-1}" == "1" ]]; then
     -v "$ROOT":/work -w /work \
     -v cairn-linux-target:/tmp/target-linux \
     -v cairn-linux-registry:/usr/local/cargo/registry \
-    -e CARGO_TARGET_DIR=/tmp/target-linux \
+    -e CARGO_TARGET_DIR=/tmp/target-linux/build \
     -e RUSTUP_TOOLCHAIN=1.97.1 \
     "$IMAGE" \
     bash -lc '
       export PATH=/usr/local/cargo/bin:$PATH
       git config --global --add safe.directory /work
       cargo fetch --locked
+      cargo clean
       cargo build --workspace --tests
     '
 fi
@@ -36,7 +37,7 @@ docker run --rm --network none \
   -v "$ROOT":/work -w /work \
   -v cairn-linux-target:/tmp/target-linux \
   -v cairn-linux-registry:/usr/local/cargo/registry \
-  -e CARGO_TARGET_DIR=/tmp/target-linux \
+  -e CARGO_TARGET_DIR=/tmp/target-linux/build \
   -e RUSTUP_TOOLCHAIN=1.97.1 \
   "$IMAGE" \
   bash -lc '
@@ -51,10 +52,6 @@ docker run --rm --network none \
     echo "--- building the binaries under test ---"
     cargo build --offline -p cairn -p cairnd
     echo "--- local suites, no network ---"
-    cargo test --offline -p cairn-core -p cairn-git -p cairn-store -p cairn-sys \
-      -p cairnd \
-      -p cairn-e2e --test foundation --test hostile_environment --test concurrency \
-      --test us1_capture_handoff --test us1_sessions \
-      --test us2_context --test us3_memory --test us4_tasks --test us5_privacy \
-      --test manual_mcp_mode --test storage_contention
+    cargo test --offline -p cairn -p cairn-core -p cairn-git -p cairn-store \
+      -p cairn-sys -p cairnd -p cairn-e2e
   '

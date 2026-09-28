@@ -28,7 +28,6 @@ pub mod promotion;
 pub mod redact;
 pub mod release;
 pub mod startup;
-pub mod tasks;
 pub mod tools;
 pub mod validate;
 pub mod verify;

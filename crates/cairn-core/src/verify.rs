@@ -237,9 +237,7 @@ pub fn derive_authority(
 /// Whether an authority satisfies a consumer that requires a deterministic
 /// check Cairn ran on this machine.
 ///
-/// The two consumers with an incentive attached — a task criterion's
-/// verification (FR-484) and cross-project promotion (FR-396) — both ask this
-/// one question, so both ask it in one place.
+/// Cross-project promotion asks this question in one place.
 pub fn satisfies_deterministic_requirement(authority: Option<VerificationAuthority>) -> bool {
     matches!(authority, Some(a) if a.is_local_deterministic())
 }

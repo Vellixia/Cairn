@@ -2,7 +2,7 @@
 //! server (`contracts/safe-events.md` §8, `contracts/knowledge-commands.md`
 //! §4, `data-model.md` §1.4 and §5).
 //!
-//! Two tables, one protocol. [`crate::outbox`] already solved per-author
+//! Two tables, one protocol. Both retain per-author
 //! claiming, stale-claim reclaim and backoff for Feature 004's sync queue, and
 //! §8 of the contract is explicit that the spool reuses those semantics rather
 //! than growing a second, subtly different set. What is genuinely new here is
@@ -137,7 +137,7 @@ pub const SPOOL_MAX_BYTES: i64 = 256 * 1024 * 1024;
 
 /// How long a claim may sit unacknowledged before another drainer may take it.
 ///
-/// The same sixty seconds [`crate::outbox::CLAIM_TIMEOUT_SECONDS`] uses, and
+/// Sixty seconds is long enough for one delivery attempt, and
 /// for the same reason: a drainer that dies mid-send leaves rows `in_flight`
 /// with nothing left to acknowledge them, and a lease that simply expires is
 /// cheaper and harder to get wrong than a liveness protocol. Sixty seconds is
@@ -247,6 +247,8 @@ pub enum CommandKind {
     PatternForget,
     VerificationRun,
     VerificationAttestation,
+    HandoffGenerate,
+    HandoffAnnotate,
 }
 
 impl CommandKind {
@@ -264,6 +266,8 @@ impl CommandKind {
         CommandKind::PatternForget,
         CommandKind::VerificationRun,
         CommandKind::VerificationAttestation,
+        CommandKind::HandoffGenerate,
+        CommandKind::HandoffAnnotate,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -281,6 +285,8 @@ impl CommandKind {
             CommandKind::PatternForget => "pattern_forget",
             CommandKind::VerificationRun => "verification_run",
             CommandKind::VerificationAttestation => "verification_attestation",
+            CommandKind::HandoffGenerate => "handoff_generate",
+            CommandKind::HandoffAnnotate => "handoff_annotate",
         }
     }
 }
@@ -782,7 +788,7 @@ pub async fn rebind_provisional_instance(
 /// Claim up to `limit` deliverable events for this account, oldest first.
 ///
 /// **Two statements in one transaction**, not the single `UPDATE … RETURNING`
-/// [`crate::outbox::claim`] uses. A drain first retires every eligible row that
+/// A drain first retires every eligible row that
 /// has spent its attempt budget, then claims from what is left. They share one
 /// `BEGIN IMMEDIATE` because a second drainer arriving between them could claim
 /// a row this one had just judged exhausted, and the bound would hold only
@@ -1035,7 +1041,7 @@ pub const DEFERRED_AWAITING_CAPABILITY: &str = "awaiting_capability";
 /// and defer" exists to avoid.
 ///
 /// So the claim's increment is **refunded**. The same reasoning
-/// [`crate::outbox::mark_retryable`] gives for not counting a released claim:
+/// retryable delivery does not count a released claim:
 /// `attempts` is a count of futile retries, and a deferral was not one — the
 /// server was asked a question it cannot answer yet, and answered honestly.
 ///

@@ -63,6 +63,8 @@ pub const SERVER_SCHEMA_V4: i64 = 4;
 /// The version that gives `team_knowledge` its monotonic `revision`, and moves
 /// the team pull feed onto it (FR-456, FR-457, FR-465).
 pub const SERVER_SCHEMA_V5: i64 = 5;
+/// The current server schema after task/authority removal and logical transfer.
+pub const SERVER_SCHEMA_V8: i64 = 8;
 /// The server schema version Feature 005 upgrades *from*.
 pub const SERVER_SCHEMA_V3: i64 = 3;
 

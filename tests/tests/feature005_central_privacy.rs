@@ -264,8 +264,6 @@ const EXPECTED_FEATURE_005_TABLES: &[&str] = &[
     "delivered_context",
     "capture_dispositions",
     "applied_commands",
-    "server_authority",
-    "client_migrations",
 ];
 
 /// Every base table Postgres actually has in `public`, read fresh each call.
