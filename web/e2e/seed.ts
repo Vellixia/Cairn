@@ -196,7 +196,7 @@ export async function seed(): Promise<Seeded> {
     headers: auth,
     body: JSON.stringify({
       name: `UI Fixture ${Date.now()}`,
-      repository_remote: "github.com/example/ui-fixture",
+      repository_remote: `https://github.com/example/ui-fixture-${uuid()}.git`,
     }),
   });
   const projectId = project.id as string;
@@ -497,7 +497,7 @@ export async function seedControlPlane(): Promise<ControlPlaneFixture> {
   const projectId = await createProject(
     owner.token,
     projectName,
-    `github.com/example/us5-${Date.now()}`,
+    `https://github.com/example/us5-${run}.git`,
   );
   await apiAs(owner.token, `/api/projects/${projectId}/members`, {
     method: "POST",
