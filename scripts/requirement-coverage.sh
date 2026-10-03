@@ -5,7 +5,7 @@
 # The point is traceability, not a coverage percentage. A requirement that no
 # test names cannot be checked when it changes: the suite passes, the product
 # works, and nobody can answer "which test proves this?" without reading
-# everything. See `docs/testing.md`.
+# everything. See `docs/engineering/testing.md`.
 #
 # The exception list is deliberately tiny. Ten requirements were uncited when
 # this check was written, and seven of them were already *proved* by an existing
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SPEC="$ROOT/specs/001-cairn-mvp/spec.md"
+SPEC="$ROOT/docs/history/alpha7/mvp-requirements.md"
 
 # Requirements not cited by any test today.
 #
@@ -25,7 +25,7 @@ KNOWN_UNCITED=(
   # Constraints on what Cairn must NOT do or NOT need. A passing suite is
   # compatible with these being violated, so a test is the wrong instrument:
   # they need a guard over the dependency graph and the UI surface instead.
-  # Tracked as guards in `docs/testing.md`, not as coverage.
+  # Tracked as guards in `docs/engineering/testing.md`, not as coverage.
   FR-025 FR-063
 
   # Time-to-first-value: a measurement about a person, not a code path.

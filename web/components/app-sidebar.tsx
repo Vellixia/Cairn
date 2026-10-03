@@ -6,24 +6,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
-  Activity,
-  Boxes,
   Brain,
   ChevronsUpDown,
   FolderGit2,
   HeartPulse,
-  KeyRound,
   LayoutDashboard,
-  ListChecks,
   LogOut,
   Monitor,
   Moon,
-  Plug,
-  RefreshCw,
-  Search,
   Sun,
   Terminal,
-  UserCog,
   Users,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -81,11 +73,6 @@ export function AppSidebar() {
     queryFn: () => api.projects(),
   });
 
-  // Same query key the user menu below uses, so the role costs no extra
-  // request — and comes from the server on this page load rather than from
-  // anything cached at sign-in.
-  const me = useQuery({ queryKey: ["me"], queryFn: () => api.me() });
-
   const active = projects.data?.projects.find((p) => p.id === activeId);
 
   const projectNav = activeId
@@ -96,26 +83,13 @@ export function AppSidebar() {
           icon: LayoutDashboard,
           exact: true,
         },
-        { href: `/projects/${activeId}/tasks`, label: "Tasks", icon: ListChecks },
-        {
-          href: `/projects/${activeId}/sessions`,
-          label: "Sessions",
-          icon: Terminal,
-        },
-        {
-          href: `/projects/${activeId}/activity`,
-          label: "Activity",
-          icon: Activity,
-        },
         { href: `/projects/${activeId}/memory`, label: "Memory", icon: Brain },
         {
-          href: `/projects/${activeId}/retrievals`,
-          label: "Retrievals",
-          icon: Search,
+          href: `/projects/${activeId}/sessions`,
+          label: "Sessions/Replay",
+          icon: Terminal,
+          testId: "nav-sessions-replay",
         },
-        { href: `/projects/${activeId}/agents`, label: "Agents", icon: Plug },
-        { href: `/projects/${activeId}/domains`, label: "Domains", icon: Boxes },
-        { href: `/projects/${activeId}/sync`, label: "Sync", icon: RefreshCw },
       ]
     : [];
 
@@ -133,24 +107,10 @@ export function AppSidebar() {
    * by the server. Only the ratify and retire actions on that page are
    * administrator work.
    */
-  const isAdmin = me.data?.role === "admin";
   const systemNav = [
-    { href: "/team", label: "Team", icon: Users, testId: "nav-team" },
-    {
-      href: "/system",
-      label: "System health",
-      icon: HeartPulse,
-      testId: "nav-system",
-      adminOnly: true,
-    },
-    {
-      href: "/admin/users",
-      label: "Accounts",
-      icon: UserCog,
-      testId: "nav-admin-users",
-      adminOnly: true,
-    },
-  ].filter((item) => isAdmin || !item.adminOnly);
+    { href: "/governance", label: "Governance", icon: Users, testId: "nav-governance" },
+    { href: "/settings", label: "Settings", icon: HeartPulse, testId: "nav-settings" },
+  ];
 
   return (
     <Sidebar collapsible="icon">
@@ -191,17 +151,6 @@ export function AppSidebar() {
                 <span>Projects</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                isActive={pathname === "/tokens"}
-                tooltip="API tokens"
-                onClick={closeOnMobile}
-                render={<Link href="/tokens" data-testid="nav-tokens" />}
-              >
-                <KeyRound />
-                <span>API tokens</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
 
@@ -224,7 +173,7 @@ export function AppSidebar() {
                       render={
                         <Link
                           href={item.href}
-                          data-testid={`nav-${item.label.toLowerCase()}`}
+                          data-testid={item.testId ?? `nav-${item.label.toLowerCase()}`}
                         />
                       }
                     >
@@ -363,9 +312,8 @@ function UserMenu() {
               ))}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem render={<Link href="/tokens" />}>
-              <KeyRound className="size-4" />
-              API tokens
+            <DropdownMenuItem render={<Link href="/settings" />}>
+              Settings
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem

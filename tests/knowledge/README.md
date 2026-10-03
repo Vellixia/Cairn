@@ -1,8 +1,8 @@
-# The Feature 003 deterministic corpus
+# The deterministic knowledge corpus
 
 JSON fixtures, versioned in the repository, loaded by pure functions with **no database and no
-daemon** (`contracts/evaluation.md` §The corpus). This is tier 2 of the five test tiers, and it is
-where most of Feature 003's correctness lives, because the reconciliation derivation, the
+daemon**. This is the pure-function test tier, and it is
+where reconciliation correctness lives, because the reconciliation derivation, the
 verification state machine and the staleness comparison are pure functions.
 
 ## The paired-corpus rule

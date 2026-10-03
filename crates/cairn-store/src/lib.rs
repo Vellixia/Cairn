@@ -1,34 +1,17 @@
-//! Local storage: SQLite, migrations, repositories, lexical search, the
-//! transactional outbox and the Feature 005 edge spools (D2, D3, D9).
-//!
-//! Everything here is local and works offline. No call in this crate touches
-//! the network.
-//!
-//! Under server authority the local copies of personal and team knowledge are
-//! a **cache**, not an authority: [`global::merge_synced_personal`] and
-//! [`global::merge_synced_team`] let a pulled row replace what is stored,
-//! including a content correction and a state that did not advance (FR-712a).
+//! Local edge storage: binding, correlation, integration ownership, typed
+//! delivery spools, migration artifacts, diagnostics and transactions.
 
-pub mod authority;
 pub mod constraints;
-pub mod continuity;
-pub mod criteria;
-pub mod cursor;
 pub mod diag;
-pub mod evidence;
-pub mod global;
 pub mod integrations;
-pub mod knowledge;
 pub mod migrate;
-pub mod outbox;
-pub mod patterns;
 pub mod repo;
 pub mod rows;
-pub mod search;
 /// Feature 005's edge spools: approved events and knowledge commands waiting
 /// for the server, with durable ordinals and an exact per-account claim.
 pub mod spool;
-pub mod traits;
+/// Versioned, file-backed V1 export/import manifests and retry-safe restore.
+pub mod transfer;
 pub mod tx;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -101,6 +84,7 @@ impl Store {
     /// so that exercising a fully exhausted retry takes seconds rather than the
     /// best part of a minute.
     pub(crate) async fn open_with_busy_timeout(path: &Path, busy: Duration) -> Result<Self> {
+        let fresh = !path.exists();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -139,7 +123,11 @@ impl Store {
                 other => StoreError::from(other),
             })?;
 
-        migrate::run(&pool).await?;
+        if fresh || migrate::fresh_pending(&pool).await? {
+            migrate::run_fresh(&pool).await?;
+        } else {
+            migrate::run(&pool).await?;
+        }
         Ok(Self { pool })
     }
 
@@ -153,7 +141,7 @@ impl Store {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        migrate::run(&pool).await?;
+        migrate::run_fresh(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -175,14 +163,6 @@ impl Store {
             .await?;
         Ok(())
     }
-
-    /// True when the FTS5 index is usable in this build of SQLite.
-    pub async fn fts_available(&self) -> bool {
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM memory_fts")
-            .fetch_one(&self.pool)
-            .await
-            .is_ok()
-    }
 }
 
 #[cfg(test)]
@@ -203,6 +183,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_store_has_no_local_knowledge_tables() {
+        let store = Store::open_memory().await.unwrap();
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        for removed in [
+            "memories",
+            "observations",
+            "handoffs",
+            "outbox",
+            "sync_meta",
+            "sync_cursor",
+            "personal_knowledge",
+            "team_knowledge",
+        ] {
+            assert!(
+                !tables.iter().any(|table| table == removed),
+                "fresh edge table: {removed}"
+            );
+        }
+        for retained in [
+            "projects",
+            "sessions",
+            "event_spool",
+            "command_spool",
+            "agent_integrations",
+            "removed_feature_manifest",
+        ] {
+            assert!(
+                tables.iter().any(|table| table == retained),
+                "missing edge table: {retained}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn migration_is_idempotent_across_opens() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cairn.sqlite3");
@@ -214,6 +232,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, migrate::MIGRATIONS.len() as i64);
+    }
+
+    #[tokio::test]
+    async fn interrupted_fresh_schema_is_pruned_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("edge.sqlite3");
+        let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .unwrap();
+        migrate::run(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE edge_bootstrap_state (id INTEGER PRIMARY KEY CHECK (id = 1));
+             INSERT INTO edge_bootstrap_state VALUES (1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = Store::open(&path).await.unwrap();
+        for removed in ["tasks", "memories", "edge_bootstrap_state"] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+            )
+            .bind(removed)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            assert_eq!(exists, 0, "{removed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_survive_fresh_schema_rebuild_on_one_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cairn.sqlite3");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        migrate::run_to(&pool, 12).await.unwrap();
+        let store = Store { pool };
+        let project_id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO projects
+                (id, name, git_common_dir, linked, created_at, updated_at)
+             VALUES (?1, 'fixture', '/fixture/.git', 0, ?2, ?2)",
+        )
+        .bind(project_id.to_string())
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        // Cache session metadata while the legacy task_id column still sits
+        // between project_id and user_id.
+        assert!(repo::session_by_key(&store, project_id, "missing")
+            .await
+            .unwrap()
+            .is_none());
+        migrate::run_fresh(store.pool()).await.unwrap();
+
+        let user_id = uuid::Uuid::now_v7();
+        let session = repo::start_session(
+            &store,
+            repo::StartSession {
+                project_id,
+                user_id,
+                agent: "claude_code",
+                agent_session_key: "rebuilt",
+                branch: "main",
+                commit_sha: None,
+                worktree_path: "/fixture",
+                daemon_run_id: uuid::Uuid::now_v7(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.user_id, user_id);
     }
 
     #[tokio::test]
@@ -234,15 +337,5 @@ mod tests {
             Err(StoreError::Migrate(migrate::MigrateError::TooNew { .. })) => {}
             other => panic!("expected TooNew, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn fts5_is_available_in_this_build() {
-        // D3 depends on FTS5. If this fails, search has no ranking story.
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("cairn.sqlite3"))
-            .await
-            .unwrap();
-        assert!(store.fts_available().await, "SQLite build lacks FTS5");
     }
 }

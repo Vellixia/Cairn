@@ -157,27 +157,39 @@ pub fn first_remote(cwd: &Path) -> Result<Option<String>, GitError> {
 /// plenty of repositories have no remote — which is why this can never be the
 /// authority for shared project identity (D14).
 pub fn normalize_remote(url: &str) -> String {
-    let mut s = url.trim().to_string();
-    if let Some(rest) = s.strip_suffix('/') {
-        s = rest.to_string();
+    canonical_remote(url).unwrap_or_else(|| url.trim().to_string())
+}
+
+/// Parse a network Git remote into Cairn's comparison form, `host/path`.
+pub fn canonical_remote(url: &str) -> Option<String> {
+    let raw = url.trim();
+    if raw.is_empty() || raw.contains(char::is_whitespace) {
+        return None;
     }
-    if let Some(rest) = s.strip_suffix(".git") {
-        s = rest.to_string();
-    }
-    // scp-like: git@host:owner/repo
-    if !s.contains("://") {
-        if let Some((prefix, path)) = s.split_once(':') {
-            let host = prefix.rsplit('@').next().unwrap_or(prefix);
-            return format!("{}/{}", host.to_lowercase(), path.trim_start_matches('/'));
+    let (host, path) = if let Some((scheme, rest)) = raw.split_once("://") {
+        if !matches!(scheme, "https" | "http" | "ssh" | "git") {
+            return None;
         }
+        let authority_and_path = rest.rsplit('@').next()?;
+        authority_and_path.split_once('/')?
+    } else {
+        let (authority, path) = raw.split_once(':')?;
+        (authority.rsplit('@').next()?, path.trim_start_matches('/'))
+    };
+    let host = host.trim_end_matches('/');
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    if host.is_empty()
+        || path.is_empty()
+        || host.contains(['?', '#', ':'])
+        || path.contains(['?', '#', ':'])
+        || path.split('/').count() < 2
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
     }
-    if let Some((_scheme, rest)) = s.split_once("://") {
-        // Drop any embedded credentials.
-        let rest = rest.rsplit('@').next().unwrap_or(rest);
-        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-        return format!("{}/{}", host.to_lowercase(), path);
-    }
-    s
+    Some(format!("{}/{}", host.to_lowercase(), path))
 }
 
 /// Current branch, commit and working-tree counts.
@@ -499,6 +511,23 @@ mod tests {
             normalize_remote("https://user:pass@github.com/Vellixia/Cairn"),
             "github.com/Vellixia/Cairn"
         );
+    }
+
+    #[test]
+    fn canonical_remote_refuses_non_network_and_incomplete_values() {
+        assert_eq!(
+            canonical_remote("git@github.com:Vellixia/Cairn.git").as_deref(),
+            Some("github.com/Vellixia/Cairn")
+        );
+        for remote in [
+            "",
+            "github.com/owner/repo",
+            "/tmp/repo",
+            "https://github.com/owner",
+            "https://github.com/owner/repo?x=1",
+        ] {
+            assert!(canonical_remote(remote).is_none(), "{remote}");
+        }
     }
 }
 

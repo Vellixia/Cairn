@@ -6,7 +6,7 @@
 //! committed in between, SQLite refuses with `SQLITE_BUSY_SNAPSHOT` (517).
 //! `busy_timeout` cannot help — waiting does not make a stale snapshot fresh —
 //! so the caller simply loses a legitimate write. That is what happened to
-//! `cairn memory add` while capture was writing observations on another
+//! an explicit memory write while capture was writing observations on another
 //! connection.
 //!
 //! `BEGIN IMMEDIATE` takes the write lock as the transaction opens. There is

@@ -1,8 +1,7 @@
 # Sources
 
 `developers.openai.com` is blocked by this environment's egress policy, so these shapes were
-recorded **2026-08-11** from the `openai/codex` repository at `main`, as cited in
-`specs/002-agent-integration-platform/research.md` §D31. Values are realistic but invented.
+recorded **2026-08-11** from the `openai/codex` repository at `main`. Values are realistic but invented.
 
 Each file records one vendor event, the payload, and what the adapter must make of it:
 `expect` is the canonical event name, or `null` where the adapter must decline.
@@ -18,6 +17,5 @@ Each file records one vendor event, the payload, and what the adapter must make 
 | `session_end.json` | `SessionEnd` | `codex-rs/hooks/src/events/session_end.rs` — `SESSION_END_REASON` is the constant `"other"` |
 | `declined_*.json` | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop` | `HookEventName` — events Cairn does not register |
 
-The session-end budget recorded in the same file — `SESSION_END_DEFAULT_TIMEOUT_SEC = 1`,
-`SESSION_END_MAX_TIMEOUT_SEC = 3` — is what `tests/tests/perf_session_close.rs` measures
-against, not something a payload can express.
+The same file recorded a one-second default session-end budget; payload fixtures cannot
+express timing guarantees.

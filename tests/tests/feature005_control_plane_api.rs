@@ -1444,6 +1444,7 @@ fn every_control_plane_read_refuses_an_unauthenticated_caller() {
     paths.push("/api/personal/knowledge".to_string());
     paths.push("/api/team/knowledge".to_string());
     paths.push("/api/system/health".to_string());
+    paths.push("/api/admin/logical-export".to_string());
     for path in paths {
         let (body, code) = get_json_status_bearer(&pg.server.base, &path, "not-a-real-token");
         assert_eq!(code, 401, "{path} answered {code}: {body}");
@@ -1456,13 +1457,24 @@ fn an_administration_only_read_refuses_a_member_server_side() {
     // The UI hides the nav entry, and that is not a control. The assertion is
     // made against the route, because the threat model is a member with a token
     // and a shell, not a member with a browser (FR-892).
-    let (body, code) = get(&pg, &pg.member, "/api/system/health");
-    assert_eq!(code, 403, "{body}");
-    assert_eq!(body["error"]["code"], "forbidden", "{body}");
+    for path in ["/api/system/health", "/api/admin/logical-export"] {
+        let (body, code) = get(&pg, &pg.member, path);
+        assert_eq!(code, 403, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden", "{path}: {body}");
+    }
+    let (body, code) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/admin/logical-import",
+        &json!({ "import_id": Uuid::now_v7(), "bundle": {} }),
+        &pg.member.token,
+    );
+    assert_eq!(code, 403, "logical import: {body}");
 
     make_admin(&pg, &pg.member);
-    let (body, code) = get(&pg, &pg.member, "/api/system/health");
-    assert_eq!(code, 200, "{body}");
+    for path in ["/api/system/health", "/api/admin/logical-export"] {
+        let (body, code) = get(&pg, &pg.member, path);
+        assert_eq!(code, 200, "{path}: {body}");
+    }
 }
 
 // ---------------------------------------------------------------------------

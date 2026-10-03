@@ -10,7 +10,7 @@
     "that finds a corpus smaller or narrower than its entry here fails.",
     "",
     "Entries name where the corpus lives. Some already exist and are referenced",
-    "rather than duplicated; the rest are owed by the tasks named in 'owed_by',",
+    "rather than duplicated; any incomplete entry must give a gap_reason,",
     "and their absence is a missing corpus rather than a passing test."
   ],
   "version": 1,
@@ -95,7 +95,8 @@
         "a genuinely different value that must still conflict"
       ],
       "location": "tests/tests/feature005_key_compat.rs",
-      "status": "present",
+      "status": "owed",
+      "gap_reason": "The v7-era key test was retired with the alpha.8 local-authority removal; alpha.9's upgrade corpus must re-establish this historical proof.",
       "notes": [
         "The fixture writes through the v7 schema and then migrates, so the row",
         "was written by code that predates the folding. A v8 fixture holding an",

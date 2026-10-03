@@ -33,9 +33,9 @@ export default function ProjectsPage() {
             <>
               Run{" "}
               <code className="bg-muted rounded px-1 py-0.5 font-mono text-xs">
-                cairn link --create
+                cairn setup
               </code>{" "}
-              inside a repository to share one.
+              inside an existing project repository to connect it.
             </>
           }
         />

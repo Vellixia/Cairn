@@ -24,7 +24,7 @@ export function humanize(value: string): string {
  * **The UI is not the authority boundary — the API is.** Every gate in this
  * control plane is enforced server-side, so any page here can be reached by
  * someone the server will turn away: a non-member typing a project URL, a
- * member opening `/system`. Rendering nothing in that case would read as "there
+ * member calling an administrator API. Rendering nothing in that case would read as "there
  * is nothing here", which is exactly the confusion FR-894a exists to prevent.
  * A refusal is a result, and it is shown as one.
  */

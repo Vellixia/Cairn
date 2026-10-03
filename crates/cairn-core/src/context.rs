@@ -13,12 +13,12 @@
 //! LEVEL 2  history and evidence       ── never automatic; explicit request only
 //! ```
 //!
-//! A budget is finite. Criterion text, blocker descriptions and warning detail
-//! are not. Guaranteeing that all of them fit would be a promise Cairn cannot
+//! A budget is finite. Warning detail and pinned context are not. Guaranteeing
+//! that all of them fit would be a promise Cairn cannot
 //! keep, so Level 0 splits:
 //!
 //! * **Tier 0a** — the guaranteed work state. Every item is O(1) in the size of
-//!   the project and the task, so the tier has a bounded worst case that fits
+//!   the project, so the tier has a bounded worst case that fits
 //!   the documented minimum budget. After any number of compactions the agent
 //!   still knows what it is doing, how far along it is, what is blocking it and
 //!   that something is wrong (FR-443).
@@ -28,22 +28,20 @@
 //!
 //! The reserve is a **cap on the lower levels, not a floor Level 0 must spend**.
 //! Unspent reserve returns to the general pool, which is why a project with no
-//! task, no warnings and no pins delivers exactly what it delivered before this
+//! active session, no warnings and no pins delivers exactly what it delivered before this
 //! feature existed (FR-442).
 
 use crate::budget::{estimate, Budget};
 use crate::domain::*;
-use crate::tasks::{self, BlockerFacts, CriterionFacts};
 use crate::wire::*;
 
 /// Sections, highest priority first (D8).
 pub const SECTION_ORDER: &[&str] = &[
-    "task",
     "repository",
     "previous_handoff",
     "known_failures",
     "decisions",
-    "task_memory",
+    "session_memory",
     "branch_memory",
     "project_memory",
     // Last, deliberately. A prior pattern from another project is the least
@@ -52,7 +50,7 @@ pub const SECTION_ORDER: &[&str] = &[
     "patterns",
     // Feature 004. Both after every project-scoped section, and personal
     // ahead of team: the same specificity gradient the order above already
-    // expresses (task > branch > project) continues past "now" — personal
+    // expresses (session > branch > project) continues past "now" — personal
     // knowledge is specific to the one account asking, team guidance is the
     // server-wide default with no actor-specific claim at all (FR-476, D422,
     // `contracts/recall-composition.md` §4).
@@ -61,17 +59,16 @@ pub const SECTION_ORDER: &[&str] = &[
 ];
 
 /// Sections whose loss means the briefing is materially degraded (SC-003).
-pub const HIGH_PRIORITY_SECTIONS: &[&str] = &["task", "repository", "previous_handoff"];
+pub const HIGH_PRIORITY_SECTIONS: &[&str] = &["repository", "previous_handoff"];
 
 /// Everything the briefing is assembled from. All recorded state.
 pub struct ContextInputs<'a> {
     pub project: &'a Project,
     pub repository: RepositoryState,
-    pub task: Option<&'a Task>,
     pub previous_handoff: Option<&'a Handoff>,
     pub decisions: &'a [String],
     pub known_failures: &'a [String],
-    pub task_memory: &'a [String],
+    pub session_memory: &'a [String],
     pub branch_memory: &'a [String],
     pub project_memory: &'a [String],
     /// Signal-matched prior patterns, already capped and ordered by the caller.
@@ -97,10 +94,6 @@ pub struct ContextInputs<'a> {
 /// The Level 0 inputs. All plain data — this crate never reaches the store.
 #[derive(Default)]
 pub struct Level0<'a> {
-    pub criteria: &'a [CriterionFacts],
-    pub blockers: &'a [BlockerFacts],
-    /// Blocker descriptions by id, so the most actionable one can be named.
-    pub blocker_text: &'a [(uuid::Uuid, String)],
     pub warnings: &'a [ContextWarning],
     pub pins: &'a [PinnedConstraint],
     /// The recorded next action of a diverged checkpoint. Phase 9 supplies it;
@@ -114,7 +107,6 @@ pub struct Level0<'a> {
 /// The bounds Level 0 admits within.
 #[derive(Debug, Clone, Copy)]
 pub struct Caps {
-    pub goal_max_tokens: usize,
     pub warnings_in_context_max: usize,
     pub pins_in_context_max: usize,
     /// `floor(limit * min_safe_context_fraction)` is computed by the caller from
@@ -142,7 +134,6 @@ pub const GLOBAL_SHARE_MAX: f64 = 0.15;
 impl Default for Caps {
     fn default() -> Self {
         Self {
-            goal_max_tokens: 60,
             warnings_in_context_max: 5,
             pins_in_context_max: 4,
             reserve_fraction: 0.40,
@@ -178,7 +169,6 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
     let mut briefing = Briefing {
         project: ProjectSummary::from(input.project),
         repository: RepositoryState::default(),
-        task: None,
         previous_handoff: None,
         decisions: Vec::new(),
         known_failures: Vec::new(),
@@ -197,9 +187,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
     // Tier 0a first, then Tier 0b, both drawing on the reserve before the
     // general pool. Tier 0b can never displace Tier 0a because it is admitted
     // after it.
-    if !admit_tier_0a(&mut briefing, input, &mut budget, &mut selection) {
-        omitted.push("task".into());
-    }
+    admit_tier_0a(&mut briefing, input, &mut budget, &mut selection);
     admit_tier_0b(&mut briefing, input, &mut budget, &mut selection);
 
     // Whatever Level 0 did not spend goes back. This single call is what makes
@@ -218,7 +206,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         match section {
             "known_failures" => input.known_failures.len(),
             "decisions" => input.decisions.len(),
-            "task_memory" => input.task_memory.len(),
+            "session_memory" => input.session_memory.len(),
             "branch_memory" => input.branch_memory.len(),
             "project_memory" => input.project_memory.len(),
             "patterns" => input.patterns.len(),
@@ -229,7 +217,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         match section {
             "known_failures" => b.known_failures.len(),
             "decisions" => b.decisions.len(),
-            "task_memory" => b.memory.task.len(),
+            "session_memory" => b.memory.session.len(),
             "branch_memory" => b.memory.branch.len(),
             "project_memory" => b.memory.project.len(),
             "patterns" => b.patterns.len(),
@@ -240,7 +228,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
     for section in SECTION_ORDER {
         let admitted = match *section {
             // Admitted above, as Tier 0a.
-            "task" | "repository" => continue,
+            "repository" => continue,
             "previous_handoff" => admit_handoff(&mut briefing, input, &mut budget),
             "known_failures" => {
                 briefing.known_failures = budget
@@ -252,10 +240,10 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                     budget.take_while_fits(input.decisions.iter().cloned(), |s| estimate(s) + 1);
                 briefing.decisions.len() == input.decisions.len()
             }
-            "task_memory" => {
-                briefing.memory.task =
-                    budget.take_while_fits(input.task_memory.iter().cloned(), |s| estimate(s) + 1);
-                briefing.memory.task.len() == input.task_memory.len()
+            "session_memory" => {
+                briefing.memory.session = budget
+                    .take_while_fits(input.session_memory.iter().cloned(), |s| estimate(s) + 1);
+                briefing.memory.session.len() == input.session_memory.len()
             }
             "branch_memory" => {
                 briefing.memory.branch = budget
@@ -306,7 +294,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                 },
                 section_total(section).saturating_sub(section_kept(&briefing, section)),
                 OmissionReason::BudgetExhausted,
-                "cairn memory search",
+                "cairn_search",
             );
         }
     }
@@ -558,13 +546,7 @@ fn admit_global_section(
 // Tier 0a — the guaranteed work state
 // ---------------------------------------------------------------------------
 
-/// Admit the O(1) work state: repository, then the task's identity, bounded
-/// goal, status, derived counts, readiness and the single most actionable
-/// blocker, then the warning **kinds** with counts.
-///
-/// Returns false only when the task itself did not fit, which at any budget at
-/// or above the documented minimum cannot happen — the tier's worst case is
-/// bounded precisely so that it cannot.
+/// Admit bounded repository state and warning kinds with counts.
 fn admit_tier_0a(
     b: &mut Briefing,
     input: &ContextInputs<'_>,
@@ -621,51 +603,6 @@ fn admit_tier_0a(
         }
     }
 
-    let Some(t) = input.task else { return true };
-
-    // The goal is bounded rather than dropped: the tier stays O(1) by
-    // truncating, never by omitting (FR-443).
-    let (goal, goal_truncated) = truncate_to_tokens(&t.goal, input.level0.caps.goal_max_tokens);
-    let progress = tasks::progress(input.level0.criteria);
-    let readiness = tasks::completion_readiness(input.level0.criteria, input.level0.blockers);
-    let open_blockers = input
-        .level0
-        .blockers
-        .iter()
-        .filter(|x| !x.deleted && x.state == BlockerState::Open)
-        .count();
-    let blocker = most_actionable_blocker(input);
-
-    // A fixed shape, so the cost does not grow with the project or the task.
-    let cost =
-        estimate(&t.title) + estimate(&goal) + estimate(blocker.as_deref().unwrap_or("")) + 24;
-    if !budget.try_spend_reserved(cost) {
-        return false;
-    }
-
-    b.task = Some(BriefingTask {
-        id: t.id,
-        title: t.title.clone(),
-        goal,
-        // Feature 001's array stays exactly as it was for its five readers; the
-        // Level 0 rendering uses `criteria` below.
-        acceptance_criteria: t.acceptance_criteria.clone(),
-        status: t.status,
-        progress: Some(progress),
-        completion_readiness: Some(readiness),
-        open_blockers: Some(open_blockers),
-        blocker,
-        goal_truncated,
-        criteria: Vec::new(),
-        criteria_omitted: None,
-    });
-    sel.included.push(SelectedItem {
-        level: ContextLevel::MinimumSafe,
-        kind: "task".into(),
-        id: t.id.to_string(),
-        reasons: vec![SelectionReason::TaskBinding],
-        cost,
-    });
     true
 }
 
@@ -673,8 +610,7 @@ fn admit_tier_0a(
 // Tier 0b — bounded detail
 // ---------------------------------------------------------------------------
 
-/// Warning detail, then pins, then criterion text in action order, then further
-/// blockers — each until its cap or the budget binds (FR-444, FR-446, FR-448).
+/// Warning detail and pins, each until its cap or the budget binds.
 fn admit_tier_0b(
     b: &mut Briefing,
     input: &ContextInputs<'_>,
@@ -742,45 +678,6 @@ fn admit_tier_0b(
         },
         "",
     );
-
-    // 10 — criterion text, in action order: blocked, then satisfied but
-    // unverified, then pending, then verified, then waived. The ones an agent
-    // must act on arrive first.
-    let ordered = tasks::action_order(input.level0.criteria);
-    let total = ordered.len();
-    let mut shown = Vec::new();
-    for c in ordered {
-        let label = tasks::criterion_label(c.ordinal);
-        let cost = estimate(&label) + estimate(&c.text) + 3;
-        if !budget.try_spend_reserved(cost) {
-            break;
-        }
-        sel.included.push(SelectedItem {
-            level: ContextLevel::MinimumSafe,
-            kind: "criterion".into(),
-            id: c.id.to_string(),
-            reasons: vec![SelectionReason::TaskBinding],
-            cost,
-        });
-        shown.push(BriefingCriterion {
-            label,
-            text: c.text.clone(),
-            state: c.state,
-            verification: c.verification,
-        });
-    }
-    let dropped = total.saturating_sub(shown.len());
-    if let Some(task) = b.task.as_mut() {
-        task.criteria = shown;
-        task.criteria_omitted = (dropped > 0).then_some(dropped);
-    }
-    note_omission(
-        sel,
-        "criterion",
-        dropped,
-        OmissionReason::BudgetExhausted,
-        "cairn task get <id>",
-    );
 }
 
 /// `⚠ 1 conflict · 1 drift · checkpoint diverged` — the kinds and their counts,
@@ -805,22 +702,20 @@ fn warning_kind_counts(warnings: &[ContextWarning]) -> String {
     parts.join(" · ")
 }
 
-/// divergence → task → conflict → drift (`contracts/continuity-context.md`).
+/// checkpoint → conflict → drift (`contracts/continuity-context.md`).
 fn warning_precedence(kind: &str) -> usize {
     match kind {
-        "task_divergence" | "checkpoint" => 0,
-        "task" => 1,
-        "conflict" => 2,
-        "drift" => 3,
-        _ => 4,
+        "checkpoint" => 0,
+        "conflict" => 1,
+        "drift" => 2,
+        _ => 3,
     }
 }
 
 fn warning_reason(kind: &str) -> SelectionReason {
     match kind {
         "conflict" => SelectionReason::ConflictWarning,
-        "task_divergence" | "checkpoint" => SelectionReason::CheckpointAssumption,
-        "task" => SelectionReason::TaskBinding,
+        "checkpoint" => SelectionReason::CheckpointAssumption,
         _ => SelectionReason::DriftWarning,
     }
 }
@@ -841,42 +736,6 @@ fn note_omission(
         reason,
         retrieval: retrieval.to_string(),
     });
-}
-
-/// The blocker an agent should act on: the oldest still open.
-///
-/// One bounded line. Which one is "most actionable" is not a judgement Cairn can
-/// make from a description, so it uses the one that has been in force longest —
-/// deterministic, and explainable.
-fn most_actionable_blocker(input: &ContextInputs<'_>) -> Option<String> {
-    let open = input
-        .level0
-        .blockers
-        .iter()
-        .find(|b| !b.deleted && b.state == BlockerState::Open)?;
-    let text = input
-        .level0
-        .blocker_text
-        .iter()
-        .find(|(id, _)| *id == open.id)
-        .map(|(_, t)| t.as_str())
-        .unwrap_or("");
-    let (bounded, _) = truncate_to_tokens(text, 24);
-    Some(bounded)
-}
-
-/// Truncate to at most `max_tokens` estimated tokens, on a character boundary.
-///
-/// Returns whether anything was dropped, so the briefing can say so rather than
-/// presenting a cut sentence as the whole goal.
-fn truncate_to_tokens(text: &str, max_tokens: usize) -> (String, bool) {
-    if estimate(text) <= max_tokens {
-        return (text.to_string(), false);
-    }
-    let max_chars = (max_tokens as f64 * crate::budget::CHARS_PER_TOKEN) as usize;
-    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    out.push('…');
-    (out, true)
 }
 
 fn admit_handoff(b: &mut Briefing, input: &ContextInputs<'_>, budget: &mut Budget) -> bool {
@@ -940,11 +799,10 @@ mod tests {
                 unstaged: 2,
                 untracked: 0,
             },
-            task: None,
             previous_handoff: None,
             decisions: &[],
             known_failures: &[],
-            task_memory: &[],
+            session_memory: &[],
             branch_memory: &[],
             project_memory: mem,
             patterns: &[],
@@ -992,28 +850,6 @@ mod tests {
         assert_eq!(out.briefing.repository.branch, "main");
         assert!(out.omitted_sections.contains(&"project_memory".to_string()));
         assert!(kept_all_high_priority(&out.omitted_sections));
-    }
-
-    #[test]
-    fn task_goal_and_criteria_lead_the_briefing() {
-        let p = project();
-        let task = Task {
-            id: new_id(),
-            project_id: p.id,
-            title: "Rate limiting".into(),
-            goal: "Requests over the limit get 429".into(),
-            acceptance_criteria: vec!["429 above threshold".into()],
-            status: TaskStatus::InProgress,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            deleted_at: None,
-        };
-        let mut i = inputs(&p, &[]);
-        i.task = Some(&task);
-        let out = assemble(&i, 3000);
-        let bt = out.briefing.task.expect("task section");
-        assert_eq!(bt.goal, "Requests over the limit get 429");
-        assert_eq!(bt.acceptance_criteria.len(), 1);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 > Product: **Cairn**
 > Updated: **2026-09-27**
 > Published baseline: **[v0.1.0-alpha.8](https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.8)** — tag `4cbb2c6`, published 2026-09-25.
-> Workspace: [Cargo.toml](../../Cargo.toml) declares **0.1.0-alpha.7**. This checkout is not the alpha.8 release source.
+> Workspace: [Cargo.toml](../../Cargo.toml) declares **0.1.0-alpha.9** on the alpha.9 implementation branch, based on alpha.8 source. This is not a published release.
 
 ## Status
 
@@ -268,7 +268,7 @@ Evidence: [tagged changelog — 0.1.0-alpha.8](https://github.com/Vellixia/Cairn
 
 **Goal:** one pinned candidate supports browser → authorized project → setup → accepted event → inspectable memory → later recall, with honest recovery and release evidence.
 
-**Implementation lead:** reported uncommitted recovery patch on `codex/session-recovery-tests`, based on `4cbb2c6`. These statuses describe that patch, not this documentation branch or a committed release candidate:
+**Implementation state:** `codex/alpha9-main` carries committed alpha.8-derived source and recovery work in the main worktree. The release has not been tagged; the statuses below remain in progress until candidate gates pass:
 
 - [~] Recover hook failures through current MCP tools with exact caller key/directory; never imply registration succeeded when it did not.
 - [~] Render actual server budget/section envelopes, reduced/cached/empty replies, and outages; reject malformed populated sections.
@@ -278,7 +278,7 @@ Evidence: [tagged changelog — 0.1.0-alpha.8](https://github.com/Vellixia/Cairn
 - [~] Refresh installed skill/contract guidance to current commands/scopes while preserving user edits.
 - [~] Require database prerequisites in mandatory test lanes; optional missing infrastructure reports `NOT RUN`.
 
-**Candidate entry (N0):** choose alpha.8-derived source, commit the recovery patch separately, record reviewed SHA, then build matching CLI/daemon/server/web. This documentation branch declares alpha.7 and cannot serve as alpha.9 implementation source. Do not merge unrelated dirty work blindly.
+**Candidate entry (N0):** preserve preexisting main-worktree edits, review and commit the alpha.8-derived alpha.9 implementation, record the exact candidate SHA, then build matching CLI/daemon/server/web. A working-tree test pass is not candidate evidence.
 
 **Reported local evidence, 2026-09-27:** recovery patch had some successful local checks; final PostgreSQL/setup rerun was incomplete after test-container/storage failure. Patch and raw logs are not included in this PR. Treat this as an investigation lead, not a pinned candidate failure or acceptance result. Alpha.9 must produce a fresh evidence report; ordinary alpha.7 workspace tests cannot close this gate.
 

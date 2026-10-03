@@ -88,10 +88,10 @@ pub const LEVEL_NONE: &str = "none";
 /// The durable sections, in `SECTION_ORDER`.
 ///
 /// Only stable-reference sections participate in dedup and in delivery
-/// (`contracts/retrieval-delivery.md` §4); `task`, `repository`, `decisions`
+/// (`contracts/retrieval-delivery.md` §4); repository and decisions
 /// and the rest are re-derived fresh every delivery and are the daemon's.
 pub const DURABLE_SECTIONS: &[&str] = &[
-    "task_memory",
+    "session_memory",
     "branch_memory",
     "project_memory",
     "patterns",
@@ -474,7 +474,7 @@ async fn generate(
     // **The reserve stays withheld here, and that is the whole reason it
     // exists.** One budget is shared by two assemblers: this module selects the
     // durable sections, and the daemon adds the Level 0 it alone can see — the
-    // task, the repository's working state, the previous handoff, the warnings
+    // repository working state, previous handoff, warnings
     // and the pins. Level 0 is the part a briefing may not lose.
     //
     // Releasing the reserve here would hand the whole budget to durable memory
@@ -529,7 +529,7 @@ async fn generate(
 
             rank += 1;
             let rule = match *section {
-                "task_memory" | "branch_memory" | "project_memory" => RULE_PROJECT_RESERVE,
+                "session_memory" | "branch_memory" | "project_memory" => RULE_PROJECT_RESERVE,
                 "personal_notes" | "team_guidance" => RULE_GLOBAL_SHARE,
                 _ => RULE_GENERAL_POOL,
             };
@@ -707,27 +707,23 @@ async fn gather(
 ) -> ApiResult<Vec<Candidate>> {
     let mut out = Vec::new();
 
-    let session: Option<(Option<Uuid>, String)> =
-        sqlx::query_as("SELECT task_id, branch FROM sessions WHERE id = $1")
-            .bind(session_id)
-            .fetch_optional(pool)
-            .await?;
-    let (task_id, branch) = session.unwrap_or((None, String::new()));
+    let session: Option<(String,)> = sqlx::query_as("SELECT branch FROM sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
+    let (branch,) = session.unwrap_or((String::new(),));
 
-    // Project knowledge, most specific scope first — the same task > branch >
-    // project gradient the section order already expresses.
-    if let Some(task_id) = task_id {
-        out.extend(
-            project_memory(
-                pool,
-                binding.project_id,
-                "task",
-                &task_id.to_string(),
-                "task_memory",
-            )
-            .await?,
-        );
-    }
+    // Project knowledge, most specific scope first: session, branch, project.
+    out.extend(
+        project_memory(
+            pool,
+            binding.project_id,
+            "session",
+            &session_id.to_string(),
+            "session_memory",
+        )
+        .await?,
+    );
     if !branch.is_empty() {
         out.extend(
             project_memory(pool, binding.project_id, "branch", &branch, "branch_memory").await?,

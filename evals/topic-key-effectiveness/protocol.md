@@ -1,7 +1,7 @@
 # Protocol — topic-key effectiveness
 
 **Informational. Not a gate.** Nothing here can fail a build, and there is no
-threshold. See [contracts/evaluation.md](../../specs/003-project-intelligence/contracts/evaluation.md)
+threshold. See [contracts/evaluation.md](../../docs/history/alpha7/intelligence-evaluation.md)
 §Topic-key effectiveness for why.
 
 The question this answers is a **product** question: when an agent is told to

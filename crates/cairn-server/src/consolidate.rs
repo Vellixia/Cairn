@@ -56,6 +56,10 @@ use cairn_core::knowledge::{
 use cairn_core::validate::validate_candidate_content;
 use sqlx::PgPool;
 use std::collections::BTreeSet;
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -333,7 +337,11 @@ impl Consolidator {
     /// task: the failure may be one session's, and a server that stopped
     /// consolidating on the first error would accumulate a backlog silently for
     /// as long as it stayed up.
-    pub async fn run(self) {
+    pub async fn run(self, last_progress_ms: Arc<AtomicI64>) {
+        // Establish the baseline for a newly started worker. A later eligible
+        // backlog without a completed pass can then become stalled rather than
+        // remaining permanently "never observed".
+        last_progress_ms.store(now_millis(), Ordering::Release);
         tracing::info!(
             worker = %self.worker,
             batch = BATCH_EVENTS,
@@ -342,8 +350,12 @@ impl Consolidator {
             "consolidation started"
         );
         loop {
-            if let Err(e) = self.pass().await {
-                tracing::warn!(worker = %self.worker, error = %e, "a consolidation pass failed");
+            match self.pass().await {
+                Ok(true) => last_progress_ms.store(now_millis(), Ordering::Release),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(worker = %self.worker, error = %e, "a consolidation pass failed")
+                }
             }
             // Retention rides the same task rather than a second one (FR-847).
             // It is bounded per sweep, so it never becomes a long lock on a
@@ -535,6 +547,10 @@ impl Consolidator {
     }
 }
 
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// What a pass produced: the events it consolidated, or why it produced nothing.
 type PassOutcome = Result<Vec<Uuid>, String>;
 
@@ -561,17 +577,18 @@ mod refusal {
     // disagrees with existing knowledge is persisted alongside it rather than
     // refused — but a future resolver that must refuse one has the term
     // waiting, spelled the way the contract spells it.
-    #![allow(dead_code)]
-
     pub const KEY_NORMALIZATION_FAILED: &str = "key_normalization_failed";
     pub const KEY_NOT_DERIVABLE: &str = "key_not_derivable";
     pub const PRIVACY_REFUSED: &str = "privacy_refused";
     pub const UNVERIFIABLE_SOURCE: &str = "unverifiable_source";
+    #[cfg(test)]
     pub const CONFLICTS_WITH_EXISTING: &str = "conflicts_with_existing";
+    #[cfg(test)]
     pub const BOUND_EXCEEDED: &str = "bound_exceeded";
     pub const EXTRACTOR_MALFORMED_OUTPUT: &str = "extractor_malformed_output";
 
     /// Every term, so a test can hold the vocabulary to its stated size.
+    #[cfg(test)]
     pub const ALL: &[&str] = &[
         KEY_NORMALIZATION_FAILED,
         KEY_NOT_DERIVABLE,
@@ -1707,6 +1724,8 @@ fn rebuild(
 pub struct ConsolidationHealth {
     /// Events accepted and not yet consolidated.
     pub backlog_depth: i64,
+    /// Sessions with pending work that the worker can elect now.
+    pub eligible_pending_sessions: i64,
     /// When the oldest of them was enqueued, or absent when there is no
     /// backlog. Absent is a different answer from zero and is reported as one.
     pub oldest_enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -1726,6 +1745,15 @@ pub struct ConsolidationHealth {
 const HEALTH: &str = "\
 SELECT
   (SELECT count(*) FROM consolidation_work WHERE state = 'pending'),
+  (SELECT count(*) FROM consolidation_session c
+     WHERE (c.state = 'pending' OR (c.state = 'claimed' AND c.claim_expires_at < now()))
+       AND (c.eligible_since IS NOT NULL
+            OR EXISTS (SELECT 1 FROM sessions ss WHERE ss.id = c.session_id
+                         AND (ss.ended_at IS NOT NULL OR ss.status <> 'active'))
+            OR (SELECT count(*) FROM consolidation_work w
+                 WHERE w.project_id = c.project_id AND w.session_id = c.session_id
+                   AND w.state = 'pending' AND w.attempts < 5) >= 200
+            OR c.oldest_enqueued_at <= now() - make_interval(secs => 600))),
   (SELECT min(enqueued_at) FROM consolidation_work WHERE state = 'pending'),
   (SELECT count(*) FROM consolidation_work WHERE state = 'failed'),
   (SELECT count(*) FROM consolidation_runs WHERE state = 'finished'),
@@ -1740,7 +1768,8 @@ SELECT
 /// behind is consolidation" must be answerable while a pass holds one, which is
 /// exactly when somebody asks it.
 pub async fn health(pool: &PgPool) -> Result<ConsolidationHealth, sqlx::Error> {
-    let row: (
+    type HealthRow = (
+        i64,
         i64,
         Option<chrono::DateTime<chrono::Utc>>,
         i64,
@@ -1749,16 +1778,18 @@ pub async fn health(pool: &PgPool) -> Result<ConsolidationHealth, sqlx::Error> {
         i64,
         i64,
         i64,
-    ) = sqlx::query_as(HEALTH).fetch_one(pool).await?;
+    );
+    let row: HealthRow = sqlx::query_as(HEALTH).fetch_one(pool).await?;
     Ok(ConsolidationHealth {
         backlog_depth: row.0,
-        oldest_enqueued_at: row.1,
-        failed_events: row.2,
-        runs_finished: row.3,
-        runs_failed: row.4,
-        candidates_proposed: row.5,
-        candidates_accepted: row.6,
-        candidates_refused: row.7,
+        eligible_pending_sessions: row.1,
+        oldest_enqueued_at: row.2,
+        failed_events: row.3,
+        runs_finished: row.4,
+        runs_failed: row.5,
+        candidates_proposed: row.6,
+        candidates_accepted: row.7,
+        candidates_refused: row.8,
     })
 }
 

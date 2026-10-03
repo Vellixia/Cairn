@@ -387,13 +387,13 @@ fn inspect_plugin(
     match recorded.and_then(|r| r.content_hash.clone()) {
         Some(recorded_hash) if recorded_hash == have => at(HealthCondition::Outdated)
             .detail("the installed Cairn plugin is behind this build")
-            .remedy("cairn repair opencode"),
+            .remedy("cairn setup"),
         Some(_) => at(HealthCondition::Modified)
             .detail("the Cairn plugin file was edited by hand")
-            .remedy("cairn repair opencode --force"),
+            .remedy("resolve the edit manually, then run `cairn setup`"),
         None => at(HealthCondition::Outdated)
             .detail("the installed Cairn plugin differs from this build")
-            .remedy("cairn repair opencode"),
+            .remedy("cairn setup"),
     }
 }
 

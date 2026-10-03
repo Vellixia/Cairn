@@ -95,10 +95,6 @@ fn list(pg: &Pg, who: &Account) -> (Value, u16) {
     get_json_status_bearer(&pg.server.base, "/api/patterns", &who.token)
 }
 
-fn changes(pg: &Pg, who: &Account) -> (Value, u16) {
-    get_json_status_bearer(&pg.server.base, "/api/sync/changes/patterns", &who.token)
-}
-
 fn deliver(pg: &Pg, who: &Account, envelope: &Value) -> (Value, u16) {
     post_json_status_bearer(&pg.server.base, "/api/commands", envelope, &who.token)
 }
@@ -256,14 +252,6 @@ fn a_pattern_is_invisible_to_every_account_but_its_owner() {
             "{label} was shown the owner's patterns: {listed}"
         );
 
-        let (feed, code) = changes(&pg, who);
-        assert_eq!(code, 200, "{label} was refused the feed: {feed}");
-        assert_eq!(
-            feed["patterns"].as_array().map(Vec::len),
-            Some(0),
-            "{label} pulled the owner's patterns out of the changes feed: {feed}"
-        );
-
         let (refusal, code) = forget(&pg, who, id, &json!({}));
         assert_eq!(
             code, 404,
@@ -368,31 +356,6 @@ fn a_forgotten_pattern_leaves_the_list_and_reaches_a_cache_as_a_tombstone() {
         Some(kept.to_string().as_str()),
         "{listed}"
     );
-
-    // Present in the feed as a tombstone. This is the only way a cache that
-    // already holds the pattern learns it was withdrawn: a deleted row reaches
-    // nobody, so the row stays and travels once more, empty.
-    let (feed, code) = changes(&pg, &pg.owner);
-    assert_eq!(code, 200, "{feed}");
-    let rows = feed["patterns"].as_array().expect("patterns array");
-    assert_eq!(rows.len(), 2, "the feed dropped a row: {feed}");
-    let tomb = rows
-        .iter()
-        .find(|r| r["pattern_id"].as_str() == Some(id.to_string().as_str()))
-        .unwrap_or_else(|| panic!("the forgotten pattern is not in the feed: {feed}"));
-    assert!(
-        tomb["forgotten_at"].is_string(),
-        "the tombstone carries no forgotten_at, so a cache cannot tell it apart \
-         from a live row: {tomb}"
-    );
-    for emptied in ["title", "problem", "root_cause", "approach"] {
-        assert_eq!(
-            tomb[emptied], "",
-            "the tombstone still carries `{emptied}`: {tomb}"
-        );
-    }
-    assert_eq!(tomb["constraints"], json!([]), "{tomb}");
-    assert_eq!(tomb["applicability"], json!([]), "{tomb}");
 
     // Forgetting again is the state the caller asked for, so it succeeds. A
     // `404` would tell a client its instruction had failed when it had already
@@ -806,27 +769,6 @@ fn one_command_id_under_two_accounts_is_two_commands() {
     }
 }
 
-/// Percent-encode a cursor for a query string.
-///
-/// **Not optional, and the reason is easy to miss.** A cursor is
-/// `<rfc3339>|<uuid>`, and an RFC 3339 instant ends `+00:00`. A bare `+` in a
-/// query string decodes to a *space*, so an unencoded cursor reaches the server
-/// as an unparsable timestamp — and `PageCursor::decode` is deliberately
-/// lenient, falling back to the start of the feed rather than erroring. The
-/// visible symptom is the feed re-delivering a page it had already served,
-/// which reads exactly like a broken cursor comparison and is not one.
-///
-/// The daemon does this in `sync::urlencode`; this mirrors it so the test
-/// exercises the same request the daemon actually sends.
-fn urlencode(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            other => format!("%{:02X}", other as u32),
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // The read routes are authenticated and account-scoped
 // ---------------------------------------------------------------------------
@@ -835,62 +777,10 @@ fn urlencode(s: &str) -> String {
 fn the_pattern_read_routes_refuse_an_unauthenticated_caller() {
     let pg = pg!();
     let (_, _) = promote(&pg, &pg.owner, &safe_pattern());
-    for path in ["/api/patterns", "/api/sync/changes/patterns"] {
-        let code = pg.server.get_status(path, "not-a-real-token");
-        assert_eq!(
-            code, 401,
-            "{path} is reachable without authentication, which would hand every \
-             account's patterns to anyone who can reach the port"
-        );
-    }
-}
-
-#[test]
-fn the_changes_feed_resumes_from_its_own_cursor() {
-    let pg = pg!();
-    promote(&pg, &pg.owner, &safe_pattern());
-    let (first, code) = changes(&pg, &pg.owner);
-    assert_eq!(code, 200, "{first}");
-    assert_eq!(first["patterns"].as_array().map(Vec::len), Some(1));
-    let cursor = first["cursor"].as_str().expect("a cursor").to_string();
-
-    // Nothing new: the same cursor returns an empty page rather than the row
-    // again.
-    let (empty, code) = get_json_status_bearer(
-        &pg.server.base,
-        &format!("/api/sync/changes/patterns?since={}", urlencode(&cursor)),
-        &pg.owner.token,
-    );
-    assert_eq!(code, 200, "{empty}");
     assert_eq!(
-        empty["patterns"].as_array().map(Vec::len),
-        Some(0),
-        "the feed re-delivered a row the cursor had already passed: {empty}"
+        pg.server.get_status("/api/patterns", "not-a-real-token"),
+        401
     );
-
-    // A forget moves the row back into the feed, which is the whole reason the
-    // cursor is `GREATEST(created_at, updated_at, forgotten_at)` and not
-    // `created_at`: a cache that had already passed the row would otherwise
-    // never learn it was withdrawn.
-    let (listed, _) = list(&pg, &pg.owner);
-    let id: Uuid = listed["patterns"][0]["pattern_id"]
-        .as_str()
-        .expect("a pattern")
-        .parse()
-        .expect("uuid");
-    forget(&pg, &pg.owner, id, &json!({}));
-    let (after, code) = get_json_status_bearer(
-        &pg.server.base,
-        &format!("/api/sync/changes/patterns?since={}", urlencode(&cursor)),
-        &pg.owner.token,
-    );
-    assert_eq!(code, 200, "{after}");
-    assert_eq!(
-        after["patterns"].as_array().map(Vec::len),
-        Some(1),
-        "a forget never reached the feed, so no cache can learn of it: {after}"
-    );
-    assert!(after["patterns"][0]["forgotten_at"].is_string(), "{after}");
 }
 
 /// The owner's pattern list is bounded **and** paginated, and the daemon's

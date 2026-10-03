@@ -18,19 +18,18 @@ rather than a footnote to it:
 **Whoever can set the server's environment and restart the process can always
 obtain administrator access.**
 
-The account named by `CAIRN_ADMIN_EMAIL` and `CAIRN_ADMIN_PASSWORD` is
-re-applied on every start — its password, its `admin` role, and its `active`
-status. That is deliberate, and it is the only recovery path a self-hosted
-deployment has: an operator who demotes or disables the last administrator has
-no supported API left to recover through, and without this they would be locked
-out of their own server with no remedy short of editing the database by hand.
+When no administrator exists, the account named by `CAIRN_ADMIN_EMAIL` and
+`CAIRN_ADMIN_PASSWORD` is created or promoted to `admin` and `active`; an
+existing administrator's password and role are not overwritten on restart.
+
+If every administrator has been demoted or disabled, bootstrap promotes the
+configured account without changing its existing password or profile.
 
 Two consequences follow, and neither is a defect:
 
 - The environment-named account cannot be demoted, disabled, or have its
   password reset through the API. Each is refused with a message naming
-  `CAIRN_ADMIN_EMAIL`, because a change a restart would silently revert is worse
-  than a rejection — the operator walks away believing it took effect.
+  `CAIRN_ADMIN_EMAIL`.
 - Anyone with shell access to the host, or with the ability to change the
   service's environment and restart it, is effectively an administrator whatever
   the `users` table says.

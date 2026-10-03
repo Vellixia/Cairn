@@ -16,8 +16,8 @@ block = Record durable facts, decisions, conventions, failures and procedures â€
 mcp = Record durable facts, decisions, conventions, failures and procedures with `cairn_remember` â€” never routine tool calls.
 
 [rule scope]
-block = Use the narrowest correct scope: task, else branch, else project.
-mcp = Use the narrowest correct scope: task, else branch, else project.
+block = Use the narrowest correct scope: session, else branch, else project.
+mcp = Use the narrowest correct scope: session, else branch, else project.
 
 [rule evidence]
 block = Never invent an evidence observation identifier.
@@ -30,10 +30,6 @@ mcp = Never put secrets, credentials, raw prompts or unbounded output into memor
 [rule lifecycle]
 block = Session boundaries, checkpoints and handoffs are automatic here. Do not hand-roll them.
 mcp = Open and close sessions with `cairn_session`; this client has no automatic lifecycle.
-
-[rule task]
-block = Bind work to a Cairn task when one applies.
-mcp = Bind work to a Cairn task when one applies.
 
 [rule depth]
 block = For deeper workflows, use the Cairn Skill.

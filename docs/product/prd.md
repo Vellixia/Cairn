@@ -3,9 +3,9 @@
 > **Product:** Cairn
 > **Version:** v0.1.0-alpha.9 target; staged through v0.1.0
 > **Status:** Draft
-> **Updated:** 2026-09-27
+> **Updated:** 2026-09-28
 
-This document defines what Cairn should achieve for users. [Roadmap](roadmap.md) owns version scope, engineering work and release gates. Published alpha.8 is the baseline; this alpha.7 checkout does not establish target acceptance. Targets below are proposals for review, not measured results.
+This document defines what Cairn should achieve for users. [Roadmap](roadmap.md) owns version scope, engineering work and release gates. Published alpha.8 is the baseline; this alpha.9 candidate does not establish target acceptance until its release gates pass. Targets below are proposals for review, not measured results.
 
 ## 1. Overview
 

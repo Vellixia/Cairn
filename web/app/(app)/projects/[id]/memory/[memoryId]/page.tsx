@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { use } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { use, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Pin, ShieldCheck } from "lucide-react";
-import { api, type MemoryDetail } from "@/lib/api";
+import { api, type MemoryDetail, type RelationKind } from "@/lib/api";
 import {
   ApiErrorState,
   Field,
@@ -15,6 +15,7 @@ import { ListSkeleton, PageHeader, formatDate } from "@/components/page";
 import { ReferenceChip } from "@/components/reference";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 export default function MemoryDetailPage({
@@ -23,10 +24,21 @@ export default function MemoryDetailPage({
   params: Promise<{ id: string; memoryId: string }>;
 }) {
   const { id, memoryId } = use(params);
+  const [replacement, setReplacement] = useState("");
+  const [relatedId, setRelatedId] = useState("");
+  const [relationKind, setRelationKind] = useState<RelationKind>("reinforces");
+  const queryClient = useQueryClient();
   const detail = useQuery({
     queryKey: ["memory", memoryId],
     queryFn: () => api.memory(memoryId),
   });
+  const graph = useQuery({ queryKey: ["graph", id, memoryId], queryFn: () => api.graph(id, memoryId, 2) });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["memory", memoryId] });
+  const reinforce = useMutation({ mutationFn: () => api.reinforceMemory(memoryId), onSuccess: refresh });
+  const pin = useMutation({ mutationFn: () => api.pinMemory(memoryId, !memory?.pinned), onSuccess: refresh });
+  const forget = useMutation({ mutationFn: () => api.forgetMemory(memoryId), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["memories", id] }) });
+  const supersede = useMutation({ mutationFn: () => api.supersedeMemory(memoryId, memory!.type, memory!.scope, replacement), onSuccess: () => { setReplacement(""); refresh(); } });
+  const relate = useMutation({ mutationFn: () => api.relateMemory(id, memoryId, relatedId, relationKind), onSuccess: () => { setRelatedId(""); refresh(); } });
 
   const memory = detail.data?.memory;
 
@@ -50,10 +62,13 @@ export default function MemoryDetailPage({
       {memory && (
         <div className="space-y-4" data-testid="memory-detail">
           <Content memory={memory} />
+          <Card><CardContent className="flex flex-wrap gap-2"><Button size="sm" onClick={() => reinforce.mutate()}>Reinforce</Button><Button size="sm" variant="outline" onClick={() => pin.mutate()}>{memory.pinned ? "Unpin" : "Pin"}</Button><Button size="sm" variant="destructive" onClick={() => forget.mutate()}>Forget</Button></CardContent></Card>
+          <Card><CardContent className="space-y-3"><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (replacement.trim()) supersede.mutate(); }}><Input value={replacement} onChange={(event) => setReplacement(event.target.value)} placeholder="Replacement memory" aria-label="Replacement memory" /><Button size="sm" type="submit">Supersede</Button></form><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); if (relatedId.trim()) relate.mutate(); }}><Input value={relatedId} onChange={(event) => setRelatedId(event.target.value)} placeholder="Related memory ID" aria-label="Related memory ID" /><select value={relationKind} onChange={(event) => setRelationKind(event.target.value as RelationKind)} className="border rounded px-2 text-sm"><option value="reinforces">reinforces</option><option value="duplicates">duplicates</option><option value="supersedes">supersedes</option><option value="conflicts_with">conflicts with</option><option value="narrows">narrows</option><option value="not_applicable_to">not applicable to</option></select><Button size="sm" type="submit">Relate</Button></form></CardContent></Card>
           <Provenance memory={memory} projectId={id} />
           <Evidence memory={memory} />
           <Verification memory={memory} />
           <Relations memory={memory} projectId={id} />
+          <Card data-testid="memory-graph"><CardHeader><CardTitle className="text-sm font-medium">Graph</CardTitle></CardHeader><CardContent>{graph.data?.edges.length ? <ul className="text-sm">{graph.data.edges.map((edge) => <li key={`${edge.from}-${edge.to}-${edge.kind}`}>{edge.kind} · {edge.depth} hop</li>)}</ul> : <p className="text-muted-foreground text-sm">No related memory.</p>}</CardContent></Card>
           <Usage memory={memory} projectId={id} />
         </div>
       )}
@@ -355,11 +370,6 @@ function Usage({
   memory: MemoryDetail;
   projectId: string;
 }) {
-  // The canonical key for a project memory. Written out rather than read from
-  // the response because the detail route carries no self-reference — and the
-  // domain is not a guess here: this route only ever serves project memories,
-  // which is exactly why the two-part reference can be reconstructed safely.
-  const referenceKey = `knowledge:project:${memory.id}`;
   return (
     <Card>
       <CardHeader className="flex flex-wrap items-center justify-between gap-2">
@@ -373,7 +383,7 @@ function Usage({
           data-testid="usage-view-all"
           render={
             <Link
-              href={`/projects/${projectId}/retrievals?reference_key=${encodeURIComponent(referenceKey)}`}
+              href={`/projects/${projectId}#retrieval`}
             />
           }
         >
@@ -390,7 +400,7 @@ function Usage({
             {memory.retrieval_usage.map((u) => (
               <li key={u.trace_id} data-testid="usage-row">
                 <Link
-                  href={`/projects/${projectId}/retrievals/${u.trace_id}`}
+                  href={`/projects/${projectId}/memory`}
                   className="hover:bg-accent/50 flex flex-wrap items-center gap-2 rounded-md px-2 py-1.5 text-sm transition"
                 >
                   <Badge

@@ -108,18 +108,7 @@ macro_rules! text_enum {
     };
 }
 
-#[allow(unused_imports)]
 pub(crate) use text_enum;
-
-text_enum!(
-    /// Task lifecycle (FR-037). No revision history exists (FR-039).
-    TaskStatus, "task status", {
-        Todo => "todo",
-        InProgress => "in_progress",
-        Done => "done",
-        Blocked => "blocked",
-    }
-);
 
 text_enum!(
     /// Session lifecycle (FR-007). A session leaves `Active` only at the
@@ -161,7 +150,6 @@ text_enum!(
     MemoryScope, "memory scope", {
         Project => "project",
         Branch => "branch",
-        Task => "task",
         Session => "session",
     }
 );
@@ -170,10 +158,9 @@ impl MemoryScope {
     /// Ranking bucket: lower sorts first (FR-024, D3).
     pub fn bucket(&self) -> i64 {
         match self {
-            MemoryScope::Task => 0,
+            MemoryScope::Session => 0,
             MemoryScope::Branch => 1,
             MemoryScope::Project => 2,
-            MemoryScope::Session => 3,
         }
     }
 }
@@ -196,92 +183,6 @@ text_enum!(
         PreCompact => "pre_compact",
         SessionEnd => "session_end",
         Recovered => "recovered",
-    }
-);
-
-text_enum!(
-    /// Entities the outbox can carry. There is deliberately no observation
-    /// variant: raw observations never sync (FR-055, D9).
-    ///
-    /// Feature 003 adds exactly three (D66). Everything else it introduces —
-    /// evidence facts, verification runs, continuity checkpoints, reusable
-    /// patterns, pattern applications, task changes, criterion evidence — has
-    /// **no** variant here and no server table, which is what makes "it stays
-    /// local" a property of the schema rather than a promise (FR-503, I8).
-    OutboxEntityType, "outbox entity type", {
-        Project => "project",
-        Task => "task",
-        Session => "session",
-        Memory => "memory",
-        Handoff => "handoff",
-        MemoryRelation => "memory_relation",
-        TaskCriterion => "task_criterion",
-        TaskBlocker => "task_blocker",
-        // Feature 004's four (FR-528). Twelve names, not ten: the two relation
-        // types are here because both relations tables exist in server Postgres
-        // as well as locally, and a table on the server is reachable only through
-        // the outbox. A relation also names *two* rows and belongs to neither, so
-        // unlike an applicability fact — which rides inside its knowledge row's
-        // payload — it has nowhere else to travel.
-        //
-        // `project_traits` and `writer_identity` are deliberately absent, and
-        // that absence is what makes "they stay local" a property of the schema
-        // rather than a promise (FR-438, FR-503).
-        PersonalKnowledge => "personal_knowledge",
-        PersonalKnowledgeRelation => "personal_knowledge_relation",
-        TeamKnowledge => "team_knowledge",
-        TeamKnowledgeRelation => "team_knowledge_relation",
-    }
-);
-
-text_enum!(
-    OutboxOperation, "outbox operation", {
-        Upsert => "upsert",
-        Delete => "delete",
-    }
-);
-
-text_enum!(
-    /// `blocked` is Feature 003's addition and is deliberately **not** terminal
-    /// (D81, FR-418): the server refused the work for lack of a capability, not
-    /// because of its content. It is excluded from `claim` until the server's
-    /// capability changes, then returns to `pending` and delivers exactly once
-    /// under its original idempotency key. `failed` keeps its meaning — the
-    /// content itself was refused, permanently.
-    OutboxState, "outbox state", {
-        Pending => "pending",
-        InFlight => "in_flight",
-        Delivered => "delivered",
-        Failed => "failed",
-        Blocked => "blocked",
-    }
-);
-
-impl OutboxState {
-    /// Whether a drainer may take this row.
-    ///
-    /// `blocked` is excluded here and by an explicit predicate in the claim
-    /// query, so a capability-refused row is never retried against a server
-    /// known to lack the capability (FR-418).
-    pub fn is_claimable(&self) -> bool {
-        matches!(self, OutboxState::Pending | OutboxState::InFlight)
-    }
-
-    /// Whether the row will never move again.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, OutboxState::Delivered | OutboxState::Failed)
-    }
-}
-
-text_enum!(
-    /// Why the server refused a queued item for lack of capability (D81).
-    ///
-    /// Distinct from a refusal of the **content**, which stays permanently
-    /// `failed`. This is what a later capability change is compared against.
-    BlockedReason, "blocked reason", {
-        UnknownEntityType => "unknown_entity_type",
-        UnknownField => "unknown_field",
-        SchemaOlder => "schema_older",
     }
 );
 
@@ -320,8 +221,7 @@ text_enum!(
     /// distinction.
     VerificationAuthority, "verification authority", {
         /// A deterministic check this machine ran over `collector = cairn`
-        /// evidence. The only authority a task criterion or a cross-project
-        /// promotion accepts (FR-484, FR-396).
+        /// evidence. The authority accepted for cross-project promotion.
         Cairn => "cairn",
         /// The memory is verified, and every run that established it consulted
         /// only agent-attested evidence. Useful, labelled, and visibly weaker.
@@ -585,57 +485,6 @@ impl Reconciliation {
 }
 
 text_enum!(
-    /// The **work** state a session asserts about an acceptance criterion.
-    /// Independent of [`CriterionVerification`] (FR-482).
-    CriterionState, "criterion state", {
-        Pending => "pending",
-        Satisfied => "satisfied",
-        Blocked => "blocked",
-        Waived => "waived",
-    }
-);
-
-impl CriterionState {
-    /// Admission order for Level 0's bounded detail tier: what an agent must
-    /// act on first (`contracts/continuity-context.md` §Criterion action
-    /// order). Ties break by ascending ordinal, which the caller applies.
-    ///
-    /// `satisfied` sorts by whether it is verified, so the caller passes that
-    /// in rather than this reading two axes at once.
-    pub fn action_rank(&self, verified: bool) -> i64 {
-        match self {
-            CriterionState::Blocked => 0,
-            CriterionState::Satisfied if !verified => 1,
-            CriterionState::Pending => 2,
-            CriterionState::Satisfied => 3,
-            CriterionState::Waived => 4,
-        }
-    }
-}
-
-text_enum!(
-    /// What **evidence** establishes about a criterion. Independent of
-    /// [`CriterionState`]: `satisfied` + `unverified` is a normal, separately
-    /// reported combination — the honest description of "the agent says it is
-    /// done and nothing has checked" (FR-483).
-    CriterionVerification, "criterion verification", {
-        Unverified => "unverified",
-        Verified => "verified",
-        Failed => "failed",
-    }
-);
-
-text_enum!(
-    /// A blocker's only transition is `open → cleared`, and it is terminal:
-    /// reopening creates a new blocker, so "who said this was blocked and who
-    /// said it was not" stays answerable (FR-485).
-    BlockerState, "blocker state", {
-        Open => "open",
-        Cleared => "cleared",
-    }
-);
-
-text_enum!(
     /// What boundary produced a continuity checkpoint (FR-425).
     ///
     /// There is deliberately no turn-checkpoint trigger: `agent_quiesced` is a
@@ -653,9 +502,8 @@ text_enum!(
     CheckpointState, "checkpoint state", {
         Current => "current",
         Diverged => "diverged",
-        /// The assumed task or worktree no longer exists. Every continuity
-        /// field that does not depend on the missing state is still delivered
-        /// (FR-435).
+        /// The assumed worktree no longer exists. Continuity fields that do
+        /// not depend on it are still delivered (FR-435).
         Unresolvable => "unresolvable",
     }
 );
@@ -665,7 +513,6 @@ text_enum!(
     DivergenceKind, "divergence kind", {
         Branch => "branch",
         Commit => "commit",
-        Task => "task",
         Files => "files",
     }
 );
@@ -760,7 +607,6 @@ text_enum!(
         ConflictWarning => "conflict_warning",
         PatternSignalMatch => "pattern_signal_match",
         CheckpointAssumption => "checkpoint_assumption",
-        TaskBinding => "task_binding",
     }
 );
 
@@ -774,35 +620,6 @@ text_enum!(
         Level2Only => "level_2_only",
         PinBudget => "pin_budget",
         CapReached => "cap_reached",
-    }
-);
-
-text_enum!(
-    /// One entry in a task's append-only local change history (FR-488).
-    TaskChangeKind, "task change kind", {
-        GoalChanged => "goal_changed",
-        TitleChanged => "title_changed",
-        StatusChanged => "status_changed",
-        CriterionAdded => "criterion_added",
-        CriterionText => "criterion_text",
-        CriterionState => "criterion_state",
-        CriterionVerification => "criterion_verification",
-        CriterionRemoved => "criterion_removed",
-        BlockerOpened => "blocker_opened",
-        BlockerCleared => "blocker_cleared",
-    }
-);
-
-text_enum!(
-    /// Derived on read, never stored as authority. Cairn never changes a task's
-    /// status on the basis of it — completing a task stays an explicit act
-    /// (FR-487).
-    CompletionReadiness, "completion readiness", {
-        NotReady => "not_ready",
-        /// Every non-waived criterion is satisfied and no blocker is open, but
-        /// at least one criterion is not verified.
-        ReadyUnverified => "ready_unverified",
-        Ready => "ready",
     }
 );
 
@@ -933,83 +750,10 @@ pub struct ApplicabilityFact {
     pub value: String,
 }
 
-/// A fact about a project's stack, derived from its working tree (D413, FR-437).
-///
-/// **Never synchronized** (FR-438). Traits are how a project answers "does this
-/// record apply to me", and the answer is a property of the machine's own
-/// checkout — there is no `OutboxEntityType` variant for them and no server
-/// table, which is what makes "it stays local" a fact about the schema rather
-/// than a promise (SC-469).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectTrait {
-    pub kind: ApplicabilityKind,
-    pub value: String,
-}
-
-/// One of the independent synchronization lanes (D426, FR-486).
-///
-/// Each variant carries the identity that makes its cursor key unique.
-/// `Personal` carries **both** the server instance and the owning account
-/// (D438, FR-568) rather than the account alone: personal knowledge is not
-/// server-bound the way team knowledge is, but a user identity *is* per-server,
-/// so the same human on two servers is two different accounts. Keying on both
-/// is what stops those two identities from merging into one namespace.
-///
-/// `Patterns` carries the same pair, and for the same reason. A server-backed
-/// pattern is a personal-domain record owned by one account (FR-708c, FR-708d),
-/// so its lane is partitioned exactly as the personal lane is. It is a fourth
-/// *lane*, not a fourth *domain*: the lane names where a feed is read from and
-/// how far it has been read, and patterns have their own table, their own
-/// cursor and their own tombstones, which is precisely what a separate lane
-/// expresses. Folding them into `Personal` would put two feeds behind one
-/// cursor, so a page that landed for one would advance the other past a page it
-/// never read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SyncNamespace {
-    Project(Uuid),
-    /// `(server_instance_id, user_id)`.
-    Personal(Uuid, Uuid),
-    Team(Uuid),
-    /// `(server_instance_id, owner_user_id)` — the owner's server-held patterns.
-    Patterns(Uuid, Uuid),
-}
-
-impl SyncNamespace {
-    /// The cursor key. Stable, and the only thing that partitions one lane from
-    /// another.
-    pub fn key(&self) -> String {
-        match self {
-            SyncNamespace::Project(project) => format!("project:{project}"),
-            SyncNamespace::Personal(instance, user) => format!("personal:{instance}:{user}"),
-            SyncNamespace::Team(instance) => format!("team:{instance}"),
-            SyncNamespace::Patterns(instance, user) => format!("patterns:{instance}:{user}"),
-        }
-    }
-}
-
-/// A single local store's opaque, durable identity (D407, FR-490).
-///
-/// **Not a device registry entry.** It has no name, no lifecycle, no server row
-/// and nothing an operator administers — the brief explicitly does not want a
-/// Device subsystem, and API tokens remain the per-device credential. What this
-/// exists for is narrower: it joins the outbox idempotency-key input so that two
-/// stores producing byte-identical content are never mistaken for one write
-/// (FR-491). Without it, two devices of the same user emitting the same payload
-/// collide as a duplicate and one device's write is silently discarded.
-///
-/// The `writer_id` stamped on a record *does* cross the wire (FR-582); this
-/// registry row does not. What travels is the stamp, not the table that minted
-/// it (D448).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriterIdentity {
-    pub writer_id: Uuid,
-    pub created_at: DateTime<Utc>,
-}
-
 /// A tracked Git repository under Cairn.
 ///
 /// `id` and `git_common_dir` are local. `server_project_id` is the shared
-/// identity, assigned by the server at `cairn link` (FR-064, D14).
+/// identity, assigned by the server during `cairn setup`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: Uuid,
@@ -1023,19 +767,6 @@ pub struct Project {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Task {
-    pub id: Uuid,
-    pub project_id: Uuid,
-    pub title: String,
-    pub goal: String,
-    pub acceptance_criteria: Vec<String>,
-    pub status: TaskStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub deleted_at: Option<DateTime<Utc>>,
-}
-
 /// One agent working session.
 ///
 /// Identity is `id`, keyed to `agent_session_key`. The worktree is scope and
@@ -1044,7 +775,6 @@ pub struct Task {
 pub struct Session {
     pub id: Uuid,
     pub project_id: Uuid,
-    pub task_id: Option<Uuid>,
     pub user_id: Uuid,
     pub agent: String,
     pub branch: String,
@@ -1223,9 +953,10 @@ mod tests {
     }
 
     #[test]
-    fn scope_precedence_is_task_branch_project() {
-        assert!(MemoryScope::Task.bucket() < MemoryScope::Branch.bucket());
+    fn scope_precedence_is_session_branch_project() {
+        assert!(MemoryScope::Session.bucket() < MemoryScope::Branch.bucket());
         assert!(MemoryScope::Branch.bucket() < MemoryScope::Project.bucket());
+        assert!("task".parse::<MemoryScope>().is_err());
     }
 
     #[test]
@@ -1233,70 +964,6 @@ mod tests {
         // `Stop` is a turn boundary, not a handoff boundary (FR-032, D16).
         assert_eq!(HandoffTrigger::ALL.len(), 3);
         assert!(HandoffTrigger::from_str("stop").is_err());
-    }
-
-    #[test]
-    fn outbox_cannot_carry_observations() {
-        // Structural guarantee behind SC-010: no observation entity type exists.
-        assert!(OutboxEntityType::from_str("observation").is_err());
-        assert!(OutboxEntityType::from_str("observation_ref").is_err());
-
-        // Feature 003 keeps that guarantee and extends it (FR-503, I8). Every
-        // record below is local by design; giving one an entity type is what
-        // would quietly open a path to the server, so the absence is asserted
-        // rather than reviewed. Adding a variant fails this test until someone
-        // deliberately changes it.
-        for local_only in [
-            "evidence_fact",
-            "evidence_facts",
-            "memory_evidence_fact",
-            "verification_run",
-            "continuity_checkpoint",
-            "checkpoint",
-            "reusable_pattern",
-            "pattern",
-            "pattern_application",
-            "task_change",
-            "criterion_evidence",
-            "selection",
-        ] {
-            assert!(
-                OutboxEntityType::from_str(local_only).is_err(),
-                "{local_only} has an outbox entity type; it is local state and must not"
-            );
-        }
-
-        // The additions, feature by feature, and the count. One arriving
-        // unnoticed changes this number — which is the point of asserting it
-        // rather than only the names.
-        assert_eq!(OutboxEntityType::ALL.len(), 12);
-        // Feature 003's three (D66).
-        for added in ["memory_relation", "task_criterion", "task_blocker"] {
-            assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
-        }
-        // Feature 004's four (FR-528). The two relation types are here because
-        // both relations tables exist on the server as well as locally, and a
-        // relation belongs to neither of the two rows it names — so unlike an
-        // applicability fact it cannot travel inside a parent's payload.
-        for added in [
-            "personal_knowledge",
-            "personal_knowledge_relation",
-            "team_knowledge",
-            "team_knowledge_relation",
-        ] {
-            assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
-        }
-        // And the two Feature 004 records that must stay local, checked here
-        // rather than only in the block above, because their absence is the
-        // guarantee: a `project_traits` variant would make traits synchronizable
-        // (FR-438), and a `writer_identity` variant would put a store's own
-        // opaque registry on the wire (D448).
-        for local_only in ["project_traits", "writer_identity"] {
-            assert!(
-                OutboxEntityType::from_str(local_only).is_err(),
-                "{local_only} has an outbox entity type; it is local state and must not"
-            );
-        }
     }
 
     #[test]
@@ -1321,9 +988,6 @@ mod tests {
             VerifyResult,
             VerifyTrigger,
             Reconciliation,
-            CriterionState,
-            CriterionVerification,
-            BlockerState,
             CheckpointTrigger,
             CheckpointState,
             DivergenceKind,
@@ -1335,12 +999,7 @@ mod tests {
             ContextLevel,
             SelectionReason,
             OmissionReason,
-            TaskChangeKind,
-            CompletionReadiness,
             ContinuityMode,
-            BlockedReason,
-            OutboxEntityType,
-            OutboxState,
         );
     }
 
@@ -1352,17 +1011,6 @@ mod tests {
         assert!(MemoryState::from_str("verified").is_err());
         assert!(MemoryState::from_str("drifted").is_err());
         assert!(MemoryState::from_str("needs_recheck").is_err());
-    }
-
-    #[test]
-    fn blocked_is_recoverable_and_failed_is_not() {
-        // D81: a capability refusal is retained, not permanent. Getting this
-        // backwards is what stranded the work the fifth state exists to save.
-        assert!(!OutboxState::Blocked.is_terminal());
-        assert!(!OutboxState::Blocked.is_claimable());
-        assert!(OutboxState::Failed.is_terminal());
-        assert!(OutboxState::Pending.is_claimable());
-        assert!(OutboxState::Delivered.is_terminal());
     }
 
     #[test]
@@ -1420,19 +1068,6 @@ mod tests {
         assert_eq!(RemoteCairn.on_the_wire(), Cairn);
         assert_eq!(RemoteAttested.on_the_wire(), Attested);
         assert!(!Cairn.on_the_wire().is_imported());
-    }
-
-    #[test]
-    fn criterion_action_order_leads_with_what_blocks_progress() {
-        // `contracts/continuity-context.md` §Criterion action order.
-        let order = [
-            CriterionState::Blocked.action_rank(false),
-            CriterionState::Satisfied.action_rank(false),
-            CriterionState::Pending.action_rank(false),
-            CriterionState::Satisfied.action_rank(true),
-            CriterionState::Waived.action_rank(false),
-        ];
-        assert_eq!(order, [0, 1, 2, 3, 4], "{order:?}");
     }
 
     #[test]

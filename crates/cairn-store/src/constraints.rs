@@ -14,9 +14,7 @@
 //! in `migration.md` §Step 1.
 
 use crate::{Result, StoreError};
-use cairn_core::domain::{
-    Importance, MemoryState, OutboxState, VerificationAuthority, VerificationState,
-};
+use cairn_core::domain::{Importance, MemoryState, VerificationAuthority, VerificationState};
 
 /// The Feature 003 columns one write may set on a `memories` row.
 ///
@@ -128,19 +126,6 @@ pub fn check_supersession(state: &str, superseded_at: Option<&str>) -> Result<()
         return Err(refuse("superseded_at IS NULL OR state = 'superseded'"));
     }
     Ok(())
-}
-
-/// Enforce the `outbox.state` domain, including the fifth state.
-///
-/// The existing DDL `CHECK` still permits only the four original values, and
-/// extending it would mean recreating the table. A `blocked` row is stored with
-/// the state string and excluded from `claim` by an explicit predicate rather
-/// than by the constraint (data-model.md §7a).
-pub fn check_outbox_state(state: &str) -> Result<()> {
-    in_domain::<OutboxState>(
-        Some(state),
-        "outbox.state IN ('pending','in_flight','delivered','failed','blocked')",
-    )
 }
 
 #[cfg(test)]
@@ -313,15 +298,5 @@ mod tests {
             check_supersession("archived", None).is_err(),
             "unknown state accepted"
         );
-    }
-
-    #[test]
-    fn the_outbox_state_domain_includes_blocked_and_nothing_else() {
-        for good in ["pending", "in_flight", "delivered", "failed", "blocked"] {
-            check_outbox_state(good).unwrap_or_else(|e| panic!("{good}: {e}"));
-        }
-        for bad in ["queued", "retrying", "stuck", ""] {
-            assert!(check_outbox_state(bad).is_err(), "{bad} was accepted");
-        }
     }
 }

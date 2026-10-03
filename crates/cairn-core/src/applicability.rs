@@ -13,8 +13,8 @@
 //! (FR-578). Reading "closed vocabulary" as "this field cannot carry a project
 //! name" is exactly the mistake FR-579 exists to prevent.
 
-use crate::domain::{ApplicabilityFact, ApplicabilityKind, ProjectTrait};
-use std::collections::BTreeSet;
+#[cfg(test)]
+use crate::domain::ApplicabilityKind;
 
 /// Why an applicability value was refused.
 ///
@@ -59,82 +59,9 @@ pub fn normalize_applicability_value(value: &str) -> Result<String, Applicabilit
     }
 }
 
-/// Does `record` apply to a project with `traits`? (FR-436, D412)
-///
-/// **AND across kinds, OR within a kind.** A record naming both
-/// `language=rust` and `tool=docker` applies only to a project that is both. A
-/// record naming `language=rust` and `language=python` applies to a project
-/// that is either — two facts of one kind are alternatives, not a conjunction.
-///
-/// **No facts means universal** (FR-435). The empty set means "applies
-/// everywhere", not "applies nowhere", and that default is what keeps "remember
-/// this for me, everywhere" the simple case.
-pub fn applies(record: &[ApplicabilityFact], traits: &[ProjectTrait]) -> bool {
-    let kinds: BTreeSet<ApplicabilityKind> = record.iter().map(|f| f.kind).collect();
-    kinds.into_iter().all(|kind| {
-        record
-            .iter()
-            .filter(|f| f.kind == kind)
-            .any(|f| traits.iter().any(|t| t.kind == kind && t.value == f.value))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fact(kind: ApplicabilityKind, value: &str) -> ApplicabilityFact {
-        ApplicabilityFact {
-            kind,
-            value: value.to_string(),
-        }
-    }
-    fn trait_(kind: ApplicabilityKind, value: &str) -> ProjectTrait {
-        ProjectTrait {
-            kind,
-            value: value.to_string(),
-        }
-    }
-
-    /// The worked truth table from `contracts/global-memory.md` §4, row by row.
-    /// Project traits: `{language: rust, tool: cargo}`.
-    #[test]
-    fn the_match_predicate_matches_the_contracts_truth_table() {
-        use ApplicabilityKind::{Language, Tool};
-        let traits = [trait_(Language, "rust"), trait_(Tool, "cargo")];
-
-        // 1. No facts means universal (FR-435).
-        assert!(applies(&[], &traits));
-        // 2. The one matching `language` fact.
-        assert!(applies(&[fact(Language, "rust")], &traits));
-        // 3. A non-matching sole fact of its kind.
-        assert!(!applies(&[fact(Language, "python")], &traits));
-        // 4. OR within a kind: either alternative suffices.
-        assert!(applies(
-            &[fact(Language, "python"), fact(Language, "rust")],
-            &traits
-        ));
-        // 5. AND across kinds: both must be satisfied.
-        assert!(applies(
-            &[fact(Language, "rust"), fact(Tool, "cargo")],
-            &traits
-        ));
-        // 6. AND across kinds, one kind unsatisfied.
-        assert!(!applies(
-            &[fact(Language, "rust"), fact(Tool, "docker")],
-            &traits
-        ));
-    }
-
-    /// A project with no derivable traits admits only universal records
-    /// (SC-429). Asserted as a refusal, not only as an acceptance: the
-    /// interesting direction is that a kind-restricted record is *excluded*.
-    #[test]
-    fn a_project_with_no_traits_admits_only_universal_records() {
-        assert!(applies(&[], &[]));
-        assert!(!applies(&[fact(ApplicabilityKind::Language, "rust")], &[]));
-        assert!(!applies(&[fact(ApplicabilityKind::Tool, "cargo")], &[]));
-    }
 
     /// The vocabulary is exactly two members, and `topic` is not one of them
     /// (FR-569, D439). A third kind that could never be derived from a working

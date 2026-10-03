@@ -3,9 +3,8 @@
 # The local agent — `cairn` and `cairnd` — is NOT part of this stack. It runs
 # natively on the developer's machine and talks to this server over HTTPS.
 #
-#   cairn / cairnd  ──HTTPS──▶  cairn-server  ──▶  PostgreSQL
-#                                     ▲
-#                                cairn-web
+# browser / cairn / cairnd ──HTTPS──▶ nginx ──▶ cairn-web
+#                                           └──▶ cairn-server ──▶ PostgreSQL
 #
 # Copy .env.example to .env and edit it before starting.
 
@@ -31,7 +30,7 @@ services:
       - "5432"
 
   server:
-    image: ghcr.io/vellixia/cairn-server:${CAIRN_VERSION:-0.1.0-alpha.4}
+    image: ghcr.io/cunilab/cairn-server:${CAIRN_VERSION:-0.1.0-alpha.9}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -40,23 +39,23 @@ services:
       # The server applies its migrations on start; no separate step.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CAIRN_SERVER_ADDR: 0.0.0.0:8080
-      CAIRN_WEB_ORIGIN: ${CAIRN_WEB_ORIGIN:-http://127.0.0.1:3100}
+      CAIRN_WEB_ORIGIN: ${CAIRN_WEB_ORIGIN:-http://127.0.0.1:8080}
       # The operator's account, defined here rather than registered through the
-      # UI. Blank means seed nothing; the server re-applies the password on
-      # every start, so rotating it is an edit and a restart.
+      # UI. Blank means seed nothing. Values bootstrap a fresh database or one
+      # with no administrator; they do not replace a web-rotated password.
       CAIRN_ADMIN_EMAIL: ${CAIRN_ADMIN_EMAIL:-}
       CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:-}
       CAIRN_ADMIN_DISPLAY_NAME: ${CAIRN_ADMIN_DISPLAY_NAME:-Admin}
-    ports:
-      - "${CAIRN_SERVER_PORT:-8080}:8080"
+    expose:
+      - "8080"
 
   web:
-    image: ghcr.io/vellixia/cairn-web:${CAIRN_VERSION:-0.1.0-alpha.4}
+    image: ghcr.io/cunilab/cairn-web:${CAIRN_VERSION:-0.1.0-alpha.9}
     restart: unless-stopped
     depends_on:
       - server
-    ports:
-      - "${CAIRN_WEB_PORT:-3100}:3100"
+    expose:
+      - "3100"
     environment:
       # Where the browser should reach the API. Leave it empty behind a reverse
       # proxy that serves the UI at `/` and the API at `/api` on one hostname —
@@ -65,6 +64,21 @@ services:
       # example https://cairn-api.example.com. Read on every request, so
       # changing it is an edit and a restart, never a rebuild.
       CAIRN_API_ORIGIN: ${CAIRN_API_ORIGIN:-}
+
+  # Default browser topology. Nginx is the only public service: `/` goes to
+  # web and `/api` goes to server. For a split origin, do not publish this
+  # proxy; expose an HTTPS API separately, set CAIRN_API_ORIGIN on web, and set
+  # CAIRN_WEB_ORIGIN to that exact web origin.
+  proxy:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+      - web
+    ports:
+      - "${CAIRN_PORT:-8080}:8080"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
 
 volumes:
   cairn-postgres:

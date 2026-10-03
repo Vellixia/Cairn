@@ -10,7 +10,7 @@
 
 use crate::client;
 use crate::render;
-use cairn_core::wire::{ContextPayload, Request};
+use cairn_core::wire::Request;
 use cairn_core::CairnConfig;
 use std::time::{Duration, Instant};
 
@@ -360,12 +360,21 @@ pub async fn run(event: &str) {
         Ok(value) => {
             if delivers_context {
                 let (content_degraded, transport_ok) =
-                    deliver_context(agent, "SessionStart", &value);
+                    deliver_context(agent, "SessionStart", &value, &cwd, &key);
                 // The adapter reports the delivery outcome back, which is what
                 // establishes `context_at_session_open`. A session start that
                 // emitted nothing leaves the capability expected — the session
                 // started, and Cairn's context did not reach it (D19a).
-                report_context_delivery(agent, &cwd, &key, content_degraded, deadline).await;
+                if transport_ok {
+                    report_context_delivery(
+                        agent,
+                        &cwd,
+                        &key,
+                        content_degraded,
+                        deadline.saturating_sub(started.elapsed()),
+                    )
+                    .await;
+                }
                 // Feature 005's own report: what happened to the trace the
                 // server generated, if it generated one at all (§3, §6.2).
                 report_retrieval_outcome(&value, transport_ok, started, deadline).await;
@@ -377,7 +386,11 @@ pub async fn run(event: &str) {
                 // reduced context rather than waiting (FR-046, FR-195). No
                 // evidence is recorded, because nothing was delivered, and no
                 // retrieval trace is known to report against either.
-                emit_context(agent, "SessionStart", &reduced_context_notice(&e.message));
+                emit_context(
+                    agent,
+                    "SessionStart",
+                    &reduced_context_notice(&e.message, &cwd, &key),
+                );
             }
             log_drop(event, &e.message);
         }
@@ -429,7 +442,7 @@ fn deliver_prompt_time(
     match client::send_blocking(&request, deadline) {
         Ok(value) => {
             let (_content_degraded, transport_ok) =
-                deliver_context(agent, "UserPromptSubmit", &value);
+                deliver_context(agent, "UserPromptSubmit", &value, cwd, key);
             report_retrieval_outcome_blocking(&value, transport_ok, started, deadline);
         }
         Err(e) => {
@@ -439,7 +452,7 @@ fn deliver_prompt_time(
             emit_context(
                 agent,
                 "UserPromptSubmit",
-                &reduced_context_notice(&e.message),
+                &reduced_context_notice(&e.message, cwd, key),
             );
             log_drop("UserPromptSubmit", &e.message);
         }
@@ -471,9 +484,11 @@ fn deliver_context(
     agent: cairn_integrate::AgentId,
     hook_event: &str,
     value: &serde_json::Value,
+    cwd: &str,
+    key: &str,
 ) -> (bool, bool) {
-    match serde_json::from_value::<ContextPayload>(value.clone()) {
-        Ok(payload) => {
+    match render::context(value) {
+        Ok(mut text) => {
             // A restored checkpoint is rendered from the raw reply, not from
             // `ContextPayload`, which has no field for it -- so deserializing
             // first and rendering only that dropped the checkpoint on the floor.
@@ -488,9 +503,8 @@ fn deliver_context(
             //
             // It leads, for the reason `render::continuity` documents: a stale
             // next action acted on is worse than no next action at all.
-            let mut text = render::continuity(value);
-            text.push_str(&render::briefing(&payload));
-            let content_degraded = text.trim().is_empty();
+            let content_degraded = value["fresh_knowledge_unavailable"] == true
+                || value["degradation_level"] != "full";
 
             // §12.3: a briefing served from cache is labelled cached and
             // possibly stale, never presented as though it were fresh. An
@@ -510,9 +524,9 @@ fn deliver_context(
             (content_degraded, transport_ok)
         }
         Err(e) => {
-            let transport_ok =
-                emit_context(agent, hook_event, &reduced_context_notice(&e.to_string()));
-            (true, transport_ok)
+            let _ = emit_context(agent, hook_event, &reduced_context_notice(&e, cwd, key));
+            // The fallback reached the channel; selected knowledge did not.
+            (true, false)
         }
     }
 }
@@ -537,7 +551,9 @@ async fn report_context_delivery(
         agent_version: None,
         degraded: Some(degraded),
     };
-    let _ = client::send_oneway(&request, deadline).await;
+    if !deadline.is_zero() {
+        let _ = client::send_oneway(&request, deadline).await;
+    }
 }
 
 /// What actually happened to the transmission, in the vocabulary
@@ -552,7 +568,7 @@ fn transmission_outcome(
     started: Instant,
     deadline: Duration,
 ) -> (bool, Option<&'static str>) {
-    if transport_ok {
+    if transport_ok && started.elapsed() < deadline {
         (true, None)
     } else if started.elapsed() >= deadline {
         (false, Some("hook_transmission_deadline_exceeded"))
@@ -587,7 +603,10 @@ async fn report_retrieval_outcome(
         transmitted,
         failure_reason: failure_reason.map(str::to_string),
     };
-    let _ = client::send_oneway(&request, deadline).await;
+    let remaining = deadline.saturating_sub(started.elapsed());
+    if !remaining.is_zero() {
+        let _ = client::send_oneway(&request, remaining).await;
+    }
 }
 
 /// The same report, blocking, for `run_blocking`'s prompt-time path (SC-007).
@@ -610,7 +629,11 @@ fn report_retrieval_outcome_blocking(
         transmitted,
         failure_reason: failure_reason.map(str::to_string),
     };
-    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
+    let remaining = deadline.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return;
+    }
+    if let Err(e) = client::send_oneway_blocking(&request, remaining) {
         log_drop("UserPromptSubmit", &e.message);
     }
 }
@@ -623,10 +646,12 @@ fn context_deadline(config: &CairnConfig) -> Duration {
     Duration::from_millis(config.context_deadline_ms)
 }
 
-fn reduced_context_notice(reason: &str) -> String {
+fn reduced_context_notice(reason: &str, cwd: &str, key: &str) -> String {
+    let args = serde_json::json!({ "cwd": cwd, "agent_session_key": key });
     format!(
         "# Cairn context\n\n_Reduced context: Cairn could not deliver a briefing in time \
-         ({reason}). The session started anyway; run `cairn context` for the full briefing._\n"
+         ({reason}). The session started anyway; call the `cairn_context` MCP tool \
+         with `{args}` to retry._\n"
     )
 }
 
@@ -650,7 +675,7 @@ fn cached_context_notice() -> String {
 /// now, and the notice says which.
 fn unavailable_context_notice() -> String {
     "_Cairn could not reach the server this turn and has no cached briefing for this \
-     session and account; durable memory (task/branch/project memory, handoffs, \
+     session and account; durable memory (session/branch/project memory, handoffs, \
      patterns, personal notes, team guidance) is unavailable this turn. Only this \
      repository's own state is shown below._\n\n"
         .to_string()

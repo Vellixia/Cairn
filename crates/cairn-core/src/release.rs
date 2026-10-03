@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 /// The list, not `/releases/latest`: that endpoint excludes prereleases, so
 /// while Cairn has only ever published alphas it answers 404 and every client
 /// concludes there are no releases at all.
-pub const RELEASES_API: &str = "https://api.github.com/repos/Vellixia/Cairn/releases?per_page=20";
+pub const RELEASES_API: &str = "https://api.github.com/repos/cunilab/Cairn/releases?per_page=20";
 /// Where a human should be sent to read about one.
-pub const RELEASES_PAGE: &str = "https://github.com/Vellixia/Cairn/releases";
+pub const RELEASES_PAGE: &str = "https://github.com/cunilab/Cairn/releases";
 
 /// A published release, reduced to what an updater needs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -101,7 +101,7 @@ pub fn archive_name(version: &str, target: &str) -> String {
 
 /// A release asset's download URL.
 pub fn asset_url(tag: &str, file: &str) -> String {
-    format!("https://github.com/Vellixia/Cairn/releases/download/{tag}/{file}")
+    format!("https://github.com/cunilab/Cairn/releases/download/{tag}/{file}")
 }
 
 /// Find one archive's expected digest in a `SHA256SUMS` file.

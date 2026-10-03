@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 pub fn uuid(row: &SqliteRow, col: &str) -> Result<Uuid> {
     let raw: String = row.try_get(col)?;
-    Uuid::parse_str(&raw).map_err(|e| StoreError::Corrupt(format!("{col}: {e}")))
+    Uuid::parse_str(&raw).map_err(|e| StoreError::Corrupt(format!("{col} `{raw}`: {e}")))
 }
 
 pub fn opt_uuid(row: &SqliteRow, col: &str) -> Result<Option<Uuid>> {
@@ -24,7 +24,7 @@ pub fn opt_uuid(row: &SqliteRow, col: &str) -> Result<Option<Uuid>> {
         Some(s) if s.is_empty() => Ok(None),
         Some(s) => Uuid::parse_str(&s)
             .map(Some)
-            .map_err(|e| StoreError::Corrupt(format!("{col}: {e}"))),
+            .map_err(|e| StoreError::Corrupt(format!("{col} `{s}`: {e}"))),
     }
 }
 
@@ -105,25 +105,10 @@ pub fn project(row: &SqliteRow) -> Result<Project> {
     })
 }
 
-pub fn task(row: &SqliteRow) -> Result<Task> {
-    Ok(Task {
-        id: uuid(row, "id")?,
-        project_id: uuid(row, "project_id")?,
-        title: row.try_get("title")?,
-        goal: row.try_get("goal")?,
-        acceptance_criteria: json_field(row, "acceptance_criteria")?,
-        status: enum_val(row, "status")?,
-        created_at: ts(row, "created_at")?,
-        updated_at: ts(row, "updated_at")?,
-        deleted_at: opt_ts(row, "deleted_at")?,
-    })
-}
-
 pub fn session(row: &SqliteRow) -> Result<Session> {
     Ok(Session {
         id: uuid(row, "id")?,
         project_id: uuid(row, "project_id")?,
-        task_id: opt_uuid(row, "task_id")?,
         user_id: uuid(row, "user_id")?,
         agent: row.try_get("agent")?,
         branch: row.try_get("branch")?,
