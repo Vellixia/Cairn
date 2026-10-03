@@ -427,7 +427,7 @@ jobs:
           name="cairn-v${VERSION}-x86_64-unknown-linux-gnu"
           tmp=$(mktemp -d)
           tar -C "$tmp" -xzf "dist/$name.tar.gz"
-          scripts/release-archive-journey.sh "$tmp/$name"
+          bash scripts/release-archive-journey.sh "$tmp/$name"
 
   # --------------------------------------------------------------------------
   # Server and web images, multi-platform, pushed to GHCR with the release
