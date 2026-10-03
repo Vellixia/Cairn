@@ -30,7 +30,7 @@ services:
       - "5432"
 
   server:
-    image: ghcr.io/vellixia/cairn-server:${CAIRN_VERSION:-0.1.0-alpha.9}
+    image: ghcr.io/cunilab/cairn-server:${CAIRN_VERSION:-0.1.0-alpha.9}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -50,7 +50,7 @@ services:
       - "8080"
 
   web:
-    image: ghcr.io/vellixia/cairn-web:${CAIRN_VERSION:-0.1.0-alpha.9}
+    image: ghcr.io/cunilab/cairn-web:${CAIRN_VERSION:-0.1.0-alpha.9}
     restart: unless-stopped
     depends_on:
       - server

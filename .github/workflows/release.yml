@@ -473,12 +473,12 @@ jobs:
           provenance: mode=max
           sbom: true
           tags: |
-            ghcr.io/vellixia/cairn-${{ matrix.component }}:candidate-${{ github.run_id }}
+            ghcr.io/cunilab/cairn-${{ matrix.component }}:candidate-${{ github.run_id }}
           labels: |
             org.opencontainers.image.title=cairn-${{ matrix.component }}
             org.opencontainers.image.version=${{ needs.verify.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=https://github.com/Vellixia/Cairn
+            org.opencontainers.image.source=https://github.com/cunilab/Cairn
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
@@ -486,7 +486,7 @@ jobs:
       - name: Attest the image
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/vellixia/cairn-${{ matrix.component }}
+          subject-name: ghcr.io/cunilab/cairn-${{ matrix.component }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 

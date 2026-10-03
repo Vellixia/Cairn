@@ -35,7 +35,7 @@ pub const TARGET_APPS: &[&str] = &["claude", "codex", "opencode"];
 pub const DISTRIBUTABLE: &[ResourceKind] = &[ResourceKind::Mcp, ResourceKind::Skill];
 
 /// The repository CC Switch fetches the Skill from.
-pub const SKILL_REPO: &str = "Vellixia/Cairn";
+pub const SKILL_REPO: &str = "cunilab/Cairn";
 /// The path inside that repository.
 pub const SKILL_DIRECTORY: &str = "skills/cairn";
 
