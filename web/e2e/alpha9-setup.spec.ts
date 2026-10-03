@@ -51,7 +51,7 @@ test("pending project submission cannot duplicate and outage retains input", asy
   await page.getByLabel("Repository remote", { exact: true }).fill("https://github.com/example/retained.git");
   await page.getByRole("button", { name: "Create project", exact: true }).click();
   await expect(page.getByRole("button", { name: "Creating…", exact: true })).toBeDisabled();
-  expect(submissions).toBe(1);
+  await expect.poll(() => submissions).toBe(1);
   release();
   await expect(page.getByRole("alert").filter({ hasText: "Server unavailable" })).toBeVisible();
   await expect(page.getByLabel("Project name", { exact: true })).toHaveValue("Keep my input");

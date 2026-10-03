@@ -11,7 +11,7 @@ They are not measured throughput, durability, backup, or capacity guarantees.
 | Event spool | 50,000 rows or 256MiB payloads | Whichever binds first. Oldest capture rows are dropped and counted; boundary rows are protected. When only protected rows remain, new work is refused and counted rather than silently dropped. This is not a total disk limit. |
 | Delivery claim / HTTP request | 60s / 20s | Expired claims are reclaimable; retry still relies on server idempotency. |
 | Retrieval traces | 90 days; sweeps of 500 | Trace expiry does not delete knowledge, evidence, or receipts. |
-| Logical export | 32MiB serialized JSON | Larger exports are refused before a response; this is not a database-size limit. Import requires the same bounded request body. |
+| Logical export / import request | 32MiB serialized JSON / 33MiB HTTP body | Larger exports are refused before a response; the extra 1MiB lets the import envelope carry a maximum-sized export. This is not a database-size limit. |
 | Local snapshot copy/hash | 64KiB I/O chunks | Source SQLite bytes are copied and hashed without loading the whole file; sufficient free disk is still required for the private copy and backup. |
 
 No automatic retention/deletion policy exists for accepted knowledge, evidence, backups,

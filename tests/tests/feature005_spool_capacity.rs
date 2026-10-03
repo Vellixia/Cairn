@@ -357,7 +357,62 @@ fn marker() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Shedding is oldest-first, several at a time, and every shed is counted
+// 1. Empty and near-boundary event spools report the rows they actually hold
+// ---------------------------------------------------------------------------
+
+/// An empty event spool is not saturated, and one row below its bound still
+/// accepts work without shedding.
+///
+/// The full, overflow, and refusal paths below establish what happens after a
+/// spool reaches its limit. The alpha.9 operating-limits gate also requires
+/// the two states before that point: an empty store must not report stale work,
+/// and a nearly full store must not turn healthy queued capture into loss.
+#[tokio::test]
+async fn an_event_spool_reports_zero_and_near_boundary_occupancy() {
+    let f = fixture().await;
+    let tight = SpoolCapacity {
+        max_events: 3,
+        max_bytes: i64::MAX,
+    };
+
+    let empty = spool::event_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
+        .await
+        .expect("empty event breakdown");
+    assert_eq!(empty.undelivered(), 0, "an empty spool reports queued work");
+    assert_eq!(empty.bytes, 0, "an empty spool reports payload bytes");
+    assert!(!empty.saturated, "an empty spool is saturated");
+    assert_eq!(empty.oldest_at, None, "an empty spool has an oldest row");
+
+    for _ in 0..2 {
+        let admission = f.spool(tight, capture_event(f.session, &marker())).await;
+        assert!(
+            matches!(
+                admission,
+                EventAdmission::Spooled {
+                    overflow_dropped: 0,
+                    ..
+                }
+            ),
+            "a one-below-boundary capture was not admitted unchanged: {admission:?}"
+        );
+    }
+    let near = spool::event_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
+        .await
+        .expect("near-boundary event breakdown");
+    assert_eq!(near.undelivered(), 2, "near-boundary event depth is wrong");
+    assert!(near.bytes > 0, "queued events report no payload bytes");
+    assert!(
+        !near.saturated,
+        "a one-below-boundary event spool is saturated"
+    );
+    assert!(
+        near.oldest_at.is_some(),
+        "queued events have no oldest timestamp"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. Shedding is oldest-first, several at a time, and every shed is counted
 // ---------------------------------------------------------------------------
 
 /// The byte bound forces three rows out at once, and it is the three oldest.
@@ -452,7 +507,7 @@ async fn overflow_sheds_the_oldest_rows_first_and_counts_every_one_of_them() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. A boundary row is never shed, not even the oldest one
+// 3. A boundary row is never shed, not even the oldest one
 // ---------------------------------------------------------------------------
 
 /// The oldest row in the spool is a session open, and the policy walks past it.
@@ -538,7 +593,7 @@ async fn a_boundary_row_is_never_shed_even_when_it_is_the_oldest_row_in_the_spoo
 }
 
 // ---------------------------------------------------------------------------
-// 3. A fully boundary-class spool saturates, and corrupts nothing
+// 4. A fully boundary-class spool saturates, and corrupts nothing
 // ---------------------------------------------------------------------------
 
 /// At the bound with nothing left to shed, new work is refused and the queue is
@@ -708,7 +763,7 @@ async fn a_refusal_puts_back_every_row_it_shed_before_it_discovered_it_had_to_re
 }
 
 // ---------------------------------------------------------------------------
-// 4. A drop record is a count and nothing else
+// 5. A drop record is a count and nothing else
 // ---------------------------------------------------------------------------
 
 /// Neither kind of drop record carries any part of what it dropped.
@@ -825,7 +880,7 @@ async fn a_drop_record_carries_counts_and_nothing_of_what_was_dropped() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. The command spool refuses; it never sheds
+// 6. The command spool refuses; it never sheds
 // ---------------------------------------------------------------------------
 
 fn command_payload() -> serde_json::Value {
@@ -850,6 +905,64 @@ async fn spool_one(f: &Fixture, capacity: SpoolCapacity, scope: CommandScope) ->
     )
     .await
     .expect("spool_command")
+}
+
+/// An empty command spool is not saturated, and one command below its bound
+/// remains an ordinary accepted command.
+///
+/// Commands cannot shed, so a stale nonzero depth or an early saturation here
+/// would turn an available command slot into a visible refusal. This is the
+/// command-side zero/near-boundary counterpart to the event health check.
+#[tokio::test]
+async fn a_command_spool_reports_zero_and_near_boundary_occupancy() {
+    let f = fixture().await;
+    let tight = SpoolCapacity {
+        max_events: 3,
+        max_bytes: i64::MAX,
+    };
+    let scope = CommandScope::Session(f.session);
+
+    let empty = spool::command_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
+        .await
+        .expect("empty command breakdown");
+    assert_eq!(
+        empty.undelivered(),
+        0,
+        "an empty command spool reports work"
+    );
+    assert_eq!(empty.bytes, 0, "command payloads are not byte-bounded");
+    assert!(!empty.saturated, "an empty command spool is saturated");
+    assert_eq!(
+        empty.oldest_at, None,
+        "an empty command spool has an oldest row"
+    );
+
+    for expected_seq in 1..=2 {
+        match spool_one(&f, tight, scope).await {
+            CommandAdmission::Spooled(command) => assert_eq!(
+                command.command_seq, expected_seq,
+                "near-boundary command ordinal is wrong"
+            ),
+            other => panic!("a one-below-boundary command was refused: {other:?}"),
+        }
+    }
+    let near = spool::command_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
+        .await
+        .expect("near-boundary command breakdown");
+    assert_eq!(
+        near.undelivered(),
+        2,
+        "near-boundary command depth is wrong"
+    );
+    assert_eq!(near.bytes, 0, "command payloads are not byte-bounded");
+    assert!(
+        !near.saturated,
+        "a one-below-boundary command spool is saturated"
+    );
+    assert!(
+        near.oldest_at.is_some(),
+        "queued commands have no oldest timestamp"
+    );
 }
 
 /// At its bound the command spool answers `Saturated` and drops nothing.

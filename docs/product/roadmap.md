@@ -268,7 +268,7 @@ Evidence: [tagged changelog — 0.1.0-alpha.8](https://github.com/Vellixia/Cairn
 
 **Goal:** one pinned candidate supports browser → authorized project → setup → accepted event → inspectable memory → later recall, with honest recovery and release evidence.
 
-**Implementation state:** `codex/alpha9-main` now carries alpha.8-derived source and the recovery work in the main worktree. The branch has not been committed or tagged; the statuses below remain in progress until candidate gates pass:
+**Implementation state:** `codex/alpha9-main` carries committed alpha.8-derived source and recovery work in the main worktree. The release has not been tagged; the statuses below remain in progress until candidate gates pass:
 
 - [~] Recover hook failures through current MCP tools with exact caller key/directory; never imply registration succeeded when it did not.
 - [~] Render actual server budget/section envelopes, reduced/cached/empty replies, and outages; reject malformed populated sections.
